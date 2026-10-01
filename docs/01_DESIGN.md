@@ -1,0 +1,960 @@
+# Podium DE — 설계
+
+## 1. 개요
+
+### 1.1 목적
+
+게임 프로젝트에 시즌 기반 랭킹과 정산, 보상 전달을 제공하는 범용 랭킹 플랫폼.
+
+- 스코어는 의미 없는 정수로 취급한다. 타임어택, 획득 점수, 포인트 등은 랭킹 정의(갱신 규칙, 정렬 방향, 범위)의 조합으로 표현한다.
+- 랭킹 서버는 게임 도메인을 알지 않는다. 보상은 `reward_code`만 판정하며, 실제 지급은 게임 서버가 담당한다.
+
+### 1.2 배포 모델
+
+**싱글테넌트, 프로젝트별 독립 배포 (Dedicated Edition).**
+
+- 설치본 하나가 게임 프로젝트 하나를 담당한다.
+- 테넌트 식별자(`project_id` 등)는 두지 않는다.
+- 설치본 내부에는 여러 랭킹이 존재할 수 있으며, 각 랭킹은 독립된 시즌 일정을 갖는다.
+
+### 1.3 기술 스택
+
+| 구성 | 버전 | 역할 |
+| --- | --- | --- |
+| Node.js | 22 LTS | API, 스케줄러 |
+| MySQL | 8.4 | 원장. 모든 DB 로직은 Stored Procedure |
+| Redis | 7.4 | 실시간 랭킹 (MySQL의 투영) |
+
+### 1.4 명명 규칙
+
+| 대상 | 표기 |
+| --- | --- |
+| 제품명 | Podium DE |
+| DB 스키마 | `podium_de` |
+| 저장소, 패키지, 이미지, 호스트명 | `podium-de` |
+
+### 1.5 핵심 원칙
+
+1. **MySQL이 원장이고 Redis는 투영이다.** Redis 값은 MySQL 행 하나와 랭킹 정의만으로 결정적으로 계산된다. 따라서 Redis는 언제든 재구축할 수 있다.
+2. **상태 전이는 시각과 관측에 묶는다.** 마감, 정산 시작, 검수 종료는 잡 실행 여부가 아니라 시각으로 결정한다. 각 단계는 실제 상태를 관측해 판단하고 멱등하게 실행한다.
+3. **유저 행동에 의존하는 진행 조건을 두지 않는다.** 데이터 이동과 정리는 시스템이 스스로 진행시킬 수 있는 조건만 사용한다.
+4. **자동으로 해결되지 않으면 알린다.** 재시도로 풀리지 않는 상태는 멈추고 알림을 보낸다. 파괴적 작업은 검증 실패 시 실행하지 않는다.
+5. **운영 테이블에서 무거운 작업을 하지 않는다.** 운영 테이블의 DDL은 메타데이터 수준으로 제한하고, 대량 읽기·쓰기는 분리된 테이블에서 수행한다.
+
+---
+
+## 2. 랭킹 정의
+
+관리자가 등록한다.
+
+### 2.1 ranking_def
+
+```sql
+CREATE TABLE ranking_def (
+  ranking_id          INT UNSIGNED     NOT NULL,
+  ranking_code        VARCHAR(64)      NOT NULL,
+  ranking_name        VARCHAR(128)     NOT NULL,
+  status              ENUM('ACTIVE','PAUSED','ENDED') NOT NULL, -- ACTIVE가 아니면 제출 거부
+
+  -- 순위 규칙 (등록 후 불변)
+  update_rule         ENUM('BEST','SUM','LATEST') NOT NULL,
+  sort_order          ENUM('DESC','ASC') NOT NULL,
+  score_max           BIGINT UNSIGNED  NOT NULL,
+  time_unit           ENUM('MS','SEC','MIN','DAY') NOT NULL,
+  time_bits           TINYINT UNSIGNED NOT NULL,     -- 등록 시 계산
+
+  -- 일정
+  timezone            VARCHAR(64)      NOT NULL,     -- 'Asia/Seoul'
+  start_at            DATETIME(3)      NOT NULL,     -- UTC
+  end_at              DATETIME(3)      NULL,         -- NULL = 영구 랭킹
+  cycle_type          ENUM('NONE','DAILY','WEEKLY','MONTHLY','DAYS') NOT NULL,
+  cycle_value         INT UNSIGNED     NULL,         -- DAYS일 때 일수
+  settle_delay        INT UNSIGNED     NOT NULL,     -- 종료 → 정산 시작 유예 (초)
+  wait_period         INT UNSIGNED     NOT NULL DEFAULT 0, -- 종료 → 다음 시즌 시작 (초)
+  review_period       INT UNSIGNED     NOT NULL,     -- 검수 기간 (초)
+
+  -- 보관
+  hall_size           SMALLINT UNSIGNED NOT NULL DEFAULT 100,
+  history_retention   INT UNSIGNED     NOT NULL,     -- 백업 보관 기간 (일)
+
+  -- 하드 검증
+  max_delta           BIGINT UNSIGNED  NULL,         -- SUM 1회 최대 증분
+  max_submit_per_min  INT UNSIGNED     NULL,
+
+  -- 어뷰징 탐지
+  suspicion_config    JSON             NULL,         -- 규칙별 가중치, 보류 임계치
+
+  created_at          DATETIME(3)      NOT NULL,
+  updated_at          DATETIME(3)      NOT NULL,
+  PRIMARY KEY (ranking_id),
+  UNIQUE KEY uk_code (ranking_code)
+);
+```
+
+### 2.2 순위 규칙
+
+| 필드 | 의미 |
+| --- | --- |
+| `update_rule` | 값을 어떻게 갱신하는가 |
+| `sort_order` | 큰 값이 위인가(DESC), 작은 값이 위인가(ASC) |
+| `score_max` | 허용 범위이자 비트 예산의 기준 |
+| `time_unit` | 동점 처리(먼저 달성한 쪽이 위)에 쓰는 시간 단위 |
+
+순위 규칙은 등록 후 변경할 수 없다. 변경이 필요하면 새 랭킹을 등록한다.
+
+### 2.3 갱신 규칙
+
+| 규칙 | 게임 서버 입력 | 계산 | Redis 반영 | 비고 |
+| --- | --- | --- | --- | --- |
+| BEST | 이번 기록 | `GREATEST(score, 입력)` | `ZADD GT` | 최고 기록 |
+| SUM | 부호 있는 증분 | `GREATEST(score + 입력, 0)` | version Lua | 멱등 키 필수 |
+| LATEST | 현재 값 + 소스 시퀀스 | 시퀀스가 클 때만 덮어씀 | version Lua | 2차 범위 |
+
+- 값이 실제로 바뀌지 않으면 `version`, `achieved_at`, `updated_at`을 갱신하지 않는다. (예: 0점에서 음수 증분)
+- SUM 결과가 `score_max`를 넘으면 거부한다. 거부 사유는 제출 로그에 남긴다.
+- SUM 첫 제출의 증분이 0 이하면 entry 행을 만들지 않고 로그에만 남긴다. 0점 유저가 참가자 수와 PERCENT 구간 계산에 섞이지 않게 한다.
+- LATEST는 enum에 정의하되, 구현 전까지 등록을 거부한다.
+
+| 랭킹 예시 | 규칙 | 정렬 |
+| --- | --- | --- |
+| 스테이지 최고 점수 | BEST | DESC |
+| 타임어택 최단 기록 | BEST | ASC |
+| 이벤트 포인트, 누적 처치 수 | SUM | DESC |
+| PvP 트로피, 레이팅 | SUM (음수 증분) | DESC |
+| 전투력, 레벨 | LATEST | DESC |
+
+### 2.4 비트 예산
+
+Redis ZSET score(double)는 2^53까지 정수를 정확히 표현한다. 이를 점수 비트와 시간 비트로 나눈다.
+
+```text
+bits(score_max) + time_bits ≤ 53
+time_bits = bits(최대 시즌 길이 / time_unit)
+```
+
+- MONTHLY는 31일 기준으로 계산한다.
+- 영구 랭킹은 최소 30년을 커버하도록 계산한다.
+- 예산을 초과하면 등록을 거부한다.
+
+| time_unit | 커버 기간 | time_bits | score_max 상한 |
+| --- | --- | --- | --- |
+| SEC | 1년 | 25 | 약 2.68억 |
+| SEC | 3개월 | 23 | 약 10.7억 |
+| MS | 1개월 | 32 | 약 209만 |
+| MIN | 약 63년 | 25 | 약 2.68억 |
+| DAY | 약 89년 | 15 | 약 2,750억 |
+
+스코어는 정수만 받는다. 소수 값은 게임 서버가 스케일을 곱해 정수로 보낸다.
+
+### 2.5 랭킹 유형
+
+| 조건 | 유형 | 정산 / 보상 / 아카이브 |
+| --- | --- | --- |
+| `cycle_type ≠ NONE` | 시즌 랭킹 | 있음 |
+| `cycle_type = NONE`, `end_at` 있음 | 이벤트 랭킹 (단일 시즌) | 있음 |
+| `cycle_type = NONE`, `end_at` NULL | 영구 랭킹 | 없음 |
+
+### 2.6 보상 구간
+
+```sql
+CREATE TABLE ranking_reward_tier (
+  ranking_id   INT UNSIGNED      NOT NULL,
+  tier_no      SMALLINT UNSIGNED NOT NULL,
+  range_type   ENUM('RANK','PERCENT') NOT NULL,
+  range_from   INT UNSIGNED      NOT NULL,
+  range_to     INT UNSIGNED      NOT NULL,
+  reward_code  VARCHAR(64)       NOT NULL,
+  PRIMARY KEY (ranking_id, tier_no)
+);
+```
+
+- `reward_code`는 게임 서버가 해석하는 코드이며, 랭킹 서버는 의미를 알지 않는다.
+- 정산 시점에 적용된 구간은 시즌에 고정한다.
+- PERCENT 구간은 제재 유저를 제외한 참가자 수 기준으로 계산한다.
+
+### 2.7 등록 검증
+
+- 비트 예산 (2.4)
+- 단일 시즌 랭킹: `wait_period`는 의미 없음 (보상은 일괄 전달)
+- 시즌 랭킹: 시즌 길이 > `settle_delay`
+- 구현되지 않은 갱신 규칙 거부
+
+---
+
+## 3. 시즌
+
+### 3.1 ranking_season
+
+스케줄러가 정의를 기준으로 자동 생성한다.
+
+```sql
+CREATE TABLE ranking_season (
+  ranking_id        INT UNSIGNED NOT NULL,
+  season_no         INT UNSIGNED NOT NULL,
+  start_at          DATETIME(3)  NOT NULL,
+  end_at            DATETIME(3)  NOT NULL,
+  settle_at         DATETIME(3)  NOT NULL,     -- end_at + settle_delay
+  review_until      DATETIME(3)  NULL,         -- 정산 결과 생성 후 확정
+  status            ENUM('SCHEDULED','OPEN','CLOSED','SETTLING','REVIEW',
+                         'FINALIZING','DELIVERING','SETTLED') NOT NULL,
+  review_hold       TINYINT(1)   NOT NULL DEFAULT 0,
+  participant_count INT UNSIGNED NULL,         -- 제재 제외 후 확정 인원
+  tier_snapshot     JSON         NULL,         -- 정산 시 적용된 보상 구간
+  settled_at        DATETIME(3)  NULL,
+  PRIMARY KEY (ranking_id, season_no)
+);
+```
+
+### 3.2 시즌 일정
+
+```text
+[시즌 N 기간] ── end_at ──[wait_period]── [시즌 N+1 기간] ...
+                    └─[settle_delay]─▶ 정산 시작 (다음 시즌과 병렬)
+```
+
+- 시간은 UTC로 저장하고, 경계 계산만 `timezone` 기준으로 한다.
+- 정산은 시즌 사이에 끼우지 않는다. 다음 시즌은 `end_at + wait_period`에 시작하고, 정산은 병렬로 진행된다.
+
+### 3.3 자동 생성
+
+- **등록 시:** `ranking_def` INSERT와 같은 트랜잭션에서 첫 시즌들을 생성한다.
+- **이후:** 스케줄러가 현재 시점부터 일정 주기 앞까지 시즌 행을 유지한다. `INSERT IGNORE`로 멱등하게 처리한다.
+- **시즌 행 생성 시:** 해당 `(ranking_id, season_no)` 파티션을 `ranking_entry`, `ranking_submit_log`, `ranking_result`에 추가한다.
+- **OPEN 전이 시:** Redis 센티넬(`:ready`)을 설정한다 (5.3).
+
+### 3.4 관리자 수정 범위
+
+| 시즌 상태 | 허용 |
+| --- | --- |
+| SCHEDULED | 자유 수정 |
+| OPEN | `end_at` 변경만. 과거 시각으로 변경 불가 |
+| CLOSED 이후 | 수정 불가 |
+
+`end_at` 변경 시 이후 SCHEDULED 시즌의 일정 재계산 여부는 정책으로 정한다.
+
+### 3.5 상태 흐름
+
+```text
+SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle_at + 확인──▶ SETTLING
+  ──▶ REVIEW ──review_until (보류 없음)──▶ FINALIZING ──▶ DELIVERING ──▶ SETTLED
+```
+
+| 상태 | 내용 |
+| --- | --- |
+| OPEN | 스코어 적재 |
+| CLOSED | 적재 차단 (시각 검사로 보장) |
+| SETTLING | entry 분리, 가순위 result 생성 |
+| REVIEW | 검수. 제재 반영 가능, 지급 없음 |
+| FINALIZING | 제재 제외, 순위 재부여, 보상 판정, hall 적재 |
+| DELIVERING | 게임 서버가 보상 목록 수신 및 ack |
+| SETTLED | 완료 |
+
+**쓰기 차단은 상태가 아니라 시각으로 한다.** SP가 `NOW(3)`이 `[start_at, end_at)` 안인지 직접 검사한다. 상태 전이 잡이 늦어도 마감은 정확하다.
+
+---
+
+## 4. 스코어 적재
+
+### 4.1 흐름
+
+```text
+게임 서버 ──x-api-key──▶ API  (memberId, value, seasonNo, requestId, meta?)
+  1. 제출 빈도 검사 (Redis)
+  2. SP_SUBMIT_SCORE
+       랭킹 상태 검사 (ACTIVE)
+       시즌 검사: seasonNo = 현재 OPEN 시즌 (시각 기준)
+       멱등 키 확인 (해당 시즌의 ranking_submit_log)
+       하드 검증 (범위, max_delta, score_max)
+       규칙 적용 upsert
+       결과 반환 (RESULT, season_no, season_start_at, score, achieved_at, version, replayed)
+  3. composite 계산 → Redis 반영 (실패해도 응답은 성공)
+```
+
+**시즌 번호는 필수다.** 게임 서버는 플레이 시작 시점의 시즌 번호를 기억해 제출 시 함께 보낸다.
+
+- 전달받은 시즌이 현재 OPEN 시즌과 다르면 `SEASON_MISMATCH`로 거부한다.
+- `wait_period = 0`이면 시즌 N 종료 직후 N+1이 바로 열린다. 시즌 번호가 없으면 시즌 N에서 시작한 플레이가 N+1에 반영된다. 시즌 번호 검사로 이를 막는다.
+- 과거 시즌 번호는 시각 검사에서 거부되므로 조작할 수 없다.
+
+| 결과 | 조건 |
+| --- | --- |
+| 성공 | 반영됨 (`replayed = 0`) |
+| 재전송 | 같은 `requestId`, 같은 내용 → 현재 entry 상태 반환 (`replayed = 1`) |
+| `RANKING_INACTIVE` | 랭킹 상태가 ACTIVE 아님 |
+| `SEASON_MISMATCH` | 시즌 불일치, 또는 재전송 시 해당 시즌 로그가 이미 정리됨 |
+| `IDEMPOTENCY_CONFLICT` | 같은 `requestId`, 다른 내용 |
+| 하드 검증 거부 | 범위 초과, `max_delta` 초과, SUM 결과 `score_max` 초과 |
+
+시즌 밖 제출과 `SEASON_MISMATCH`는 로그 없이 결과 코드만 반환한다. 하드 검증 거부는 로그에 `rejected`와 함께 기록하며, 같은 키로 재전송되면 같은 거부를 반환한다.
+
+- `achieved_at`은 MySQL 마스터의 `NOW(3)`으로 기록한다. Redis나 게임 서버 시각을 사용하지 않는다.
+- 앱은 커넥션마다 세션 `time_zone`을 `+00:00`으로 고정한다.
+
+### 4.2 ranking_entry
+
+```sql
+CREATE TABLE ranking_entry (
+  ranking_id   INT UNSIGNED    NOT NULL,
+  season_no    INT UNSIGNED    NOT NULL,
+  member_id    VARCHAR(64)     NOT NULL,
+  score        BIGINT UNSIGNED NOT NULL,
+  achieved_at  DATETIME(3)     NOT NULL,
+  version      INT UNSIGNED    NOT NULL DEFAULT 1,
+  source_seq   BIGINT UNSIGNED NULL,           -- LATEST 전용
+  updated_at   DATETIME(3)     NOT NULL,
+  PRIMARY KEY (ranking_id, season_no, member_id),
+  KEY ix_updated (ranking_id, season_no, updated_at)
+)
+PARTITION BY LIST COLUMNS (ranking_id, season_no) (
+  PARTITION p_init VALUES IN ((0, 0))   -- 사용하지 않는 초기 파티션
+  -- 시즌 생성 시 ADD PARTITION
+);
+```
+
+- 진행 중인 시즌의 데이터만 보관한다.
+- LIST 파티션 테이블은 생성 시 파티션이 최소 하나 필요하므로 `p_init ((0,0))`을 둔다. `ranking_id`는 1부터 시작한다. `ranking_submit_log`, `ranking_result`도 동일하다.
+- 정의되지 않은 `(ranking_id, season_no)`는 INSERT 시 에러가 발생한다. 잘못된 파티션에 조용히 들어가는 것을 방지한다.
+
+### 4.3 BEST upsert
+
+```sql
+INSERT INTO ranking_entry
+  (ranking_id, season_no, member_id, score, achieved_at, version, updated_at)
+VALUES (?, ?, ?, ?, NOW(3), 1, NOW(3)) AS n
+ON DUPLICATE KEY UPDATE
+  achieved_at = IF(n.score > ranking_entry.score, n.achieved_at, ranking_entry.achieved_at),
+  version     = IF(n.score > ranking_entry.score, ranking_entry.version + 1, ranking_entry.version),
+  updated_at  = IF(n.score > ranking_entry.score, n.updated_at, ranking_entry.updated_at),
+  score       = GREATEST(ranking_entry.score, n.score);   -- 반드시 마지막
+```
+
+ODKU는 왼쪽부터 평가되므로 `score`를 마지막에 둔다. ASC 정렬이면 비교 방향을 반대로 한다.
+
+### 4.4 ranking_submit_log
+
+멱등 키 확인과 제출 이력(감사, 어뷰징 조사)을 겸한다.
+
+```sql
+CREATE TABLE ranking_submit_log (
+  ranking_id   INT UNSIGNED NOT NULL,
+  season_no    INT UNSIGNED NOT NULL,
+  request_id   VARCHAR(64)  NOT NULL,
+  member_id    VARCHAR(64)  NOT NULL,
+  input_value  BIGINT       NOT NULL,     -- 기록 또는 증분
+  result_score BIGINT UNSIGNED NOT NULL,
+  rejected     VARCHAR(32)  NULL,         -- 하드 검증 거부 사유
+  meta         JSON         NULL,         -- 게임 서버 맥락 (매치 ID 등, 해석하지 않음)
+  created_at   DATETIME(3)  NOT NULL,
+  PRIMARY KEY (ranking_id, season_no, request_id),
+  KEY ix_member (ranking_id, season_no, member_id, created_at)
+)
+PARTITION BY LIST COLUMNS (ranking_id, season_no) (...);
+```
+
+- 멱등 키 조회는 전달받은 `season_no`의 파티션에서 한다.
+- 같은 `request_id`가 같은 내용으로 오면 반영하지 않고 **현재 entry 상태**를 반환하며, 다른 내용이면 `IDEMPOTENCY_CONFLICT`로 거부한다.
+- 재전송 응답이 처리 당시 결과가 아니라 현재 상태인 이유: 앱은 응답으로 Redis를 반영하므로, 최신 행이어야 version 비교가 맞게 동작한다.
+- 하드 검증 거부 시 `result_score`에는 현재 점수를 기록한다.
+- 시즌 종료 후에도 검수 근거로 SETTLED까지 유지한다.
+
+---
+
+## 5. 실시간 랭킹 (Redis)
+
+### 5.1 키
+
+| 키 | 타입 | 용도 |
+| --- | --- | --- |
+| `rk:{rankingId}:s:{seasonNo}` | ZSET | 순위표 |
+| `rk:{rankingId}:s:{seasonNo}:ver` | HASH | member별 version (SUM, LATEST) |
+| `rk:{rankingId}:s:{seasonNo}:ready` | STRING | 쓰기 허용 센티넬 (5.3) |
+| `rk:{rankingId}:rl:{memberId}` | STRING | 제출 빈도 카운터 (TTL) |
+
+`{rankingId}` 해시태그로 한 랭킹의 키를 같은 클러스터 슬롯에 둔다.
+
+### 5.2 composite
+
+```text
+t = floor((achieved_at - season.start_at) / time_unit)
+B = 2^time_bits
+
+DESC: composite = score × B + (B − 1 − t)
+ASC:  composite = score × B + t
+
+디코드
+DESC: score = floor(c / B),  t = (B − 1) − (c mod B)
+ASC:  score = floor(c / B),  t = c mod B
+```
+
+- 같은 점수면 먼저 달성한 쪽이 위에 온다.
+- 순위는 모두 고유하다. 같은 시간 단위 안에서 같은 점수가 나오면 Redis가 member 사전순(DESC 조회 시 역순)으로 정렬한다.
+
+### 5.3 반영 경로
+
+모든 반영은 Lua로 하며, **센티넬(`:ready`)이 있을 때만 쓴다.**
+
+| 규칙 | 반영 |
+| --- | --- |
+| BEST | 센티넬 확인 → `ZADD key GT CH composite member` |
+| SUM, LATEST | 센티넬 확인 → version 비교 → `ZADD` |
+
+BEST는 composite가 단조 증가하므로 `GT`가 늦게 도착한 이전 값을 거부한다. 같은 점수를 나중에 다시 달성하면 composite가 작아져 원래 달성 시각이 유지된다.
+
+```lua
+-- version Lua
+-- KEYS[1] = rk:{id}:s:{n}, KEYS[2] = rk:{id}:s:{n}:ver, KEYS[3] = rk:{id}:s:{n}:ready
+-- ARGV: member, composite, version
+if redis.call('EXISTS', KEYS[3]) == 0 then return -1 end
+local cur = tonumber(redis.call('HGET', KEYS[2], ARGV[1]) or '0')
+local v = tonumber(ARGV[3])
+if v <= cur then return 0 end
+redis.call('HSET', KEYS[2], ARGV[1], v)
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
+return 1
+```
+
+SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한다. 경로를 섞으면 version HASH가 갱신되지 않아 비교가 틀어진다.
+
+**센티넬 조건이 필요한 이유:** 반영 재시도가 정산의 시즌 키 삭제보다 늦게 도착하면 지운 키가 멤버 몇 명으로 되살아나고, 아무도 지우지 않아 메모리에 남는다. API 인스턴스가 많을수록 확률이 커진다. 센티넬이 없으면 반영을 버리며, 정산은 MySQL 기준이므로 손실이 없다.
+
+- 센티넬은 시즌이 OPEN될 때 스케줄러가 설정한다. 설정 전 반영은 버려지고 리컨실러가 따라잡는다.
+- 재구축(6.3) 중에도 센티넬이 없으므로 라이브 키 반영은 버려지며, 재구축의 따라잡기 단계가 반영한다.
+
+### 5.4 조회
+
+| 패턴 | DESC | ASC |
+| --- | --- | --- |
+| 상위 페이징 | `ZRANGE key off off+size-1 REV WITHSCORES` | `ZRANGE key off off+size-1 WITHSCORES` |
+| 내 순위 | `ZREVRANK key member WITHSCORE` | `ZRANK key member WITHSCORE` |
+
+- 페이징과 내 순위를 파이프라인 하나로 처리한다.
+- 순위 = 인덱스 + 1.
+- 표시용 정보(닉네임 등)는 저장하지 않는다. 게임 서버가 조합한다.
+
+### 5.5 영속화
+
+- 기본값 RDB 스냅샷. 설정으로 끌 수 있다.
+- AOF는 사용하지 않는다. MySQL이 원장이므로 영속화는 재시작 후 재구축 시간 단축 용도뿐이다.
+
+### 5.6 시즌 키 삭제
+
+정산 결과(`ranking_result`) 생성이 끝나면 해당 시즌 키를 삭제한다. **센티넬을 먼저 삭제**한 뒤 ZSET과 version HASH를 삭제한다. 지난 시즌 조회는 result에서 처리한다.
+
+---
+
+## 6. 정합성과 자가 복구
+
+### 6.1 L1 즉시 재시도
+
+Redis 반영 실패 시 짧은 백오프로 2~3회 재시도한다.
+
+### 6.2 L2 워터마크 차분 리컨실러
+
+프로세스가 MySQL 커밋 직후 종료되면 실패 기록이 남지 않는다. 이를 MySQL 쪽 변경분 스캔으로 보완한다.
+
+```text
+매 N초 (OPEN 시즌 대상):
+  1. updated_at > (checkpoint − 안전마진) 행을 PK 순 청크로 조회 (마스터)
+  2. ranking_exclusion 대상 제외
+  3. ZMSCORE로 Redis 현재 값 일괄 조회
+  4. 계산한 composite와 다른 것만 반영 (5.3의 센티넬 확인 Lua)
+  5. checkpoint 전진
+```
+
+- 안전마진은 최대 트랜잭션 시간보다 길게 잡는다 (30~60초). 구문 실행 시각과 커밋 시각의 차이를 흡수한다.
+- 반드시 마스터에서 읽는다. 레플리카는 복제 지연으로 안전마진이 깨진다.
+- checkpoint는 `job_state`에 두고, `GET_LOCK`으로 단일 실행을 보장한다.
+- 같은 스캔에서 어뷰징 소프트 탐지(9.2)를 수행한다.
+- 리컨실러도 라이브 키에 쓰므로 센티넬 확인 Lua를 사용한다. 그래야 정산의 키 삭제 후 키가 되살아나지 않는다. 예외는 재구축 따라잡기(6.3)로, 센티넬과 무관한 임시 키에 쓴다.
+
+### 6.3 L3 전체 재구축
+
+Redis 유실(퍼시스턴스 없는 재시작, 페일오버 데이터 손실) 대응.
+
+```text
+감지: OPEN 시즌인데 rk:{id}:s:{n}:ready 센티넬 없음
+  1. 임시 키 rk:{id}:s:{n}:rebuild(및 :rebuild:ver)에 MySQL 파티션을 PK 청크로 적재 (제외 대상 건너뜀)
+  2. 재구축 시작 시점의 워터마크부터 L2 방식으로 임시 키에 따라잡기
+  3. RENAME으로 라이브 키에 원자적 교체 (ZSET, version HASH)
+  4. 센티넬 설정
+  5. 3~4 사이에 버려진 반영은 다음 L2 주기가 따라잡음
+```
+
+- 재구축 중 쓰기는 MySQL에 정상 적재되며 2단계와 이후 L2에서 반영된다.
+- 정산이 끝나 키를 삭제한 시즌(SETTLING 이후)은 재구축 대상이 아니다.
+- 재구축 중 조회는 "집계 중" 상태를 반환한다.
+
+### 6.4 보조 점검
+
+하루 1회 `ZCARD`와 MySQL `COUNT`를 비교한다. 불일치 시 L3를 트리거한다.
+
+---
+
+## 7. 정산
+
+### 7.1 정산 시작 조건
+
+```text
+NOW ≥ settle_at (= end_at + settle_delay)
+AND information_schema.INNODB_TRX에 trx_started < end_at 인 트랜잭션 없음
+AND 리컨실러 워터마크 > end_at + 안전마진
+```
+
+`settle_delay`는 시각 검사를 통과해 이미 처리 중인 요청의 커밋을 기다리는 안전망이다. 조건 확인은 그 하한 위에서 실제 종료를 검증한다. (`INNODB_TRX` 조회는 `PROCESS` 권한 필요)
+
+### 7.2 늦은 제출
+
+기본은 **엄격 마감**이다. `end_at` 이후 제출은 전부 거부한다. 전투 중 시즌이 종료되는 경우 반영되지 않을 수 있음을 공지한다.
+
+다음 시즌이 바로 열려 있는 경우(`wait_period = 0`)에도 제출의 시즌 번호 검사(4.1)로 이전 시즌 플레이가 다음 시즌에 반영되지 않는다.
+
+### 7.3 SETTLING: entry 분리와 가순위 생성
+
+`GET_LOCK('podium:settle')`으로 동시에 하나의 시즌만 처리한다.
+
+```text
+1. ranking_entry.p_r{id}_s{n} ⇄ ranking_entry_settling   (EXCHANGE, 고정 이름 작업 테이블)
+2. ranking_entry DROP PARTITION p_r{id}_s{n}              (빈 파티션)
+3. ranking_entry_settling에 정렬용 인덱스 추가
+4. ranking_entry_settling → ranking_result 청크 적재        (정적 SP)
+5. RENAME ranking_entry_settling → ranking_entry_r{id}_s{n} (백업)
+6. 빈 ranking_entry_settling 재생성 (LIKE + REMOVE PARTITIONING)
+7. Redis 시즌 키 삭제
+8. REVIEW 전이, review_until = NOW + review_period
+```
+
+- 정렬 인덱스는 운영 테이블에 두지 않는다. 스코어 제출마다 쓰기 비용이 늘기 때문이다.
+- 4단계는 커서 기반 청크로 짧은 트랜잭션을 반복한다. 단일 `INSERT ... SELECT`는 언두 증가, 복제 지연, 버퍼 풀 오염을 일으킨다.
+
+```sql
+INSERT INTO ranking_result (..., final_rank, ...)
+SELECT ...,
+       :base_rank + ROW_NUMBER() OVER (ORDER BY score DESC, achieved_at ASC, member_id DESC),
+       ...
+  FROM ranking_entry_settling
+ WHERE <커서 이후>
+ ORDER BY score DESC, achieved_at ASC, member_id DESC
+ LIMIT 5000;
+```
+
+- 정렬 기준은 Redis 순서와 일치시킨다.
+  - DESC: `score DESC, achieved_at ASC, member_id DESC`
+  - ASC: `score ASC, achieved_at ASC, member_id ASC`
+- 커서 조건은 정렬 방향이 섞여 있어 튜플 비교 대신 OR 조건으로 풀어 쓴다.
+
+### 7.4 ranking_result
+
+```sql
+CREATE TABLE ranking_result (
+  ranking_id     INT UNSIGNED    NOT NULL,
+  season_no      INT UNSIGNED    NOT NULL,
+  member_id      VARCHAR(64)     NOT NULL,
+  final_rank     INT UNSIGNED    NULL,        -- 제외 시 NULL
+  score          BIGINT UNSIGNED NOT NULL,
+  achieved_at    DATETIME(3)     NOT NULL,
+  reward_code    VARCHAR(64)     NULL,
+  reward_status  ENUM('NONE','PENDING','DELIVERED','REJECTED') NOT NULL,
+  reward_held    TINYINT(1)      NOT NULL DEFAULT 0,
+  sanctioned     TINYINT(1)      NOT NULL DEFAULT 0,
+  delivered_at   DATETIME(3)     NULL,
+  PRIMARY KEY (ranking_id, season_no, member_id),
+  KEY ix_rank (ranking_id, season_no, final_rank),
+  KEY ix_reward (ranking_id, season_no, reward_status, member_id)
+)
+PARTITION BY LIST COLUMNS (ranking_id, season_no) (...);
+```
+
+| reward_status | 의미 |
+| --- | --- |
+| NONE | 보상 구간 밖 |
+| PENDING | 대상, 전달 전 |
+| DELIVERED | 게임 서버 ack 완료 |
+| REJECTED | 대상이었으나 제재로 미지급 |
+
+`sanctioned`는 보상 상태와 별개의 표시용 플래그다.
+
+### 7.5 REVIEW: 검수
+
+- `review_until`이 지나면 자동으로 FINALIZING으로 진행한다. GM 승인을 기다리지 않는다.
+- GM 조작:
+  - **보류:** `review_hold = 1`. 해제 전까지 확정하지 않는다. 장기 보류 시 알림.
+  - **조기 확정:** 기간을 기다리지 않고 진행.
+- 검수 목록은 자동 생성한다: 보상 구간 내 유저 중 어뷰징 포인트 보유자, 하드 검증 위반 이력자.
+
+### 7.6 FINALIZING: 확정
+
+```text
+1. ranking_exclusion 대상 → final_rank NULL, sanctioned = 1
+2. 나머지 순위 재부여 (청크)
+3. participant_count 기록, tier_snapshot 고정
+4. reward_code 판정, reward_status 설정 (NONE / PENDING / REJECTED)
+5. 보류 임계치 초과 유저 reward_held = 1
+6. ranking_hall 적재 (상위 hall_size)
+7. DELIVERING 전이
+```
+
+확정 이후 순위는 다시 매기지 않는다.
+
+### 7.7 DELIVERING: 보상 전달
+
+게임 서버가 페이지 단위로 가져가고 ack한다.
+
+```text
+1. GET  /v1/rankings/{id}/seasons/{n}/rewards?cursor=...   (PENDING, held 제외)
+2. 게임 서버 우편 발송 — (ranking_id, season_no, member_id)를 지급 멱등 키로 사용
+3. POST /v1/rankings/{id}/seasons/{n}/rewards/ack          → DELIVERED
+```
+
+- 정산 완료 웹훅은 "가져갈 목록이 생김" 신호로만 사용한다. 웹훅 유실에 대비해 게임 서버는 주기적으로 확인한다.
+- 수령 기간은 랭킹 서버에 두지 않는다. 우편 만료는 게임 서버 정책이다.
+- held 건은 GM 판단 후 PENDING 또는 REJECTED로 전환한다.
+- PENDING(held 제외)이 모두 처리되면 SETTLED.
+- 장기간 ack가 없으면 알림. (연동 장애)
+
+### 7.8 제재 처리
+
+| 적발 시점 | 순위 | reward_status | 표시 |
+| --- | --- | --- | --- |
+| 시즌 중 | 실시간 순위에서 제거 (`ZREM`) | 정산 시 REJECTED | 노출 안 됨 |
+| 검수 중 | 제외 후 재부여 | REJECTED | 순위 없음 |
+| 지급 후 | 유지 (재부여 안 함) | DELIVERED 유지, 회수는 게임 서버 | `sanctioned = 1` |
+
+```sql
+CREATE TABLE ranking_exclusion (
+  ranking_id  INT UNSIGNED NOT NULL,
+  season_no   INT UNSIGNED NOT NULL,      -- 0 = 해당 랭킹 전 시즌
+  member_id   VARCHAR(64)  NOT NULL,
+  reason      VARCHAR(255) NOT NULL,
+  created_by  VARCHAR(64)  NOT NULL,
+  created_at  DATETIME(3)  NOT NULL,
+  PRIMARY KEY (ranking_id, season_no, member_id)
+);
+```
+
+리컨실러와 재구축은 이 테이블을 확인해 제외 대상을 Redis에 다시 넣지 않는다.
+
+---
+
+## 8. 아카이브
+
+### 8.1 EXCHANGE 원칙
+
+- `EXCHANGE PARTITION`은 파티션 테이블의 파티션 1개 ↔ 비파티션 일반 테이블 1개 사이에서만 동작한다.
+- 교환되는 것은 데이터 파일이며, 대상 테이블은 교환 후에도 일반 테이블이다.
+- 목적은 운영 테이블에서 무거운 삭제를 빼내는 것이다. 데이터가 찬 파티션을 직접 DROP하면 운영 테이블에 배타 MDL이 걸린 채로 파일 삭제가 진행된다.
+- 운영 테이블에서 일어나는 ADD / EXCHANGE / DROP은 모두 메타데이터 수준이다.
+
+### 8.2 테이블별 생명주기
+
+| 테이블 | 보관 대상 | 분리 시점 | 분리 방식 |
+| --- | --- | --- | --- |
+| `ranking_entry` | 진행 중 시즌 | SETTLING | 작업 테이블 경유 (7.3) |
+| `ranking_submit_log` | 진행 + 정산 중 시즌 | SETTLED | EXCHANGE → 백업 |
+| `ranking_result` | 확정 결과, 지난 시즌 조회 | 다음 시즌 SETTLED | EXCHANGE → 백업 |
+| `ranking_hall` | 시즌별 Top N | 분리 없음 (영구) | — |
+
+백업 테이블 이름: `{원본}_r{rankingId}_s{seasonNo}`
+
+```text
+EXCHANGE 절차 (submit_log, result)
+1. CREATE TABLE {원본}_r{id}_s{n} LIKE {원본}
+2. ALTER TABLE {원본}_r{id}_s{n} REMOVE PARTITIONING   (빈 테이블, 즉시)
+3. ALTER TABLE {원본} EXCHANGE PARTITION p_r{id}_s{n} WITH TABLE {원본}_r{id}_s{n}
+4. ALTER TABLE {원본} DROP PARTITION p_r{id}_s{n}       (빈 파티션, 즉시)
+```
+
+### 8.3 보관 방식
+
+보관본은 파티션 히스토리 테이블이 아닌 **시즌별 일반 테이블**로 둔다.
+
+- 시즌 단위로 독립 삭제, 덤프, 이동이 가능하다.
+- 히스토리 스키마 변경이 과거 시즌 전체에 걸리지 않는다.
+- 운영 테이블과의 스키마 동기화 부담이 없다.
+- 테이블 수는 `history_retention`으로 상한을 두고, 설치 시 `table_open_cache`, `table_definition_cache`, `open_files_limit`를 그에 맞춰 설정한다.
+- 보관 기간 경과 시 `DROP TABLE` 또는 덤프 후 삭제. 필요하면 별도 스키마로 `RENAME`.
+
+### 8.4 ranking_hall
+
+```sql
+CREATE TABLE ranking_hall (
+  ranking_id  INT UNSIGNED    NOT NULL,
+  season_no   INT UNSIGNED    NOT NULL,
+  final_rank  INT UNSIGNED    NOT NULL,
+  member_id   VARCHAR(64)     NOT NULL,
+  score       BIGINT UNSIGNED NOT NULL,
+  sanctioned  TINYINT(1)      NOT NULL DEFAULT 0,
+  PRIMARY KEY (ranking_id, season_no, final_rank)
+);
+```
+
+- FINALIZING에서 제재 반영 후 상위 `hall_size`를 적재한다.
+- 지급 후 제재 시 `sanctioned`를 함께 갱신한다.
+
+### 8.5 조회 데이터 원천
+
+| 조회 | 원천 |
+| --- | --- |
+| 현재 시즌 순위 | Redis |
+| 직전 시즌 전체 순위, 내 순위 | `ranking_result` |
+| 모든 시즌 Top N | `ranking_hall` |
+| 그 외 과거 기록 | 백업 테이블 (운영 조회 대상 아님) |
+
+### 8.6 자가 복구 판단
+
+```text
+entry 파티션에 데이터 있음                       → EXCHANGE 필요
+settling 테이블에 해당 시즌 데이터, result 건수 < settling 건수 → result 적재 이어서
+result 건수 = settling 건수                     → RENAME 필요
+백업 테이블 있음, settling 비어 있음              → SETTLING 완료
+```
+
+작업 테이블의 `(ranking_id, season_no)` 컬럼으로 어느 시즌 데이터인지 확인한다.
+
+---
+
+## 9. Anti-cheat
+
+플레이의 정당성 검증은 게임 서버의 책임이다. 랭킹 서버는 도메인을 몰라도 판단 가능한 이상 징후만 다룬다.
+
+### 9.1 하드 검증 (적재 시 거부)
+
+| 검증 | 기준 |
+| --- | --- |
+| 범위 | `score_max` |
+| 1회 최대 증분 | `max_delta` (SUM) |
+| 제출 빈도 | `max_submit_per_min` (Redis 카운터) |
+| 시즌 구간 | `[start_at, end_at)` |
+
+거부 사유는 `ranking_submit_log.rejected`에 기록하고, 강한 의심 신호로 취급한다.
+
+### 9.2 소프트 탐지 (받되 표시)
+
+- **속도:** 시간당 획득량이 임계치를 초과
+- **순위 급등:** 짧은 시간에 큰 폭으로 순위 상승
+- **BEST 급등:** 새 기록이 이전 최고의 N배 이상
+
+리컨실러 스캔(6.2)에서 비동기로 수행한다. 오탐이 정상 유저를 해치지 않도록 거부하지 않는다.
+
+### 9.3 어뷰징 포인트
+
+```sql
+CREATE TABLE ranking_suspicion (
+  suspicion_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  ranking_id   INT UNSIGNED    NOT NULL,
+  season_no    INT UNSIGNED    NOT NULL,
+  member_id    VARCHAR(64)     NOT NULL,
+  rule_code    VARCHAR(32)     NOT NULL,
+  weight       INT UNSIGNED    NOT NULL,
+  evidence     JSON            NOT NULL,
+  created_at   DATETIME(3)     NOT NULL,
+  PRIMARY KEY (suspicion_id),
+  KEY ix_member (ranking_id, season_no, member_id)
+);
+```
+
+- 포인트는 근거 행의 가중치 합으로 계산한다. 가중치는 `suspicion_config`에 둔다.
+- 포인트는 판정이 아니라 지표다. 자동 조치는 보류 임계치 초과 시 해당 유저의 보상 보류(`reward_held`)까지만 한다.
+- 시즌 단위로 누적한다. 검수 화면에 이전 시즌 포인트를 참고로 표시하되 합산하지 않는다.
+
+---
+
+## 10. 외부 API
+
+### 10.1 인증
+
+- `x-api-key` 헤더. 서버 간 호출 전용이며 클라이언트에 배포하지 않는다.
+- TLS 필수. 가능하면 IP 허용 목록.
+- 권한 분리: `write`(제출), `read`(조회), `reward`(보상 수신). 관리 API는 GM 도구 인증으로 분리한다.
+- 복수 키 동시 활성 (무중단 교체). DB에는 해시만 저장한다.
+
+### 10.2 엔드포인트
+
+| 메서드 | 경로 | 권한 | 설명 |
+| --- | --- | --- | --- |
+| POST | `/v1/rankings/{id}/scores` | write | 스코어 제출 (`memberId`, `value`, `seasonNo`, `requestId`, `sourceSeq?`, `meta?`) |
+| GET | `/v1/rankings/{id}/top?offset&size` | read | 현재 시즌 상위 페이징 |
+| GET | `/v1/rankings/{id}/members/{memberId}` | read | 현재 시즌 내 순위 |
+| GET | `/v1/rankings/{id}/seasons/current` | read | 현재 시즌 정보 |
+| GET | `/v1/rankings/{id}/seasons/{n}/results?offset&size` | read | 직전 시즌 결과 |
+| GET | `/v1/rankings/{id}/seasons/{n}/results/{memberId}` | read | 직전 시즌 내 결과 |
+| GET | `/v1/rankings/{id}/hall?season` | read | 시즌별 Top N |
+| GET | `/v1/rankings/{id}/seasons/{n}/rewards?cursor` | reward | 전달 대상 목록 |
+| POST | `/v1/rankings/{id}/seasons/{n}/rewards/ack` | reward | 전달 완료 |
+
+`sanctioned` 행은 플래그와 함께 반환한다. 표시 방식은 게임 서버가 정한다.
+
+게임 서버는 `seasons/current`로 시즌 번호, 시작·종료 시각을 조회해 캐시하고 클라이언트 표시와 제출(`seasonNo`)에 사용한다. 시즌 경계(`end_at`)가 지나면 다시 조회한다.
+
+---
+
+## 11. 운영 원칙
+
+### 11.1 MDL 대응
+
+`ranking_entry`는 여러 랭킹이 공유하므로, DDL이 배타 MDL 대기 중이면 뒤의 모든 랭킹 쓰기가 막힌다.
+
+- DDL 세션은 `lock_wait_timeout`을 짧게(예: 2초) 설정하고, 실패 시 재시도한다.
+- 운영 테이블에 긴 쿼리를 금지한다. 리컨실러는 작은 청크, GM·통계 조회는 레플리카에서 실행한다.
+- 아카이브 DDL은 랭킹 정의의 한가한 시간대에 몰아서 실행할 수 있다.
+- 마이그레이션에 운영 테이블 대량 데이터 변경(backfill)을 넣지 않는다. 필요하면 청크 단위 별도 잡으로 실행한다.
+- 운영 테이블 스키마 변경은 `ALGORITHM=INSTANT`로 처리되는 것을 우선한다. 그렇지 않은 변경(인덱스 추가, 타입 변경 등)은 소요 시간을 측정해 점검 시간 안에 끝나는지 확인한다.
+
+### 11.2 동적 SQL 제한
+
+- 모든 DB 로직은 SP로 작성한다. SP 이름은 개발 컨벤션의 대문자 표기를 따른다.
+- MySQL은 DDL 식별자에 변수를 받지 않으므로 파티션 DDL에는 동적 SQL이 불가피하다.
+- `PREPARE`를 사용하는 SP는 **`SP_EXEC_DDL` 하나**로 한정한다.
+
+| SP | 역할 | 호출 |
+| --- | --- | --- |
+| `SP_EXEC_DDL(sql)` | 유일한 PREPARE 실행 지점, 감사 로그 기록 | 관리 SP 내부 |
+| `SP_PARTITION_ADD(rid, sno)` | 세 파티션 테이블에 시즌 파티션 추가. 이미 있으면 건너뜀 | 앱 |
+| `SP_PARTITION_EXCHANGE(code, rid, sno)` | entry는 settling과 교환, submit_log·result는 백업 테이블 생성 후 교환 | 앱 |
+| `SP_PARTITION_DROP(code, rid, sno)` | 파티션이 비어 있을 때만 삭제 | 앱 |
+| `SP_BACKUP_RENAME(rid, sno)` | settling → `ranking_entry_r{id}_s{n}`, 빈 settling 재생성 (이미 있으면 건너뜀) | 앱 |
+
+- 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_log`, 3 = `ranking_result`
+- 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
+- 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.
+
+**오류 처리**
+
+| 구분 | 방식 |
+| --- | --- |
+| `SP_EXEC_DDL` (내부 헬퍼) | 실행 전 감사 로그 행 기록 → 실행 → 결과 갱신. 실패 시 `DEALLOCATE`, 감사 로그에 오류 기록 후 `RESIGNAL` |
+| 앱이 호출하는 SP | 컨벤션 RESULT 규약. 관리 SP는 헬퍼의 예외를 받아 `50001`로 반환 |
+
+헬퍼가 RESULT를 SELECT하면 호출한 SP에서 결과셋이 이중으로 나가므로, 헬퍼는 예외로만 실패를 알린다. DDL은 암묵적으로 커밋되므로 감사 로그는 실행 전에 먼저 기록한다.
+
+### 11.3 잡 실행
+
+- 모든 잡은 실제 상태를 관측해 다음 단계를 판단하고 멱등하게 실행한다.
+- `GET_LOCK`으로 잡별 단일 실행을 보장한다. 워커가 여러 대여도 잡은 한 곳에서만 돈다. 워커 스케일아웃은 처리량이 아니라 가용성(한 대가 죽어도 이어받음)을 위한 것이다.
+- `GET_LOCK`은 커넥션에 묶이므로, 락 헬퍼는 풀에서 **전용 커넥션**을 받아 작업이 끝날 때까지 반납하지 않는다. 헬퍼는 획득 → 작업 → `RELEASE_LOCK` → 반납을 보장한다.
+- 락 헬퍼는 SP를 거치지 않고 `GET_LOCK`을 직접 호출한다. 러너가 SP 생성 전에도 사용해야 하기 때문이며, 컨벤션(DB 접근은 SP)의 예외다.
+- 커넥션이 끊기거나 MySQL이 페일오버되면 락이 풀려 다른 워커가 같은 잡을 시작할 수 있다. 장시간 잡은 청크마다 `IS_USED_LOCK(name) = CONNECTION_ID()`로 보유를 확인하고, 아니면 즉시 중단한다.
+- 파괴적 작업(DROP) 직전 건수를 검증하고, 불일치 시 실행하지 않는다.
+- 다음 시즌 파티션은 여러 주기 앞서 생성한다.
+- 재시도로 해결되지 않으면 알림을 보낸다.
+
+### 11.4 운영 테이블
+
+| 테이블 | 용도 |
+| --- | --- |
+| `ddl_audit_log` | `SP_EXEC_DDL` 실행 SQL, 시작·종료 시각, 오류 정보 |
+| `job_state` | 잡별 워터마크(리컨실러 checkpoint 등), 마지막 실행 시각 |
+| `instance_heartbeat` | 실행 중인 API·워커 인스턴스 (`instance_id`, `process_type`, `app_version`, `last_seen_at`) |
+
+- 인스턴스는 기동 후 주기적으로(예: 10초) 하트비트를 갱신하고, 정상 종료 시 자기 행을 삭제한다. 최근 30초 안의 하트비트를 살아 있는 인스턴스로 본다.
+- `instance_id`는 프로세스 기동마다 생성하는 UUID다. PID는 재사용되어 다른 인스턴스의 행을 덮어쓸 수 있다.
+- 비정상 종료로 남은 행은 하트비트 루프가 `last_seen_at`이 1시간 넘게 지난 행을 함께 삭제해 정리한다.
+
+모두 `podium_de` DB에 둔다. `ddl_audit_log`는 `SP_EXEC_DDL` 안에서 기록해야 하고, 제출 로그는 멱등 확인을 같은 트랜잭션에서 해야 하기 때문이다.
+
+### 11.5 마이그레이션
+
+- **테이블:** 버전 마이그레이션. 버전 테이블과 체크섬으로 관리한다. 적용 후 내용이 바뀐 버전 파일은 오류로 처리한다. 파일 하나에는 DDL 구문 하나만 둔다 (DDL은 암묵적 커밋이라 여러 구문이면 일부만 적용된 채 남을 수 있다).
+- **SP:** 반복 마이그레이션. 체크섬이 바뀌면 DROP 후 CREATE한다.
+- 통합 SQL 파일은 두지 않는다. 같은 내용을 두 곳에서 관리하지 않기 위해서다.
+- **적용은 `npm run migrate`로만 한다.** API와 워커는 기동 시 적용하지 않고 확인만 한다.
+- 컨벤션과 설계가 충돌하면 컬럼·키 구조는 설계를, 표기 규칙(COMMENT, 헤더 주석, charset/collation, 인덱스 이름)과 SP 이름은 컨벤션을 따른다.
+- 식별자 컬럼(`member_id`, `request_id`, `ranking_code`, `reward_code`, `rule_code`)은 `utf8mb4_bin`이다. 대소문자를 구분하지 않으면 다른 식별자가 하나로 합쳐진다.
+
+**기동 시 확인**
+
+```text
+하트비트 기록 → GET_LOCK('podium:migrate') → 스키마 확인 → RELEASE_LOCK
+확인 실패 시 하트비트 행 삭제 후 종료
+```
+
+- 기동은 migrate 락을 **최대 10초** 기다리며, 못 잡으면 기동에 실패한다. 실패 메시지는 migrate 실행 중인지 확인하도록 안내한다. 중단 패치 절차를 따르면 발생하지 않는다.
+
+- 스키마 확인은 버전 번호가 아니라 패키지의 SQL 파일 목록·체크섬과 DB 적용 기록을 통째로 비교한다.
+- **하트비트 기록이 락 획득보다 먼저**여야 한다. 기동이 락을 먼저 잡으면 이후 migrate가 하트비트를 보고 거부하고, migrate가 먼저 잡으면 기동은 적용 완료 후 스키마 불일치로 거부된다. 순서가 바뀌면 "migrate의 하트비트 검사 직후 구버전 기동"을 막지 못한다.
+
+**migrate 거부 조건**
+
+```text
+GET_LOCK('podium:migrate') → 하트비트 검사 → 역행 검사 → 적용 → RELEASE_LOCK
+```
+
+- 살아 있는 인스턴스 하트비트가 있음 (중지 없이 실행 방지). 강제 실행 옵션은 두지 않는다.
+- DB에 적용 기록이 있는 테이블 버전 파일이 현재 패키지에 없음 (테이블 변경이 포함된 롤백 실수를 자동 차단)
+- DB에 기록된 `package.json` version보다 낮은 패키지 (SP만 바뀐 롤백 실수 차단)
+- 러너 세션의 `lock_wait_timeout`은 짧게(2초) 잡고 재시도한다.
+
+**규칙: DB 변경이 있는 배포는 `package.json` version을 올린다.** SP만 바뀐 경우 파일 목록으로는 신구를 판단할 수 없어 version 비교에 의존한다. 올리지 않으면 역행 검사가 같은 버전으로 보고 통과시킨다.
+
+| 실수 | 차단 |
+| --- | --- |
+| 인스턴스를 내리지 않고 migrate | 하트비트 검사 |
+| migrate 없이 새 버전 기동 | 기동 시 스키마 확인 |
+| migrate 하트비트 검사 직후 구버전 기동 | 기동·migrate 락 공유 + 하트비트 선기록 |
+| 구버전 패키지로 migrate (테이블 변경 포함) | 미지의 테이블 버전 검사 |
+| 구버전 패키지로 migrate (SP만 변경) | package version 역행 검사 |
+
+### 11.6 배포
+
+| 배포 유형 | 방식 |
+| --- | --- |
+| DB 변경 없음 (앱 코드만) | 롤링 무중단 |
+| DB 변경 있음 (테이블, SP) | 중단 패치: 전체 중지 → migrate → 기동 |
+
+**DB 변경 패키지를 실수로 롤링했을 때**
+
+| 보장 | 성립 조건 |
+| --- | --- |
+| 데이터 안전 (틀린 스키마로 서비스하지 않음) | 항상. 기동 시 스키마 확인이 도구와 무관하게 기동을 거부한다 |
+| 가용성 (구버전이 계속 서비스) | 실패한 배포를 **멈추는** 롤링 도구일 때만. 예: Kubernetes RollingUpdate는 새 Pod가 Ready가 되지 않으면 진행을 멈춘다 (미검증) |
+
+- **pm2는 가용성을 보장하지 않는다 (실험 확인).**
+  - `pm2 reload --wait-ready`는 새 프로세스가 ready를 보내지 않아도 `listen_timeout`이 지나면 구버전을 내린다. 기다리기만 할 뿐 멈추지 않으며, 실험에서 약 32초 뒤 전체 중단되었다.
+  - fork 모드에서는 reload가 재시작으로 동작해 구버전이 바로 내려간다.
+  - 따라서 **DB 변경 패키지에는 pm2 reload를 금지하고 `upgrade`만 사용한다.** pm2 reload는 DB 변경이 없는 패키지에만 쓴다.
+- 실패한 배포를 멈추지 않는 롤링 방식은 DB 변경 여부를 확인한 뒤에만 사용한다.
+- **준비 신호:** API와 워커는 기동 확인을 통과한 뒤(API는 listen 성공 후) `process.send('ready')`를 보낸다. API는 `GET /health`로 기동 확인 통과 여부를 반환한다. pm2는 `--wait-ready`, 로드밸런서·오케스트레이터는 `/health`를 사용한다.
+
+- DB 변경이 있는 배포는 **게임 점검 시간**에 맞추는 것을 원칙으로 한다. 게임이 내려가 있으면 스코어 제출이 없으므로 랭킹 서버 중지의 영향이 없다.
+- 중단 중에도 시즌 마감은 시각으로 정해지고, 정산·아카이브는 상태 관측 기반이므로 기동 후 밀린 단계부터 이어서 처리한다.
+- 랭킹 서버만 단독으로 중단하는 경우, 게임 서버는 제출을 보관했다가 같은 `requestId`, `seasonNo`로 재시도한다. 그사이 시즌이 끝났으면 `SEASON_MISMATCH`로 정리된다.
+
+**upgrade 스크립트 (`npm run upgrade`)**
+
+```text
+1. UPGRADE_STOP_CMD 실행
+2. 살아 있는 하트비트가 없어질 때까지 대기 (타임아웃 시 남은 인스턴스 출력 후 중단)
+3. migrate
+4. UPGRADE_START_CMD 실행
+5. 기대 구성(API 수, 워커 수)만큼 새 app_version 하트비트 확인 (타임아웃 시 실패, 종료 코드 1)
+```
+
+- 프로세스 중지·기동 명령은 환경(pm2, systemd, Docker 등)마다 다르므로 환경 변수로 주입한다. 스크립트는 환경과 무관하다.
+- 명령 미설정 시 1단계 전에 중단하고 설정 방법을 안내한다.
+
+## 12. 구현 범위와 순서
+
+### 12.1 1차 범위
+
+- 갱신 규칙: BEST, SUM
+- 랭킹 유형: 시즌, 이벤트, 영구
+- 정산 전 과정, 보상 일괄 전달, 제재 처리, hall
+- 하드 검증, 소프트 탐지(속도, 순위 급등), 어뷰징 포인트
+- 자가 복구 L1~L3
+
+### 12.2 2차 이후
+
+- LATEST
+- 늦은 제출 허용 (`late_submit_grace`)
+- 2차 정렬 기준 (달성 시각 외)
+- 친구·길드 랭킹 조회
+- 분포 기반 이상치 탐지, 섀도 보드
+- 탈퇴 유저 가명화
+
+### 12.3 구현 순서
+
+1. 스키마, 파티션 관리 SP, 스코어 적재 SP
+2. API 인증, 제출 API, Redis 반영, 순위 조회 → 부하 테스트
+3. 자가 복구 (리컨실러, 센티넬, 재구축)
+4. 시즌 스케줄러 (생성, 상태 전이, 정산, 전달)
+5. 아카이브 로테이션
+6. Anti-cheat, 운영 도구, 설치 패키징
