@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { bootstrap } from './bootstrap.js';
+import { ProcessType } from './codes.js';
 import { config } from './config.js';
-import { ProcessType } from './heartbeat.js';
 import { logger } from './logger.js';
 
 const { onShutdown } = await bootstrap('api', ProcessType.API);

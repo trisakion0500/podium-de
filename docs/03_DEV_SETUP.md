@@ -32,32 +32,43 @@ npm install
 
 ## 3.1 스키마와 계정 생성
 
-root 등 관리자 계정으로 실행한다. 계정은 둘로 나눈다.
+root 등 관리자 계정으로 실행한다. 스키마는 메인(`podium_de`)과 로그 DB(`podium_de_log`, 제출 이력) 둘이고, 계정은 둘로 나눈다. 로컬에서는 두 스키마를 같은 MySQL에 둔다.
 
 | 계정 | 사용처 | 권한 |
 |---|---|---|
-| `podium_migrate` | `npm run migrate`, `npm run upgrade`, SP DEFINER | `podium_de` 전체, `PROCESS` |
-| `podium_app` | API, 워커 | `podium_de` `EXECUTE`만 |
+| `podium_migrate` | `npm run migrate`, `npm run upgrade`, SP DEFINER | `podium_de`·`podium_de_log` 전체, `PROCESS` |
+| `podium_app` | API, 워커 | `podium_de`·`podium_de_log` `EXECUTE`만 |
 
 ```sql
 CREATE DATABASE `podium_de` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+CREATE DATABASE `podium_de_log` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 
 -- migrate 계정 (SP DEFINER)
 CREATE USER 'podium_migrate'@'localhost' IDENTIFIED BY '<migrate 비밀번호>';
 CREATE USER 'podium_migrate'@'127.0.0.1' IDENTIFIED BY '<migrate 비밀번호>';
 GRANT ALL PRIVILEGES ON podium_de.* TO 'podium_migrate'@'localhost', 'podium_migrate'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON podium_de_log.* TO 'podium_migrate'@'localhost', 'podium_migrate'@'127.0.0.1';
 GRANT PROCESS ON *.* TO 'podium_migrate'@'localhost', 'podium_migrate'@'127.0.0.1';
 
 -- 앱 계정 (SP 실행만)
 CREATE USER 'podium_app'@'localhost' IDENTIFIED BY '<app 비밀번호>';
 CREATE USER 'podium_app'@'127.0.0.1' IDENTIFIED BY '<app 비밀번호>';
 GRANT EXECUTE ON podium_de.* TO 'podium_app'@'localhost', 'podium_app'@'127.0.0.1';
+GRANT EXECUTE ON podium_de_log.* TO 'podium_app'@'localhost', 'podium_app'@'127.0.0.1';
 
 -- 확인
 SHOW GRANTS FOR 'podium_migrate'@'localhost';
 SHOW GRANTS FOR 'podium_migrate'@'127.0.0.1';
 SHOW GRANTS FOR 'podium_app'@'localhost';
 SHOW GRANTS FOR 'podium_app'@'127.0.0.1';
+```
+
+이미 `podium_de`와 두 계정을 만들어 둔 환경이면 로그 DB 부분만 실행한다.
+
+```sql
+CREATE DATABASE `podium_de_log` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+GRANT ALL PRIVILEGES ON podium_de_log.* TO 'podium_migrate'@'localhost', 'podium_migrate'@'127.0.0.1';
+GRANT EXECUTE ON podium_de_log.* TO 'podium_app'@'localhost', 'podium_app'@'127.0.0.1';
 ```
 
 - 호스트를 `localhost`와 `127.0.0.1` 둘 다 만드는 이유: MySQL은 소켓·named pipe 접속을
@@ -81,6 +92,9 @@ cp .env.example .env
 `.env`를 열어 3.1에서 만든 계정을 `DB_APP_USER`/`DB_APP_PASSWORD`,
 `DB_MIGRATE_USER`/`DB_MIGRATE_PASSWORD`에 채운다. 변수별 설명은 `.env.example`의 주석 참고.
 API·워커만 실행하는 호스트의 `.env`에는 `DB_MIGRATE_*`를 두지 않는다.
+로그 DB는 별도 DB라 접속 정보(`DB_LOG_HOST`, `DB_LOG_PORT`, `DB_LOG_NAME`)와 계정
+(`DB_LOG_APP_*`, `DB_LOG_MIGRATE_*`)을 따로 채운다. 비어 있으면 기동하지 않는다. 로컬은 같은 MySQL과
+3.1의 같은 계정을 그대로 적으면 된다. API·워커만 실행하는 호스트에는 `DB_LOG_MIGRATE_*`도 두지 않는다.
 
 ## 4.2 빌드, 마이그레이션, 실행
 
@@ -108,4 +122,5 @@ API·워커는 기동 시 DB 스키마가 패키지와 같은지 확인만 하�
 |---|---|
 | DB 연결·스키마 | 기동 로그에 `heartbeat started: <ID> ...`가 남고 프로세스가 종료되지 않는다 |
 | 미적용 DB | `<SP 이름>이(가) DB에 없습니다. npm run migrate가 필요합니다.`로 기동이 거부된다 |
+| 로그 DB | 접속되면 메인과 같이 확인된다. 접속할 수 없으면 `log DB(podium_de_log) unreachable ...` 경고만 남고 기동은 계속된다 |
 | API 헬스체크 | `curl http://localhost:3000/health` → `{"result":0}` |

@@ -11,7 +11,7 @@ import { verifySchema } from './migrate.js';
  * 종료 순서는 처리 중단(beforeClose) → 하트비트 삭제 → DB 풀 → 로거 — 처리가 멈춘 뒤에 하트비트를
  * 지워야 migrate가 아직 일하는 인스턴스를 놓치지 않고, 풀은 마지막에 닫아야 정지 중인 작업이 실패하지 않는다.
  * @param name 로그용 프로세스 이름
- * @param processType 하트비트 프로세스 유형 (heartbeat.ProcessType)
+ * @param processType 하트비트 프로세스 유형 (codes.ProcessType)
  * @returns 커넥션 풀과 종료 훅 등록 함수
  * @author trisakion
  * @modified 2026-10-01 trisakion 하트비트 기록 후 migrate 락 안에서 스키마 확인, 실패 시 하트비트 삭제

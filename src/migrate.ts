@@ -1,15 +1,19 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
-import { config } from './config.js';
-import { callSp, LockNotAcquiredError, withLock } from './db.js';
+import { config, type DbTarget } from './config.js';
+import { callSp, createPool, LockNotAcquiredError, withLock } from './db.js';
 import { formatInstances, listAliveInstances } from './heartbeat.js';
 import { logger, shutdownLogger } from './logger.js';
 
-const DATABASE_DIR = join(import.meta.dirname, '..', 'database');
+/** DB별 마이그레이션 디렉터리 (01_DESIGN 11.5). 각 DB에 자기 schema_migration을 둔다 */
+const DATABASE_DIRS: Record<DbTarget, string> = {
+    MAIN: join(import.meta.dirname, '..', 'database'),
+    LOG: join(import.meta.dirname, '..', 'database_log'),
+};
 const APP_VERSION = config.appVersion;
 const LOCK_NAME = 'podium:migrate';
 const LOCK_TIMEOUT_SEC = 10;
@@ -18,6 +22,8 @@ const DDL_RETRY_COUNT = 5;
 const DDL_RETRY_DELAY_MS = 1000;
 const ER_LOCK_WAIT_TIMEOUT = 1205;
 const ER_NO_SUCH_TABLE = 1146;
+/** 설정 실수로 보는 접속 오류: 1044 DB 접근 거부, 1045 계정 인증 실패, 1049 없는 DB */
+const LOG_DB_CONFIG_ERRNOS = new Set([1044, 1045, 1049]);
 
 /** 마이그레이션 종류 */
 const enum Kind {
@@ -77,14 +83,17 @@ export function splitStatements(sql: string): string[] {
 }
 
 /**
- * 디렉터리의 .sql 파일을 이름순으로 읽는다.
+ * 디렉터리의 .sql 파일을 이름순으로 읽는다. 디렉터리가 없으면 스크립트가 없는 것으로 본다(SP가 아직 없는 DB 등).
  * 체크섬은 줄바꿈을 LF로 정규화한 뒤 계산해 OS별 체크아웃 차이로 버전이 달라 보이지 않게 한다.
- * @param dir database/ 하위 디렉터리 이름
+ * @param target 대상 DB
+ * @param dir DB 디렉터리 하위 디렉터리 이름
  * @param kind 마이그레이션 종류
  * @returns 스크립트 목록
  */
-function readScripts(dir: string, kind: Kind): Script[] {
-    const fullDir = join(DATABASE_DIR, dir);
+function readScripts(target: DbTarget, dir: string, kind: Kind): Script[] {
+    const fullDir = join(DATABASE_DIRS[target], dir);
+    if (!existsSync(fullDir))
+        return [];
     return readdirSync(fullDir)
         .filter((f) => f.endsWith('.sql'))
         .sort()
@@ -100,11 +109,12 @@ function readScripts(dir: string, kind: Kind): Script[] {
 }
 
 /**
- * 패키지에 포함된 전체 스크립트를 적용 순서대로 읽는다(테이블 → SP).
+ * 패키지에 포함된 한 DB의 전체 스크립트를 적용 순서대로 읽는다(테이블 → SP).
+ * @param target 대상 DB
  * @returns 스크립트 목록
  */
-function readAllScripts(): Script[] {
-    return [...readScripts('tables', Kind.Versioned), ...readScripts('procedures', Kind.Repeatable)];
+function readAllScripts(target: DbTarget): Script[] {
+    return [...readScripts(target, 'tables', Kind.Versioned), ...readScripts(target, 'procedures', Kind.Repeatable)];
 }
 
 /**
@@ -151,28 +161,67 @@ async function readApplied(conn: Pool | PoolConnection): Promise<AppliedRow[]> {
  * @modified 2026-10-01 trisakion migrate 락 안에서 확인하도록 변경
  * @modified 2026-10-01 trisakion 락 획득 실패 시 migrate 실행 여부 확인 안내
  * @modified 2026-10-01 trisakion 적용 기록을 SP_GET_SCHEMA_STATE로 조회 (앱 계정은 EXECUTE만)
+ * @modified 2026-10-02 trisakion 로그 DB도 확인. 접속 불가면 경고 후 통과 (D-48)
  */
 export async function verifySchema(pool: Pool): Promise<void> {
-    const expected = new Map(readAllScripts().map((s) => [s.name, s.checksum]));
     try {
         await withLock(pool, LOCK_NAME, LOCK_TIMEOUT_SEC, async (conn) => {
-            // 앱 계정은 EXECUTE만 있어 schema_migration을 직접 읽지 못하므로 SP로 읽는다. SP가 없으면 callSp가 migrate 안내로 던진다.
-            const { result, rows } = await callSp(conn, 'SP_GET_SCHEMA_STATE', []);
-            if (result !== 0)
-                throw new Error(`SP_GET_SCHEMA_STATE RESULT=${result}`);
-            const applied = new Map(rows.map((r) => [r.script_name as string, r.checksum as string]));
-            const diffs = [
-                ...[...expected].filter(([name, sum]) => applied.get(name) !== sum).map(([name]) => `미적용 또는 변경: ${name}`),
-                ...[...applied.keys()].filter((name) => !expected.has(name)).map((name) => `패키지에 없음: ${name}`),
-            ];
-            if (diffs.length)
-                throw new Error(`DB 스키마가 앱과 다릅니다. npm run migrate가 필요합니다.\n  ${diffs.join('\n  ')}`);
+            await assertSchemaMatches(conn, 'MAIN');
+            // 로그 DB는 유실 허용이라 접속 실패만으로 서비스를 막지 않는다. 접속되는데 스키마가 다르면 migrate 누락이므로 거부한다.
+            const logPool = createPool('APP', 'LOG');
+            try {
+                let logConn: PoolConnection;
+                try {
+                    logConn = await logPool.getConnection();
+                } catch (err) {
+                    // 계정·DB 이름 오류는 설정 실수라 기동을 막는다. 네트워크 수준 실패만 운영 중 장애로 보고 넘어간다.
+                    if (LOG_DB_CONFIG_ERRNOS.has((err as { errno?: number }).errno ?? 0))
+                        throw new Error(`로그 DB(${config.logDb.database}) 접속 설정이 잘못되었습니다. DB_LOG_* 환경 변수를 확인하세요.`, { cause: err });
+                    logger.warn(`log DB(${config.logDb.database}) unreachable, starting without log schema check`, err);
+                    return;
+                }
+                try {
+                    await assertSchemaMatches(logConn, 'LOG');
+                } finally {
+                    logConn.release();
+                }
+            } finally {
+                await logPool.end();
+            }
         });
     } catch (err) {
         if (err instanceof LockNotAcquiredError)
             throw new Error(`스키마 확인용 락(${LOCK_NAME})을 ${LOCK_TIMEOUT_SEC}초 안에 얻지 못했습니다. migrate가 실행 중인지 확인하세요.`, { cause: err });
         throw err;
     }
+}
+
+/**
+ * 한 DB의 적용 기록이 패키지 스크립트·체크섬과 정확히 같은지 확인한다.
+ * 앱 계정은 EXECUTE만 있어 schema_migration을 직접 읽지 못하므로 SP로 읽는다. SP가 없으면 callSp가 migrate 안내로 던진다.
+ * @param conn 대상 DB 커넥션 (앱 계정)
+ * @param target 대상 DB
+ * @returns 완료 Promise (불일치 시 예외)
+ */
+async function assertSchemaMatches(conn: PoolConnection, target: DbTarget): Promise<void> {
+    const expected = new Map(readAllScripts(target).map((s) => [s.name, s.checksum]));
+    let state: Awaited<ReturnType<typeof callSp>>;
+    try {
+        state = await callSp(conn, 'SP_GET_SCHEMA_STATE', []);
+    } catch (err) {
+        // 두 DB에 같은 이름의 SP가 있으므로 어느 DB에서 실패했는지 붙인다.
+        throw new Error(`[${target}] ${(err as Error).message}`, { cause: err });
+    }
+    const { result, rows } = state;
+    if (result !== 0)
+        throw new Error(`[${target}] SP_GET_SCHEMA_STATE RESULT=${result}`);
+    const applied = new Map(rows.map((r) => [r.script_name as string, r.checksum as string]));
+    const diffs = [
+        ...[...expected].filter(([name, sum]) => applied.get(name) !== sum).map(([name]) => `미적용 또는 변경: ${name}`),
+        ...[...applied.keys()].filter((name) => !expected.has(name)).map((name) => `패키지에 없음: ${name}`),
+    ];
+    if (diffs.length)
+        throw new Error(`[${target}] DB 스키마가 앱과 다릅니다. npm run migrate가 필요합니다.\n  ${diffs.join('\n  ')}`);
 }
 
 /**
@@ -225,60 +274,84 @@ async function assertNoAliveInstance(conn: PoolConnection): Promise<void> {
 }
 
 /**
- * 대기 중인 마이그레이션을 적용한다. `npm run migrate`에서만 호출한다.
- * 동시 실행은 GET_LOCK으로 막고, 모든 구문을 락을 잡은 전용 커넥션에서 실행한다.
- * @param pool 커넥션 풀
+ * 한 DB에 대기 중인 마이그레이션을 적용한다. 역행 검사(높은 버전, 미지의 테이블 버전)는 DB마다 한다.
+ * @param conn 대상 DB 커넥션 (migrate 계정)
+ * @param target 대상 DB
+ * @returns 적용한 스크립트 이름 목록 (로그 DB는 'log:' 접두)
+ */
+async function applyScripts(conn: PoolConnection, target: DbTarget): Promise<string[]> {
+    const scripts = readAllScripts(target);
+    await conn.query('SET SESSION lock_wait_timeout = ?', [LOCK_WAIT_TIMEOUT_SEC]);
+    try {
+        await ensureVersionTable(conn);
+        const rows = await readApplied(conn);
+
+        // 낮은 버전 패키지로 실행하면 SP를 구버전 본문으로 되돌리게 되므로 거부한다.
+        const newer = rows.find((r) => compareVersion(r.app_version, APP_VERSION) > 0);
+        if (newer)
+            throw new Error(`[${target}] DB에 더 높은 버전(${newer.app_version})이 적용되어 있습니다. 현재 패키지: ${APP_VERSION}`);
+        const known = new Set(scripts.map((s) => s.name));
+        const unknown = rows.find((r) => r.kind === Kind.Versioned && !known.has(r.script_name));
+        if (unknown)
+            throw new Error(`[${target}] 패키지에 없는 테이블 마이그레이션이 DB에 적용되어 있습니다: ${unknown.script_name}`);
+
+        const applied = new Map(rows.map((r) => [r.script_name, r.checksum]));
+        const done: string[] = [];
+        for (const script of scripts) {
+            const prev = applied.get(script.name);
+            if (prev === script.checksum)
+                continue;
+            // 적용된 테이블 마이그레이션을 고치면 설치본마다 스키마가 갈라지므로 새 버전 파일로만 변경한다.
+            if (prev !== undefined && script.kind === Kind.Versioned)
+                throw new Error(`[${target}] 이미 적용된 마이그레이션이 변경되었습니다: ${script.name}`);
+            for (const statement of script.statements)
+                await execWithRetry(conn, statement);
+            await conn.query(
+                `INSERT INTO schema_migration (script_name, kind, checksum, app_version, applied_at) VALUES (?, ?, ?, ?, NOW(3)) AS n
+                 ON DUPLICATE KEY UPDATE checksum = n.checksum, app_version = n.app_version, applied_at = n.applied_at`,
+                [script.name, script.kind, script.checksum, APP_VERSION],
+            );
+            const label = target === 'MAIN' ? script.name : `log:${script.name}`;
+            logger.info(`migration applied: ${label}`);
+            done.push(label);
+        }
+        return done;
+    } finally {
+        // 전용 커넥션은 풀로 돌아가므로 세션 설정을 원래대로 돌려 놓는다.
+        await conn.query('SET SESSION lock_wait_timeout = DEFAULT');
+    }
+}
+
+/**
+ * 대기 중인 마이그레이션을 메인 → 로그 DB 순으로 적용한다. `npm run migrate`와 upgrade에서만 호출한다.
+ * 동시 실행은 메인 DB의 GET_LOCK 하나로 막는다 — 로그 DB 적용도 이 락 안에서 하므로 별도 락이 필요 없다.
+ * 로그 DB에 접속하지 못하면 실패한다. 적용은 완전해야 하며, 다시 실행하면 남은 것만 적용된다.
+ * @param pool 메인 DB 커넥션 풀 (migrate 계정)
  * @returns 적용한 스크립트 이름 목록
  * @author trisakion
+ * @modified 2026-10-02 trisakion 로그 DB 적용 추가 (D-48)
  */
 export async function runMigrations(pool: Pool): Promise<string[]> {
-    const scripts = readAllScripts();
     return withLock(pool, LOCK_NAME, LOCK_TIMEOUT_SEC, async (conn) => {
         await assertNoAliveInstance(conn);
-        await conn.query('SET SESSION lock_wait_timeout = ?', [LOCK_WAIT_TIMEOUT_SEC]);
+        const done = await applyScripts(conn, 'MAIN');
+        const logPool = createPool('MIGRATE', 'LOG');
         try {
-            await ensureVersionTable(conn);
-            const rows = await readApplied(conn);
-
-            // 낮은 버전 패키지로 실행하면 SP를 구버전 본문으로 되돌리게 되므로 거부한다.
-            const newer = rows.find((r) => compareVersion(r.app_version, APP_VERSION) > 0);
-            if (newer)
-                throw new Error(`DB에 더 높은 버전(${newer.app_version})이 적용되어 있습니다. 현재 패키지: ${APP_VERSION}`);
-            const known = new Set(scripts.map((s) => s.name));
-            const unknown = rows.find((r) => r.kind === Kind.Versioned && !known.has(r.script_name));
-            if (unknown)
-                throw new Error(`패키지에 없는 테이블 마이그레이션이 DB에 적용되어 있습니다: ${unknown.script_name}`);
-
-            const applied = new Map(rows.map((r) => [r.script_name, r.checksum]));
-            const done: string[] = [];
-            for (const script of scripts) {
-                const prev = applied.get(script.name);
-                if (prev === script.checksum)
-                    continue;
-                // 적용된 테이블 마이그레이션을 고치면 설치본마다 스키마가 갈라지므로 새 버전 파일로만 변경한다.
-                if (prev !== undefined && script.kind === Kind.Versioned)
-                    throw new Error(`이미 적용된 마이그레이션이 변경되었습니다: ${script.name}`);
-                for (const statement of script.statements)
-                    await execWithRetry(conn, statement);
-                await conn.query(
-                    `INSERT INTO schema_migration (script_name, kind, checksum, app_version, applied_at) VALUES (?, ?, ?, ?, NOW(3)) AS n
-                     ON DUPLICATE KEY UPDATE checksum = n.checksum, app_version = n.app_version, applied_at = n.applied_at`,
-                    [script.name, script.kind, script.checksum, APP_VERSION],
-                );
-                logger.info(`migration applied: ${script.name}`);
-                done.push(script.name);
+            const logConn = await logPool.getConnection();
+            try {
+                done.push(...await applyScripts(logConn, 'LOG'));
+            } finally {
+                logConn.release();
             }
-            return done;
         } finally {
-            // 전용 커넥션은 풀로 돌아가므로 세션 설정을 원래대로 돌려 놓는다.
-            await conn.query('SET SESSION lock_wait_timeout = DEFAULT');
+            await logPool.end();
         }
+        return done;
     });
 }
 
 // `npm run migrate`: 마이그레이션을 적용하고 종료한다.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-    const { createPool } = await import('./db.js');
     const pool = createPool('MIGRATE');
     try {
         const done = await runMigrations(pool);

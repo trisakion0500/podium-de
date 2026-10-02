@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import { ProcessType } from './codes.js';
 import { config } from './config.js';
 import { callSp } from './db.js';
 import { logger } from './logger.js';
@@ -9,15 +10,6 @@ const INTERVAL_MS = 10_000;
 
 /** migrate가 "살아 있음"으로 보는 하트비트 유효 시간(초). 주기의 3배 — 한두 번 누락은 살아 있는 것으로 본다 */
 export const HEARTBEAT_ALIVE_SEC = 30;
-
-/**
- * 프로세스 유형 (instance_heartbeat.process_type)
- * @author trisakion
- */
-export const ProcessType = {
-    API: 1,
-    WORKER: 2,
-} as const;
 
 const ER_NO_SUCH_TABLE = 1146;
 

@@ -99,10 +99,12 @@ graph LR
     end
 
     mysql[("MySQL\npodium_de\n(원장, Stored Procedure)")]
+    logdb[("MySQL\npodium_de_log\n(제출 이력, 분리 DB)")]
     redis[("Redis\n실시간 순위표")]
 
     game -->|"x-api-key"| api
     api --> mysql
+    api -.->|"응답 후, 실패 허용"| logdb
     api --> redis
     worker --> mysql
     worker --> redis
@@ -144,6 +146,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 | [01_DESIGN.md](docs/01_DESIGN.md) | 현재 설계(단일 기준) |
 | [02_DECISIONS.md](docs/02_DECISIONS.md) | 결정 기록 — 배경, 검토한 대안, 이유 |
 | [03_DEV_SETUP.md](docs/03_DEV_SETUP.md) | 로컬 개발 환경 설정(스키마·계정 생성) |
+| [04_SCHEMA.md](docs/04_SCHEMA.md) | 테이블 목록, ERD, 시즌 데이터 흐름 |
 
 ---
 
@@ -165,6 +168,7 @@ podiumDE/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)
 │   └── TABLE_LOCK_ORDER.md
+├── database_log/        # 로그 DB(podium_de_log) — tables/, procedures/
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
 └── docs/                # 설계 문서(위 목록)
 ```
@@ -182,7 +186,7 @@ npm run start:api       # API 실행
 npm run start:worker    # 워커 실행
 ```
 
-MySQL에 `podium_de` 스키마와 두 계정(migrate, 앱)을 먼저 만들어 둔다. 상세 절차는
+MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 먼저 만들어 둔다. 상세 절차는
 [`docs/03_DEV_SETUP.md`](docs/03_DEV_SETUP.md).
 
 API·워커는 기동 시 하트비트를 기록한 뒤
@@ -297,6 +301,7 @@ migrate가 하트비트로 거부되면
 
 - 테이블: `database/tables`의 버전 파일. 파일 하나에 DDL 구문 하나만 두며, 적용된 파일은 수정하지 않고 새 버전 파일을 추가한다.
 - SP: `database/procedures`의 파일. 내용이 바뀌면 다시 적용된다(DROP 후 CREATE). 삭제는 `DROP` 구문만 남긴 파일로 한다.
+- 로그 DB는 `database_log/`에 같은 규칙으로 둔다. `migrate`가 메인 다음에 적용한다. 기동 시 로그 DB에 접속할 수 없으면 경고만 남기고 기동하며, 접속되는데 스키마가 다르면 거부한다.
 - DB 변경이 있는 배포는 `package.json`의 `version`을 올린다. DB에 기록된 버전보다 낮은 패키지로는 `migrate`가 거부된다.
   DB에 적용된 테이블 파일이 패키지에 없어도 거부된다. SP만 바뀐 롤백은 버전 비교로만 막히므로 버전을 올리지 않으면 막지 못한다.
 
