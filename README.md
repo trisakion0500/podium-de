@@ -76,7 +76,7 @@ Redis를 언제든 재구축 가능한 투영으로 다루는 구조를 직접 �
 - **문제**: 데이터가 찬 파티션을 직접 DROP하면 배타 MDL을 잡은 채 파일 삭제가 진행돼 모든
   랭킹의 쓰기가 멈춘다.
 - **해결**: 시즌 파티션을 일반 테이블과 EXCHANGE 1회로 분리하고, 그 테이블을 그대로 백업으로
-  쓴다. 상세: [01_DESIGN 8.1~8.3](docs/01_DESIGN.md#81-exchange-원칙),
+  쓴다. 상세: [01_DESIGN 8.1\~8.3](docs/01_DESIGN.md#81-exchange-원칙),
   [D-18](docs/02_DECISIONS.md#d-18-exchange-1회--시즌별-일반-테이블--확정)
 
 ### 3. MySQL 커밋 후 Redis 반영 유실
@@ -109,7 +109,7 @@ graph LR
 ```
 
 API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP 상세는
-[`docs/01_DESIGN.md`](docs/01_DESIGN.md) 2~4장, 7~8장, 11장 참고.
+[`docs/01_DESIGN.md`](docs/01_DESIGN.md) 2\~4장, 7\~8장, 11장 참고.
 
 ---
 
@@ -143,6 +143,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 |---|---|
 | [01_DESIGN.md](docs/01_DESIGN.md) | 현재 설계(단일 기준) |
 | [02_DECISIONS.md](docs/02_DECISIONS.md) | 결정 기록 — 배경, 검토한 대안, 이유 |
+| [03_DEV_SETUP.md](docs/03_DEV_SETUP.md) | 로컬 개발 환경 설정(스키마·계정 생성) |
 
 ---
 
@@ -172,8 +173,6 @@ podiumDE/
 
 ## 실행 방법
 
-요구 사항: Node.js 22 LTS, MySQL 8.4, Redis 7.4
-
 ```bash
 npm install
 cp .env.example .env    # DB 접속 정보(앱·migrate 계정) 채우기
@@ -183,24 +182,8 @@ npm run start:api       # API 실행
 npm run start:worker    # 워커 실행
 ```
 
-MySQL에 `podium_de` 스키마와 두 계정을 먼저 만들어 둔다.
-
-| 계정 | 사용처 | 권한 |
-|---|---|---|
-| `podium_migrate` | `npm run migrate`, `npm run upgrade`, SP DEFINER | `podium_de` 전체, `PROCESS` |
-| `podium_app` | API, 워커 | `podium_de` `EXECUTE`만 |
-
-```sql
-CREATE DATABASE podium_de;
-CREATE USER 'podium_migrate'@'%' IDENTIFIED BY '...';
-GRANT ALL PRIVILEGES ON podium_de.* TO 'podium_migrate'@'%';
-GRANT PROCESS ON *.* TO 'podium_migrate'@'%';
-CREATE USER 'podium_app'@'%' IDENTIFIED BY '...';
-GRANT EXECUTE ON podium_de.* TO 'podium_app'@'%';
-```
-
-SP는 `SQL SECURITY DEFINER`(기본값)이고 migrate 계정이 만들므로 DEFINER가 `podium_migrate`가 된다.
-앱 계정은 테이블 권한 없이 SP로만 접근한다. API·워커만 실행하는 호스트의 `.env`에는 `DB_MIGRATE_*`를 두지 않는다.
+MySQL에 `podium_de` 스키마와 두 계정(migrate, 앱)을 먼저 만들어 둔다. 상세 절차는
+[`docs/03_DEV_SETUP.md`](docs/03_DEV_SETUP.md).
 
 API·워커는 기동 시 하트비트를 기록한 뒤
 migrate와 같은 락을 잡고 DB 스키마가 패키지와 같은지 확인만 하며, 다르면 하트비트를 지우고 기동하지 않는다.
