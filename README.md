@@ -247,14 +247,14 @@ pm2 — 최초 1회 등록한다. `--kill-timeout`은 정상 종료(진행 중 �
 
 ```bash
 pm2 start dist/api.js --name podium-api -i 2 --wait-ready --listen-timeout 20000 --kill-timeout 10000
-pm2 start dist/worker.js --name podium-worker --wait-ready --listen-timeout 20000 --kill-timeout 10000
+pm2 start dist/worker.js --name podium-worker -i 2 --wait-ready --listen-timeout 20000 --kill-timeout 10000
 ```
 
 ```dotenv
 UPGRADE_STOP_CMD=pm2 stop podium-api podium-worker
 UPGRADE_START_CMD=pm2 start podium-api podium-worker
 UPGRADE_EXPECT_API=2
-UPGRADE_EXPECT_WORKER=1
+UPGRADE_EXPECT_WORKER=2
 ```
 
 직접 실행 (Linux) — 시작 명령은 백그라운드로 띄우고 출력을 파일로 돌린다. 중지 명령은
@@ -268,6 +268,12 @@ UPGRADE_EXPECT_WORKER=1
 ```
 
 upgrade 없이 수동으로 할 때는 전체 프로세스 중지 → `npm run migrate` → API·워커 기동 순서로 한다.
+
+API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 워커는 잡마다 한 곳에서만 돌아
+늘려도 빨라지지 않으므로 장애 대비로 2대를 둔다. 한 대가 죽으면 다른 워커가 다음 차례에 락을
+잡고 이어서 돌린다([01_DESIGN 11.3](docs/01_DESIGN.md#113-잡-실행)). 인스턴스마다 커넥션
+풀(`DB_POOL_SIZE`)을 따로 가지므로, (API 수 + 워커 수) × `DB_POOL_SIZE`가 MySQL
+`max_connections`를 넘지 않게 한다.
 
 API·워커는 실행 중 10초마다 `instance_heartbeat`에 하트비트를 남기고, 정상 종료 시 자기 행을
 지운다. 인스턴스 ID는 기동마다 새로 만드는 UUID이고, 마지막 하트비트에서 1시간이 지난 행은
