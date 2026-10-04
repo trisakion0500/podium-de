@@ -12,7 +12,7 @@ GM 도구(관리 API)로 행을 만든다.
 
 | 테이블 | 용도 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- |
-| `ranking_def` | 랭킹 정의 (갱신 규칙, 정렬, 일정, 보관, 검증 설정). 순위 규칙은 등록 후 불변 | — | 영구 | [2.1](01_DESIGN.md#21-ranking_def), [2.7](01_DESIGN.md#27-등록-검증) |
+| `ranking_definition` | 랭킹 정의 (갱신 규칙, 정렬, 일정, 보관, 검증 설정). 순위 규칙은 등록 후 불변 | — | 영구 | [2.1](01_DESIGN.md#21-ranking_definition), [2.7](01_DESIGN.md#27-등록-검증) |
 | `ranking_reward_tier` | 랭킹별 보상 구간 (순위·백분율 → `reward_code`) | — | 영구. 정산 시 `tier_snapshot`에 고정 | [2.6](01_DESIGN.md#26-보상-구간) |
 | `ranking_exclusion` | 제재로 순위에서 제외할 멤버 (`season_no = 0`은 전 시즌) | — | 영구 | [7.8](01_DESIGN.md#78-제재-처리) |
 
@@ -23,13 +23,12 @@ GM 도구(관리 API)로 행을 만든다.
 | 테이블 | 용도 | 쓰는 주체 | 관리자 조작 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, 상태 전이) | SCHEDULED 수정, OPEN `end_at` 변경, 검수 보류·조기 확정, DELIVERING 강제 종료 | — | 영구 | [3.1](01_DESIGN.md#31-ranking_season), [3.4](01_DESIGN.md#34-관리자-수정-범위), [7.5](01_DESIGN.md#75-review-검수), [7.7](01_DESIGN.md#77-delivering-보상-전달) |
-| `ranking_entry` | 진행 중 시즌의 멤버별 현재 스코어 (운영 테이블, 랭킹 간 공유) | 제출 API | — | 시즌 | SETTLING에 작업 테이블로 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
+| `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | 보류(held) 건을 PENDING 또는 REJECTED로 전환 | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED에 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [7.4](01_DESIGN.md#74-결과-컬럼), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
 | `ranking_submit_key` | 제출 멱등 키 (재전송 판별, 하드 검증 거부 사유) | 제출 API | — | 시즌 | 자기 시즌 SETTLED에 분리 | [4.4](01_DESIGN.md#44-ranking_submit_key), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
-| `ranking_entry_settling` | 정산 작업 테이블 (entry 파티션과 EXCHANGE, result 적재 후 백업으로 RENAME) | 정산 잡 | — | — | 정산마다 재생성 | [7.3](01_DESIGN.md#73-settling-entry-분리와-가순위-생성) |
-| `ranking_result` | 시즌 최종 순위와 보상 상태 | 정산 잡, 보상 ack API | 보류(held) 건을 PENDING 또는 REJECTED로 전환 | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED에 분리 | [7.4](01_DESIGN.md#74-ranking_result), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
+| `ranking_entry_settling` | 정산 작업 테이블 (entry 시즌 파티션을 꺼내 가순위를 매긴 뒤 되돌림) | 정산 잡 | — | — | 평소 비어 있음 | [7.3](01_DESIGN.md#73-settling-가순위-생성) |
 | `ranking_hall` | 시즌별 상위 `hall_size` | 정산 잡 (FINALIZING) | — (지급 후 제재 시 `sanctioned`는 제재 처리가 갱신) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_hall) |
 | `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#92-소프트-탐지-받되-표시), [9.3](01_DESIGN.md#93-어뷰징-포인트) |
-| `ddl_audit_log` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
+| `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
 | `job_state` | 워커 잡별 워터마크 (리컨실러 checkpoint 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
 | `instance_heartbeat` | 실행 중인 API·워커 인스턴스 | API·워커 하트비트 | — | — | 정상 종료 시 삭제, 1시간 경과 행 정리 | [11.4](01_DESIGN.md#114-운영-테이블) |
 | `schema_migration` | 마이그레이션 적용 이력 | 러너 (테이블도 러너가 직접 생성) | — | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
@@ -40,11 +39,11 @@ GM 도구(관리 API)로 행을 만든다.
 
 | 테이블 | 용도 | 쓰는 주체 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- |
-| `ranking_submit_log` | 모든 제출 요청의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 일 파티션 DROP | [4.5](01_DESIGN.md#45-ranking_submit_log-로그-db) |
-| `ddl_audit_log` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#45-ranking_submit_log-로그-db), [11.4](01_DESIGN.md#114-운영-테이블) |
+| `log_ranking_submit` | 모든 제출 요청의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 일 파티션 DROP | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
+| `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db), [11.4](01_DESIGN.md#114-운영-테이블) |
 | `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
 
-**메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`, `ranking_result`). 시즌마다 생기며 `history_retention`이 지나면 삭제한다 ([8.3](01_DESIGN.md#83-보관-방식)). 정리가 멈추면 알린다 ([11.4](01_DESIGN.md#114-운영-테이블)).
+**메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`). 시즌마다 생기며 `history_retention`이 지나면 삭제한다 ([8.3](01_DESIGN.md#83-보관-방식)). 정리가 멈추면 알린다 ([11.4](01_DESIGN.md#114-운영-테이블)).
 
 **코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/codes.ts`에 있다 (D-46).
 
@@ -54,16 +53,15 @@ GM 도구(관리 API)로 행을 만든다.
 
 ```mermaid
 erDiagram
-    ranking_def ||--o{ ranking_reward_tier : "보상 구간"
-    ranking_def ||--o{ ranking_season : "시즌"
-    ranking_def ||--o{ ranking_exclusion : "제재 (season_no 0 = 전 시즌)"
-    ranking_season ||--o{ ranking_entry : "진행 중 스코어"
+    ranking_definition ||--o{ ranking_reward_tier : "보상 구간"
+    ranking_definition ||--o{ ranking_season : "시즌"
+    ranking_definition ||--o{ ranking_exclusion : "제재 (season_no 0 = 전 시즌)"
+    ranking_season ||--o{ ranking_entry : "스코어와 결과"
     ranking_season ||--o{ ranking_submit_key : "멱등 키"
-    ranking_season ||--o{ ranking_result : "정산 결과"
     ranking_season ||--o{ ranking_hall : "상위 N 영구"
     ranking_season ||--o{ ranking_suspicion : "어뷰징 근거"
 
-    ranking_def {
+    ranking_definition {
         int ranking_id PK
         varchar ranking_code UK
         tinyint status "RankingStatus"
@@ -93,6 +91,8 @@ erDiagram
         bigint score
         datetime achieved_at
         int version
+        int final_rank "SETTLING 이후"
+        tinyint reward_status "RewardStatus"
     }
     ranking_submit_key {
         int ranking_id PK
@@ -101,14 +101,6 @@ erDiagram
         varchar member_id
         bigint input_value
         varchar rejected
-    }
-    ranking_result {
-        int ranking_id PK
-        int season_no PK
-        varchar member_id PK
-        int final_rank
-        varchar reward_code
-        tinyint reward_status "RewardStatus"
     }
     ranking_hall {
         int ranking_id PK
@@ -134,8 +126,8 @@ erDiagram
 
 ```mermaid
 erDiagram
-    ddl_audit_log {
-        bigint ddl_audit_log_id PK
+    log_ddl_audit {
+        bigint log_ddl_audit_id PK
         tinyint status "DdlAuditStatus"
     }
     job_state {
@@ -159,8 +151,8 @@ erDiagram
 
 ```mermaid
 erDiagram
-    ranking_submit_log {
-        bigint ranking_submit_log_id PK
+    log_ranking_submit {
+        bigint log_ranking_submit_id PK
         datetime created_at PK "일 파티션 키"
         int ranking_id
         varchar request_id
@@ -168,8 +160,8 @@ erDiagram
         int result_code
         json meta
     }
-    ddl_audit_log {
-        bigint ddl_audit_log_id PK
+    log_ddl_audit {
+        bigint log_ddl_audit_id PK
         tinyint status "DdlAuditStatus"
     }
 ```
@@ -191,7 +183,7 @@ sequenceDiagram
     Note over GM,L: 등록 (2.1, 2.6, 3.3)
     GM->>API: 랭킹 등록 + 보상 구간
     API->>API: 등록 검증 (2.7)
-    Note right of API: ranking_def, ranking_reward_tier INSERT<br/>첫 시즌들 ranking_season (SCHEDULED)<br/>시즌 파티션 추가 (entry, submit_key, result)
+    Note right of API: ranking_definition, ranking_reward_tier INSERT<br/>첫 시즌들 ranking_season (SCHEDULED)<br/>시즌 파티션 추가 (entry, submit_key)
 
     Note over GM,L: 시즌 진행 (3.5, 4장)
     W->>W: start_at 도달 → OPEN
@@ -209,7 +201,7 @@ sequenceDiagram
     Note over GM,L: 마감과 정산 (7.1~7.3)
     W->>W: end_at 도달 → CLOSED (제출은 시각 검사로 이미 거부)
     W->>W: settle_at + 미종료 트랜잭션 없음 + 워터마크 통과 → SETTLING
-    Note right of W: ranking_entry 파티션 ⇄ ranking_entry_settling<br/>→ ranking_result 가순위 적재<br/>→ ranking_entry_r{id}_s{n} 백업
+    Note right of W: ranking_entry 파티션 → ranking_entry_settling (꺼내기)<br/>→ final_rank 가순위 UPDATE<br/>→ ranking_entry 파티션으로 되돌리기
     W->>R: 시즌 키 삭제 (센티넬 먼저)
     W->>W: REVIEW, review_until 기록
 
@@ -217,7 +209,7 @@ sequenceDiagram
     GM->>API: 보류 / 조기 확정 / 제재 추가 (선택)
     Note right of API: ranking_season.review_hold, ranking_exclusion
     W->>W: review_until 경과 (보류 없음) → FINALIZING
-    Note right of W: 제재 제외·순위 재부여 (ranking_result)<br/>participant_count, tier_snapshot (ranking_season)<br/>reward_code·reward_status 판정<br/>상위 hall_size → ranking_hall
+    Note right of W: 제재 제외·순위 재부여 (ranking_entry)<br/>participant_count, tier_snapshot (ranking_season)<br/>reward_code·reward_status 판정<br/>상위 hall_size → ranking_hall
     W->>W: DELIVERING
     W-->>GS: 정산 완료 웹훅 (신호만)
 
@@ -226,11 +218,11 @@ sequenceDiagram
         GS->>API: 보상 목록 조회 (페이지)
         GS->>GS: 우편 발송 (멱등 키 ranking_id, season_no, member_id)
         GS->>API: ack
-        Note right of API: ranking_result → DELIVERED
+        Note right of API: ranking_entry → DELIVERED
     end
     GM->>API: 보류 건 PENDING/REJECTED 전환 (선택)
     W->>W: PENDING 모두 처리 → SETTLED
-    Note right of W: ranking_submit_key 파티션 → 백업<br/>이전 시즌 ranking_result 파티션 → 백업 (8.2)
+    Note right of W: ranking_submit_key 파티션 → 백업<br/>이전 시즌 ranking_entry 파티션 → 백업 (8.2)
 ```
 
 - 시즌 랭킹은 "시즌 진행"부터 "보상 전달"까지가 시즌마다 반복된다. 정산은 다음 시즌과 병렬로 진행된다 (3.2).
@@ -247,31 +239,29 @@ flowchart LR
     GS([게임 서버])
 
     subgraph ADMIN[관리자 등록]
-        DEF[ranking_def]
+        DEF[ranking_definition]
         TIER[ranking_reward_tier]
         EXC[ranking_exclusion]
     end
 
-    subgraph LIVE[시즌 진행 — 운영 테이블]
+    subgraph LIVE[운영 테이블]
         SEA[ranking_season]
         KEY[("ranking_submit_key<br/>시즌 파티션")]
-        ENT[("ranking_entry<br/>시즌 파티션")]
+        ENT[("ranking_entry<br/>시즌 파티션<br/>스코어 + 결과")]
         SUS[ranking_suspicion]
     end
 
     RD[("Redis<br/>시즌 ZSET")]
-    SLOG[("로그 DB<br/>ranking_submit_log<br/>일 파티션")]
+    SLOG[("로그 DB<br/>log_ranking_submit<br/>일 파티션")]
 
-    subgraph RESULT[정산 결과]
+    subgraph RESULT[정산]
         STL[ranking_entry_settling]
-        RES[("ranking_result<br/>시즌 파티션")]
         HALL[ranking_hall]
     end
 
     subgraph BACKUP[백업 테이블 — history_retention 후 삭제]
         EB[ranking_entry_r_s]
         KB[ranking_submit_key_r_s]
-        RB[ranking_result_r_s]
     end
 
     GM -- "① 등록" --> DEF & TIER
@@ -283,32 +273,31 @@ flowchart LR
     ENT -- "② 소프트 탐지" --> SUS
     GM -- "② 제재 (언제든)" --> EXC
     EXC -. "② 실시간 순위에서 제외" .-> RD
-    ENT == "③ EXCHANGE" ==> STL
-    STL -- "③ 가순위 청크 적재" --> RES
-    STL -- "③ RENAME" --> EB
+    ENT == "③ EXCHANGE 꺼내기" ==> STL
+    STL == "③ 가순위 후 EXCHANGE 되돌리기" ==> ENT
     TIER -- "④ tier_snapshot 고정" --> SEA
-    EXC -- "④ 제외 · 순위 재부여" --> RES
-    SEA -- "④ 보상 구간 판정" --> RES
-    SUS -- "④ 보류 임계치 → reward_held" --> RES
-    RES -- "④ 상위 hall_size" --> HALL
-    RES -- "⑤ PENDING 목록" --> GS
-    GS -- "⑤ ack → DELIVERED" --> RES
+    EXC -- "④ 제외 · 순위 재부여" --> ENT
+    SEA -- "④ 보상 구간 판정" --> ENT
+    SUS -- "④ 보류 임계치 → reward_held" --> ENT
+    ENT -- "④ 상위 hall_size" --> HALL
+    ENT -- "⑤ PENDING 목록" --> GS
+    GS -- "⑤ ack → DELIVERED" --> ENT
     KEY == "⑥ 자기 시즌 SETTLED" ==> KB
-    RES == "⑥ 자기 · 다음 시즌 SETTLED" ==> RB
+    ENT == "⑥ 자기 · 다음 시즌 SETTLED" ==> EB
 ```
 
 | 단계 | 3절 구간 | 데이터 이동 |
 | --- | --- | --- |
-| ① | 등록 | 관리자 입력 → `ranking_def`, `ranking_reward_tier`. 정의로부터 `ranking_season` 행과 시즌 파티션 생성 |
-| ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 모든 제출 결과는 로그 DB `ranking_submit_log`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 근거를 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
-| ③ | 마감과 정산 | `ranking_entry` 파티션 → `ranking_entry_settling`(EXCHANGE) → `ranking_result` 가순위, settling은 entry 백업으로 RENAME. Redis 시즌 키 삭제 |
-| ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_result.reward_code`, 어뷰징 포인트로 보류, 상위 N → `ranking_hall` |
-| ⑤ | 보상 전달 | `ranking_result` PENDING → 게임 서버 → ack로 DELIVERED |
-| ⑥ | SETTLED 이후 | `ranking_submit_key`, `ranking_result` 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 삭제 |
+| ① | 등록 | 관리자 입력 → `ranking_definition`, `ranking_reward_tier`. 정의로부터 `ranking_season` 행과 시즌 파티션 생성 |
+| ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 모든 제출 결과는 로그 DB `log_ranking_submit`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 근거를 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
+| ③ | 마감과 정산 | `ranking_entry` 파티션을 `ranking_entry_settling`으로 꺼내(EXCHANGE) `final_rank` 가순위를 매기고 같은 파티션으로 되돌린다(EXCHANGE). 행 복사 없음. Redis 시즌 키 삭제 |
+| ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트로 보류, 상위 N → `ranking_hall` |
+| ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED |
+| ⑥ | SETTLED 이후 | `ranking_submit_key`(자기 시즌 SETTLED), `ranking_entry`(자기·다음 시즌 SETTLED) 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 삭제 |
 
 - Redis는 `ranking_entry`의 투영이다. 언제든 MySQL로 재구축할 수 있으므로 흐름의 끝점이 아니다 (1.5, 6.3).
 - 로그 DB는 서비스 경로가 아니라서 시즌과 무관하게 날짜로 정리하며, 데이터가 찬 일 파티션을 DROP한다 (4.5).
-- 운영 테이블(`ranking_entry`, `ranking_submit_key`, `ranking_result`)에서 데이터가 빠질 때는 항상 EXCHANGE를 쓴다. 데이터가 찬 파티션을 직접 DROP하지 않는다 (8.1).
+- 운영 테이블(`ranking_entry`, `ranking_submit_key`)에서 데이터가 빠질 때는 항상 EXCHANGE를 쓴다. 데이터가 찬 파티션을 직접 DROP하지 않는다 (8.1).
 
 ## 5. 스코어 적용
 
@@ -321,7 +310,7 @@ flowchart TD
     RATE -- "통과" --> ACT
 
     subgraph SP["SP_SUBMIT_SCORE (MySQL, 한 트랜잭션)"]
-        ACT{"ranking_def.status<br/>= ACTIVE?"}
+        ACT{"ranking_definition.status<br/>= ACTIVE?"}
         ACT -- "아니오" --> X1["RANKING_INACTIVE<br/>(멱등 키 없음)"]
         ACT -- "예" --> SEA{"seasonNo가 현재 시즌?<br/>NOW(3) ∈ [start_at, end_at)"}
         SEA -- "아니오" --> X2["SEASON_MISMATCH / 시즌 밖<br/>(멱등 키 없음)"]

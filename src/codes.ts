@@ -5,8 +5,9 @@
  */
 
 /**
- * 랭킹 상태 (ranking_def.status)
+ * 랭킹 상태 (ranking_definition.status)
  * @author trisakion
+ * @modified 2026-10-04 trisakion 테이블명 변경 반영 (D-50)
  */
 export const RankingStatus = {
     /** 운영 중. 제출을 받는다 */
@@ -18,8 +19,9 @@ export const RankingStatus = {
 } as const;
 
 /**
- * 갱신 규칙 (ranking_def.update_rule, 01_DESIGN 2.3). 등록 후 불변
+ * 갱신 규칙 (ranking_definition.update_rule, 01_DESIGN 2.3). 등록 후 불변
  * @author trisakion
+ * @modified 2026-10-04 trisakion 테이블명 변경 반영 (D-50)
  */
 export const UpdateRule = {
     /** 최고 기록. score = GREATEST(score, 입력) */
@@ -31,8 +33,9 @@ export const UpdateRule = {
 } as const;
 
 /**
- * 정렬 방향 (ranking_def.sort_order). 등록 후 불변
+ * 정렬 방향 (ranking_definition.sort_order). 등록 후 불변
  * @author trisakion
+ * @modified 2026-10-04 trisakion 테이블명 변경 반영 (D-50)
  */
 export const SortOrder = {
     /** 큰 값이 위 */
@@ -42,8 +45,9 @@ export const SortOrder = {
 } as const;
 
 /**
- * 동점 처리 시간 단위 (ranking_def.time_unit, 01_DESIGN 2.4). 등록 후 불변
+ * 동점 처리 시간 단위 (ranking_definition.time_unit, 01_DESIGN 2.4). 등록 후 불변
  * @author trisakion
+ * @modified 2026-10-04 trisakion 테이블명 변경 반영 (D-50)
  */
 export const TimeUnit = {
     /** 밀리초 */
@@ -57,8 +61,9 @@ export const TimeUnit = {
 } as const;
 
 /**
- * 시즌 주기 (ranking_def.cycle_type, 01_DESIGN 2.5, D-45)
+ * 시즌 주기 (ranking_definition.cycle_type, 01_DESIGN 2.5, D-45)
  * @author trisakion
+ * @modified 2026-10-04 trisakion 테이블명 변경 반영 (D-50)
  */
 export const CycleType = {
     /** 반복 없음. end_at이 있으면 단일 시즌 이벤트, 없으면 영구 랭킹 */
@@ -87,6 +92,7 @@ export const RangeType = {
 /**
  * 시즌 상태 (ranking_season.status, 01_DESIGN 3.5). 진행 순서대로 번호를 매겨 크기 비교로 단계를 판단할 수 있다
  * @author trisakion
+ * @modified 2026-10-03 trisakion SETTLING 설명을 결과 통합에 맞춤 (D-49)
  */
 export const SeasonStatus = {
     /** 시작 전 */
@@ -95,7 +101,7 @@ export const SeasonStatus = {
     OPEN: 2,
     /** 적재 차단 (실제 차단은 시각 검사) */
     CLOSED: 3,
-    /** entry 분리, 가순위 result 생성 */
+    /** entry 파티션을 작업 테이블로 꺼내 가순위 생성 후 되돌림 */
     SETTLING: 4,
     /** 검수. 제재 반영 가능, 지급 없음 */
     REVIEW: 5,
@@ -108,11 +114,12 @@ export const SeasonStatus = {
 } as const;
 
 /**
- * 보상 상태 (ranking_result.reward_status, 01_DESIGN 7.4)
+ * 보상 상태 (ranking_entry.reward_status, 01_DESIGN 7.4)
  * @author trisakion
+ * @modified 2026-10-03 trisakion 대상 컬럼을 ranking_entry로 변경 (D-49)
  */
 export const RewardStatus = {
-    /** 보상 구간 밖 */
+    /** 미판정(진행 중) 또는 보상 구간 밖 */
     NONE: 0,
     /** 대상, 전달 전 */
     PENDING: 1,
@@ -123,7 +130,7 @@ export const RewardStatus = {
 } as const;
 
 /**
- * DDL 실행 상태 (ddl_audit_log.status)
+ * DDL 실행 상태 (log_ddl_audit.status)
  * @author trisakion
  */
 export const DdlAuditStatus = {
@@ -149,12 +156,11 @@ export const ProcessType = {
 /**
  * 관리 SP의 파티션 대상 테이블 코드 (SP_PARTITION_EXCHANGE, SP_PARTITION_DROP의 code 파라미터, 01_DESIGN 11.2)
  * @author trisakion
+ * @modified 2026-10-03 trisakion RESULT 제거 (D-49)
  */
 export const PartitionTarget = {
     /** ranking_entry */
     ENTRY: 1,
     /** ranking_submit_key */
     SUBMIT_KEY: 2,
-    /** ranking_result */
-    RESULT: 3,
 } as const;

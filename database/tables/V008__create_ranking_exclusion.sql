@@ -7,7 +7,7 @@
 --        ranking_id, season_no는 FK 없음: season_no 0 sentinel이 있고, 키 구조는 설계를 따른다 (D-35).
 -- ------------------------------------------------------------------------------------------------------------ --
 CREATE TABLE `ranking_exclusion` (
-    `ranking_id`    INT             UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`    INT             UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`     INT             UNSIGNED               NOT NULL        COMMENT '시즌 번호 (0:해당 랭킹 전 시즌, FK 없음)',
     `member_id`     VARCHAR(64)     COLLATE utf8mb4_bin    NOT NULL        COMMENT '멤버 ID (대소문자 구분)',
     `reason`        VARCHAR(255)                           NOT NULL        COMMENT '제재 사유',

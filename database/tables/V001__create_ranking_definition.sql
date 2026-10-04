@@ -1,11 +1,12 @@
 -- ------------------------------------------------------------------------------------------------------------ --
--- 명칭 : ranking_def
+-- 명칭 : ranking_definition
 -- 작성 : 2026.10.02 trisakion
+-- 수정 : 2026.10.04 trisakion 테이블명 변경 (D-50)
 -- 내용 : 랭킹 정의 (01_DESIGN 2.1). 관리자가 등록하며 순위 규칙(update_rule~time_bits)은 등록 후 불변이다.
 --        ranking_id는 1부터 쓴다. (0, 0)은 파티션 테이블의 초기 파티션 p_init 값이다 (01_DESIGN 4.2).
 --        ranking_code는 식별자라 utf8mb4_bin으로 대소문자를 구분한다 (D-35).
 -- ------------------------------------------------------------------------------------------------------------ --
-CREATE TABLE `ranking_def` (
+CREATE TABLE `ranking_definition` (
     `ranking_id`            INT             UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (1부터)',
     `ranking_code`          VARCHAR(64)     COLLATE utf8mb4_bin    NOT NULL                    COMMENT '랭킹 코드 (게임 서버 식별용, 대소문자 구분)',
     `ranking_name`          VARCHAR(128)                           NOT NULL                    COMMENT '랭킹 이름',

@@ -47,10 +47,10 @@
 
 관리자가 등록한다.
 
-### 2.1 ranking_def
+### 2.1 ranking_definition
 
 ```sql
-CREATE TABLE `ranking_def` (
+CREATE TABLE `ranking_definition` (
     `ranking_id`            INT             UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (1부터)',
     `ranking_code`          VARCHAR(64)     COLLATE utf8mb4_bin    NOT NULL                    COMMENT '랭킹 코드 (게임 서버 식별용, 대소문자 구분)',
     `ranking_name`          VARCHAR(128)                           NOT NULL                    COMMENT '랭킹 이름',
@@ -149,7 +149,7 @@ time_bits = bits(최대 시즌 길이 / time_unit)
 
 ```sql
 CREATE TABLE `ranking_reward_tier` (
-    `ranking_id`     INT            UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`     INT            UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `tier_no`        SMALLINT       UNSIGNED               NOT NULL        COMMENT '구간 번호 (랭킹 안에서 유일)',
     `range_type`     TINYINT        UNSIGNED               NOT NULL        COMMENT '구간 기준 (1:RANK 순위, 2:PERCENT 제재 제외 참가자 수 대비 백분율) [codes.RangeType]',
     `range_from`     INT            UNSIGNED               NOT NULL        COMMENT '구간 시작 (포함)',
@@ -185,13 +185,13 @@ CREATE TABLE `ranking_reward_tier` (
 
 ```sql
 CREATE TABLE `ranking_season` (
-    `ranking_id`           INT             UNSIGNED    NOT NULL                    COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`           INT             UNSIGNED    NOT NULL                    COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`            INT             UNSIGNED    NOT NULL                    COMMENT '시즌 번호 (랭킹 안에서 1부터)',
     `start_at`             DATETIME(3)                 NOT NULL                    COMMENT '시즌 시작 시각 (UTC, 포함)',
     `end_at`               DATETIME(3)                 NOT NULL                    COMMENT '시즌 종료 시각 (UTC, 미포함)',
     `settle_at`            DATETIME(3)                 NOT NULL                    COMMENT '정산 시작 하한 시각 (UTC, end_at + settle_delay)',
     `review_until`         DATETIME(3)                             DEFAULT NULL    COMMENT '검수 종료 시각 (UTC, 정산 결과 생성 후 확정)',
-    `status`               TINYINT         UNSIGNED    NOT NULL                    COMMENT '상태, 진행 순서대로 증가 (1:SCHEDULED 예정, 2:OPEN 적재, 3:CLOSED 적재 차단, 4:SETTLING entry 분리·가순위, 5:REVIEW 검수, 6:FINALIZING 확정, 7:DELIVERING 보상 전달, 8:SETTLED 완료) [codes.SeasonStatus]',
+    `status`               TINYINT         UNSIGNED    NOT NULL                    COMMENT '상태, 진행 순서대로 증가 (1:SCHEDULED 예정, 2:OPEN 적재, 3:CLOSED 적재 차단, 4:SETTLING 가순위 생성, 5:REVIEW 검수, 6:FINALIZING 확정, 7:DELIVERING 보상 전달, 8:SETTLED 완료) [codes.SeasonStatus]',
     `review_hold`          TINYINT(1)                  NOT NULL    DEFAULT 0       COMMENT '검수 보류 (1:보류 — 해제 전까지 확정하지 않음, 0:없음)',
     `participant_count`    INT             UNSIGNED                DEFAULT NULL    COMMENT '제재 제외 후 확정 참가자 수 (FINALIZING에서 기록)',
     `tier_snapshot`        JSON                                    DEFAULT NULL    COMMENT '정산 시 적용된 보상 구간 스냅샷',
@@ -214,9 +214,9 @@ CREATE TABLE `ranking_season` (
 
 ### 3.3 자동 생성
 
-- **등록 시:** `ranking_def` INSERT와 같은 트랜잭션에서 첫 시즌들을 생성한다.
+- **등록 시:** `ranking_definition` INSERT와 같은 트랜잭션에서 첫 시즌들을 생성한다.
 - **이후:** 스케줄러가 현재 시점부터 일정 주기 앞까지 시즌 행을 유지한다. `INSERT IGNORE`로 멱등하게 처리한다.
-- **시즌 행 생성 시:** 해당 `(ranking_id, season_no)` 파티션을 `ranking_entry`, `ranking_submit_key`, `ranking_result`에 추가한다.
+- **시즌 행 생성 시:** 해당 `(ranking_id, season_no)` 파티션을 `ranking_entry`, `ranking_submit_key`에 추가한다.
 - **OPEN 전이 시:** Redis 센티넬(`:ready`)을 설정한다 (5.3).
 
 ### 3.4 관리자 수정 범위
@@ -240,7 +240,7 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
 | --- | --- |
 | OPEN | 스코어 적재 |
 | CLOSED | 적재 차단 (시각 검사로 보장) |
-| SETTLING | entry 분리, 가순위 result 생성 |
+| SETTLING | entry 파티션을 작업 테이블로 꺼내 가순위 생성 후 되돌림 |
 | REVIEW | 검수. 제재 반영 가능, 지급 없음 |
 | FINALIZING | 제재 제외, 순위 재부여, 보상 판정, hall 적재 |
 | DELIVERING | 게임 서버가 보상 목록 수신 및 ack |
@@ -295,24 +295,34 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
 
 ```sql
 CREATE TABLE `ranking_entry` (
-    `ranking_id`     INT            UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (ranking_def, FK 없음 — 파티션 테이블은 FK 불가)',
-    `season_no`      INT            UNSIGNED               NOT NULL                    COMMENT '시즌 번호 (ranking_season)',
-    `member_id`      VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                    COMMENT '멤버 ID (게임 서버 식별자, 대소문자 구분)',
-    `score`          BIGINT         UNSIGNED               NOT NULL                    COMMENT '현재 스코어',
-    `achieved_at`    DATETIME(3)                           NOT NULL                    COMMENT '현재 스코어 달성 시각 (UTC, MySQL NOW(3)) — 동점 시 먼저 달성한 쪽이 위',
-    `version`        INT            UNSIGNED               NOT NULL    DEFAULT 1       COMMENT '값 변경 버전 (실제로 바뀔 때만 증가, Redis 반영 순서 비교용)',
-    `source_seq`     BIGINT         UNSIGNED                           DEFAULT NULL    COMMENT '게임 서버 소스 시퀀스 (LATEST 전용, 2차 범위)',
-    `updated_at`     DATETIME(3)                           NOT NULL                    COMMENT '값 변경 시각 (UTC, 실제로 바뀔 때만 갱신) — 리컨실러 워터마크 스캔 기준',
+    `ranking_id`       INT            UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (ranking_definition, FK 없음 — 파티션 테이블은 FK 불가)',
+    `season_no`        INT            UNSIGNED               NOT NULL                    COMMENT '시즌 번호 (ranking_season)',
+    `member_id`        VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                    COMMENT '멤버 ID (게임 서버 식별자, 대소문자 구분)',
+    `score`            BIGINT         UNSIGNED               NOT NULL                    COMMENT '스코어 (진행 중 현재 값, 마감 후 최종 값)',
+    `achieved_at`      DATETIME(3)                           NOT NULL                    COMMENT '현재 스코어 달성 시각 (UTC, MySQL NOW(3)) — 동점 시 먼저 달성한 쪽이 위',
+    `version`          INT            UNSIGNED               NOT NULL    DEFAULT 1       COMMENT '값 변경 버전 (실제로 바뀔 때만 증가, Redis 반영 순서 비교용)',
+    `source_seq`       BIGINT         UNSIGNED                           DEFAULT NULL    COMMENT '게임 서버 소스 시퀀스 (LATEST 전용, 2차 범위)',
+    `updated_at`       DATETIME(3)                           NOT NULL                    COMMENT '값 변경 시각 (UTC, 실제로 바뀔 때만 갱신) — 리컨실러 워터마크 스캔 기준',
+    `final_rank`       INT            UNSIGNED                           DEFAULT NULL    COMMENT '순위 (SETTLING 가순위, FINALIZING 확정. NULL:미산정 또는 제재 제외)',
+    `reward_code`      VARCHAR(64)    COLLATE utf8mb4_bin                DEFAULT NULL    COMMENT '판정된 보상 코드 (NULL:미판정 또는 구간 밖, 대소문자 구분)',
+    `reward_status`    TINYINT        UNSIGNED               NOT NULL    DEFAULT 0       COMMENT '보상 상태 (0:NONE 미판정 또는 구간 밖, 1:PENDING 전달 전, 2:DELIVERED 게임 서버 ack 완료, 3:REJECTED 제재로 미지급) [codes.RewardStatus]',
+    `reward_held`      TINYINT(1)                            NOT NULL    DEFAULT 0       COMMENT '보상 보류 (1:어뷰징 포인트 임계치 초과로 보류, 0:없음)',
+    `sanctioned`       TINYINT(1)                            NOT NULL    DEFAULT 0       COMMENT '제재 표시 (1:제재됨, 0:없음) — 보상 상태와 별개',
+    `delivered_at`     DATETIME(3)                                       DEFAULT NULL    COMMENT '보상 전달 ack 시각 (UTC)',
     PRIMARY KEY (`ranking_id`, `season_no`, `member_id`),
-    KEY `ix_updated_at` (`ranking_id`, `season_no`, `updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='진행 중 시즌의 멤버별 스코어 (운영 테이블, 시즌 파티션)'
+    KEY `ix_updated_at` (`ranking_id`, `season_no`, `updated_at`),
+    KEY `ix_final_rank` (`ranking_id`, `season_no`, `final_rank`),
+    KEY `ix_reward_status` (`ranking_id`, `season_no`, `reward_status`, `member_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='시즌별 멤버 스코어와 정산 결과 (운영 테이블, 시즌 파티션)'
 PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
     PARTITION `p_init` VALUES IN ((0, 0))
 );
 ```
 
-- 진행 중인 시즌의 데이터만 보관한다.
-- LIST 파티션 테이블은 생성 시 파티션이 최소 하나 필요하므로 `p_init ((0,0))`을 둔다. `ranking_id`는 1부터 시작한다. `ranking_submit_key`, `ranking_result`도 동일하다.
+- 시즌의 스코어와 정산 결과를 한 행에 둔다. 결과 컬럼(`final_rank`~`delivered_at`)은 진행 중에는 비어 있고, 정산 단계에서 채운다 (7.3~7.7, D-49).
+- 시즌 데이터는 결과가 백업으로 분리될 때(자기 시즌과 다음 시즌 모두 SETTLED)까지 보관한다 (8.2).
+- 제출이 결과 컬럼을 건드리지 않으므로 결과 인덱스(`ix_final_rank`, `ix_reward_status`)는 신규 멤버 INSERT 때만 비용이 든다.
+- LIST 파티션 테이블은 생성 시 파티션이 최소 하나 필요하므로 `p_init ((0,0))`을 둔다. `ranking_id`는 1부터 시작한다. `ranking_submit_key`도 동일하다.
 - 정의되지 않은 `(ranking_id, season_no)`는 INSERT 시 에러가 발생한다. 잘못된 파티션에 조용히 들어가는 것을 방지한다.
 
 ### 4.3 BEST upsert
@@ -336,7 +346,7 @@ ODKU는 왼쪽부터 평가되므로 `score`를 마지막에 둔다. ASC 정렬�
 
 ```sql
 CREATE TABLE `ranking_submit_key` (
-    `ranking_id`     INT            UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (ranking_def, FK 없음 — 파티션 테이블은 FK 불가)',
+    `ranking_id`     INT            UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (ranking_definition, FK 없음 — 파티션 테이블은 FK 불가)',
     `season_no`      INT            UNSIGNED               NOT NULL                    COMMENT '시즌 번호 (제출 요청의 seasonNo)',
     `request_id`     VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                    COMMENT '멱등 키 (게임 서버 requestId, 대소문자 구분)',
     `member_id`      VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                    COMMENT '멤버 ID (같은 내용 비교, 검수 목록, 대소문자 구분)',
@@ -357,15 +367,15 @@ PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
 - `meta`, `result_score` 같은 이력 컬럼은 두지 않는다. 행을 작게 유지하는 것이 이 테이블을 분리한 목적이다.
 - 검수 근거(`rejected`)로 SETTLED까지 유지한다.
 
-### 4.5 ranking_submit_log (로그 DB)
+### 4.5 log_ranking_submit (로그 DB)
 
 모든 제출 요청의 처리 결과 이력이다. 감사, 어뷰징 조사, 장애 조사에 쓴다. 로그 DB `podium_de_log`에 둔다.
 
 ```sql
-CREATE TABLE `ranking_submit_log` (
-    `ranking_submit_log_id`    BIGINT         UNSIGNED               NOT NULL    AUTO_INCREMENT    COMMENT '로그 ID',
+CREATE TABLE `log_ranking_submit` (
+    `log_ranking_submit_id`    BIGINT         UNSIGNED               NOT NULL    AUTO_INCREMENT    COMMENT '로그 ID',
     `created_at`               DATETIME(3)                           NOT NULL                      COMMENT '기록 시각 (UTC, 로그 DB 시각) — 파티션 키',
-    `ranking_id`               INT            UNSIGNED               NOT NULL                      COMMENT '랭킹 ID (메인 DB ranking_def, FK 없음 — 물리 분리 DB)',
+    `ranking_id`               INT            UNSIGNED               NOT NULL                      COMMENT '랭킹 ID (메인 DB ranking_definition, FK 없음 — 물리 분리 DB)',
     `season_no`                INT            UNSIGNED               NOT NULL                      COMMENT '요청의 seasonNo',
     `request_id`               VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                      COMMENT '멱등 키 (게임 서버 requestId, 대소문자 구분)',
     `member_id`                VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                      COMMENT '멤버 ID (대소문자 구분)',
@@ -376,7 +386,7 @@ CREATE TABLE `ranking_submit_log` (
     `result_score`             BIGINT         UNSIGNED                           DEFAULT NULL      COMMENT '처리 후 스코어 (SP까지 간 경우)',
     `version`                  INT            UNSIGNED                           DEFAULT NULL      COMMENT '처리 후 entry version (SP까지 간 경우)',
     `meta`                     JSON                                              DEFAULT NULL      COMMENT '게임 서버 맥락 (매치 ID 등, 해석하지 않음)',
-    PRIMARY KEY (`ranking_submit_log_id`, `created_at`),
+    PRIMARY KEY (`log_ranking_submit_id`, `created_at`),
     KEY `ix_member_id` (`ranking_id`, `member_id`, `created_at`),
     KEY `ix_request_id` (`request_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='제출 처리 이력 (로그 DB, 일 단위 파티션)'
@@ -389,7 +399,7 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 - 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 매일 다음 며칠의 일 파티션을 `p_max`에서 떼어 만들고, 보관 기간이 지난 일 파티션을 DROP한다. 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다.
 - `p_max`는 안전망이다. 정리 잡이 멈춰도 INSERT가 실패하지 않는다. `p_max`에 행이 쌓이면 정리 잡 이상으로 보고 알린다 (11.4).
 - 조사 목적의 임의 조회는 이 테이블에서 한다. 메인 DB 운영 테이블에는 하지 않는다.
-- 로그 DB에는 자기 `SP_EXEC_DDL`의 감사 로그용으로 `ddl_audit_log`를 하나 더 둔다. 구조는 메인과 같다 (11.4). 감사 로그는 DDL을 실행한 DB에 기록해야 하고, 로그 DB는 별도 인스턴스일 수 있기 때문이다.
+- 로그 DB에는 자기 `SP_EXEC_DDL`의 감사 로그용으로 `log_ddl_audit`를 하나 더 둔다. 구조는 메인과 같다 (11.4). 감사 로그는 DDL을 실행한 DB에 기록해야 하고, 로그 DB는 별도 인스턴스일 수 있기 때문이다.
 
 ---
 
@@ -472,7 +482,7 @@ SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한�
 
 ### 5.6 시즌 키 삭제
 
-정산 결과(`ranking_result`) 생성이 끝나면 해당 시즌 키를 삭제한다. **센티넬을 먼저 삭제**한 뒤 ZSET과 version HASH를 삭제한다. 지난 시즌 조회는 result에서 처리한다.
+가순위 생성(7.3)이 끝나면 해당 시즌 키를 삭제한다. **센티넬을 먼저 삭제**한 뒤 ZSET과 version HASH를 삭제한다. 지난 시즌 조회는 `ranking_entry`의 `final_rank`로 처리한다.
 
 ---
 
@@ -542,67 +552,62 @@ AND 리컨실러 워터마크 > end_at + 안전마진
 
 다음 시즌이 바로 열려 있는 경우(`wait_period = 0`)에도 제출의 시즌 번호 검사(4.1)로 이전 시즌 플레이가 다음 시즌에 반영되지 않는다.
 
-### 7.3 SETTLING: entry 분리와 가순위 생성
+### 7.3 SETTLING: 가순위 생성
 
-`GET_LOCK('podium:settle')`으로 동시에 하나의 시즌만 처리한다.
+`GET_LOCK('podium:settle')`으로 동시에 하나의 시즌만 처리한다. 시즌 파티션을 고정 이름 작업 테이블로 꺼내 가순위를 매긴 뒤 같은 파티션으로 되돌린다. 행을 복사하지 않는다 (D-49).
 
 ```text
-1. ranking_entry.p_r{id}_s{n} ⇄ ranking_entry_settling   (EXCHANGE, 고정 이름 작업 테이블)
-2. ranking_entry DROP PARTITION p_r{id}_s{n}              (빈 파티션)
-3. ranking_entry_settling에 정렬용 인덱스 추가
-4. ranking_entry_settling → ranking_result 청크 적재        (정적 SP)
-5. RENAME ranking_entry_settling → ranking_entry_r{id}_s{n} (백업)
-6. 빈 ranking_entry_settling 재생성 (LIKE + REMOVE PARTITIONING)
-7. Redis 시즌 키 삭제
-8. REVIEW 전이, review_until = NOW + review_period
+1. ranking_entry.p_r{id}_s{n} ⇄ ranking_entry_settling   (EXCHANGE: 꺼내기, settling은 비어 있음)
+2. ranking_entry_settling에 정렬용 인덱스 추가
+3. final_rank 가순위를 커서 청크로 UPDATE                  (정적 SP)
+4. ranking_entry_settling의 정렬용 인덱스 제거
+5. ranking_entry_settling ⇄ ranking_entry.p_r{id}_s{n}   (EXCHANGE WITHOUT VALIDATION: 되돌리기)
+6. Redis 시즌 키 삭제
+7. REVIEW 전이, review_until = NOW + review_period
 ```
 
-- 정렬 인덱스는 운영 테이블에 두지 않는다. 스코어 제출마다 쓰기 비용이 늘기 때문이다.
-- 4단계는 커서 기반 청크로 짧은 트랜잭션을 반복한다. 단일 `INSERT ... SELECT`는 언두 증가, 복제 지연, 버퍼 풀 오염을 일으킨다.
+- 정렬 인덱스는 운영 테이블에 두지 않는다. 스코어 제출마다 쓰기 비용이 늘기 때문이다. EXCHANGE는 인덱스까지 같아야 하므로 되돌리기 전에 제거한다.
+- 3단계는 커서 기반 청크로 짧은 트랜잭션을 반복한다. 단일 대형 UPDATE는 언두 증가, 복제 지연, 버퍼 풀 오염을 일으킨다.
+- 5단계: 기본 EXCHANGE는 일반 테이블의 모든 행이 파티션 값에 맞는지 읽어서 확인한다. 수백만 행을 읽는 동안 운영 테이블 DDL이 길어지므로, PK 범위 조회 두 번(`(ranking_id, season_no)`보다 앞·뒤 행 존재 여부)으로 다른 시즌 행이 없음을 먼저 확인하고 `WITHOUT VALIDATION`으로 교환한다.
+- 5단계가 끝나면 settling은 비어 있으므로 다시 만들 필요가 없다.
+- 제출은 `NOW(3) ∈ [start_at, end_at)` 검사(4.1)로 막히고 정산은 `settle_at` 이후에 시작하므로, 되돌린 파티션에 늦은 쓰기가 들어오지 않는다.
 
 ```sql
-INSERT INTO ranking_result (..., final_rank, ...)
-SELECT ...,
-       :base_rank + ROW_NUMBER() OVER (ORDER BY score DESC, achieved_at ASC, member_id DESC),
-       ...
-  FROM ranking_entry_settling
- WHERE <커서 이후>
- ORDER BY score DESC, achieved_at ASC, member_id DESC
- LIMIT 5000;
+UPDATE ranking_entry_settling s
+  JOIN (SELECT ranking_id, season_no, member_id,
+               :base_rank + ROW_NUMBER() OVER (ORDER BY score DESC, achieved_at ASC, member_id DESC) AS rn
+          FROM (SELECT ranking_id, season_no, member_id, score, achieved_at
+                  FROM ranking_entry_settling
+                 WHERE <커서 이후>
+                 ORDER BY score DESC, achieved_at ASC, member_id DESC
+                 LIMIT 5000) c) t USING (ranking_id, season_no, member_id)
+   SET s.final_rank = t.rn;
 ```
+
+- `LIMIT`을 안쪽에 둔다. 윈도우 함수는 `LIMIT`보다 먼저 계산되므로, 같은 단계에 두면 청크마다 커서 이후 전체 행에 번호를 매겨 청크 수만큼 전체 정렬이 반복된다.
+- 중단 후 재개 시 커서는 `MAX(final_rank)`인 행의 정렬 키, `:base_rank`는 그 값이다.
 
 - 정렬 기준은 Redis 순서와 일치시킨다.
   - DESC: `score DESC, achieved_at ASC, member_id DESC`
   - ASC: `score ASC, achieved_at ASC, member_id ASC`
 - 커서 조건은 정렬 방향이 섞여 있어 튜플 비교 대신 OR 조건으로 풀어 쓴다.
 
-### 7.4 ranking_result
+### 7.4 결과 컬럼
 
-```sql
-CREATE TABLE `ranking_result` (
-    `ranking_id`       INT            UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (ranking_def, FK 없음 — 파티션 테이블은 FK 불가)',
-    `season_no`        INT            UNSIGNED               NOT NULL                    COMMENT '시즌 번호 (ranking_season)',
-    `member_id`        VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                    COMMENT '멤버 ID (대소문자 구분)',
-    `final_rank`       INT            UNSIGNED                           DEFAULT NULL    COMMENT '최종 순위 (NULL:제재로 제외)',
-    `score`            BIGINT         UNSIGNED               NOT NULL                    COMMENT '시즌 최종 스코어',
-    `achieved_at`      DATETIME(3)                           NOT NULL                    COMMENT '최종 스코어 달성 시각 (UTC)',
-    `reward_code`      VARCHAR(64)    COLLATE utf8mb4_bin                DEFAULT NULL    COMMENT '판정된 보상 코드 (NULL:구간 밖, 대소문자 구분)',
-    `reward_status`    TINYINT        UNSIGNED               NOT NULL                    COMMENT '보상 상태 (0:NONE 구간 밖, 1:PENDING 전달 전, 2:DELIVERED 게임 서버 ack 완료, 3:REJECTED 제재로 미지급) [codes.RewardStatus]',
-    `reward_held`      TINYINT(1)                            NOT NULL    DEFAULT 0       COMMENT '보상 보류 (1:어뷰징 포인트 임계치 초과로 보류, 0:없음)',
-    `sanctioned`       TINYINT(1)                            NOT NULL    DEFAULT 0       COMMENT '제재 표시 (1:제재됨, 0:없음) — 보상 상태와 별개',
-    `delivered_at`     DATETIME(3)                                       DEFAULT NULL    COMMENT '보상 전달 ack 시각 (UTC)',
-    PRIMARY KEY (`ranking_id`, `season_no`, `member_id`),
-    KEY `ix_final_rank` (`ranking_id`, `season_no`, `final_rank`),
-    KEY `ix_reward_status` (`ranking_id`, `season_no`, `reward_status`, `member_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='시즌 정산 결과와 보상 상태 (시즌 파티션)'
-PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
-    PARTITION `p_init` VALUES IN ((0, 0))
-);
-```
+정산 결과는 별도 테이블 없이 `ranking_entry`의 결과 컬럼에 기록한다 (4.2, D-49).
+
+| 컬럼 | 채우는 단계 |
+| --- | --- |
+| `final_rank` | SETTLING 가순위, FINALIZING 확정 (제재 제외 시 NULL) |
+| `sanctioned` | FINALIZING, 지급 후 제재 |
+| `reward_code`, `reward_status`, `reward_held` | FINALIZING 판정, 보류 건은 GM 전환 |
+| `delivered_at` | DELIVERING ack |
+
+- 결과 컬럼 갱신은 `version`, `updated_at`을 바꾸지 않는다. 두 컬럼은 스코어 값의 변경만 나타내며, 바꾸면 리컨실러가 변경분으로 잡는다.
 
 | reward_status | 의미 |
 | --- | --- |
-| NONE | 보상 구간 밖 |
+| NONE | 미판정(진행 중) 또는 보상 구간 밖 |
 | PENDING | 대상, 전달 전 |
 | DELIVERED | 게임 서버 ack 완료 |
 | REJECTED | 대상이었으나 제재로 미지급 |
@@ -629,6 +634,9 @@ PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
 7. DELIVERING 전이
 ```
 
+- 2단계는 `ix_final_rank`의 가순위 순서로 커서 청크를 돈다. 가순위 순서가 곧 정렬 순서이므로 정렬 인덱스가 필요 없다. 새 순위는 가순위보다 크지 않아서, 커서(이전 가순위) 이후 범위에 이미 처리한 행이 다시 나오지 않는다.
+- 운영 테이블에서 처리하지만 끝난 시즌 파티션만 건드리며, 제출은 시각 검사로 이 파티션에 쓰지 않는다.
+
 확정 이후 순위는 다시 매기지 않는다.
 
 ### 7.7 DELIVERING: 보상 전달
@@ -645,14 +653,14 @@ PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
 - 수령 기간은 랭킹 서버에 두지 않는다. 우편 만료는 게임 서버 정책이다.
 - held 건은 GM 판단 후 PENDING 또는 REJECTED로 전환한다.
 - PENDING(held 제외)이 모두 처리되면 SETTLED.
-- 전달이 끝나지 않은 시즌은 기한 없이 운영 테이블에 보관한다. 게임 서버가 장애에서 복구되면 `GET /v1/rewards/pending`으로 밀린 시즌을 찾아 오래된 것부터 가져간다. 보상 API는 운영 테이블만 읽으므로(D-23), SETTLED 전에는 `ranking_result`를 백업으로 분리하지 않는다 (8.2).
+- 전달이 끝나지 않은 시즌은 기한 없이 운영 테이블에 보관한다. 게임 서버가 장애에서 복구되면 `GET /v1/rewards/pending`으로 밀린 시즌을 찾아 오래된 것부터 가져간다. 보상 API는 운영 테이블만 읽으므로(D-23), SETTLED 전에는 `ranking_entry` 시즌 파티션을 백업으로 분리하지 않는다 (8.2).
 
 **알림 (연동 장애)**
 
 | 조건 | 기준 |
 | --- | --- |
 | ack 정체 | DELIVERING 시즌의 PENDING이 설정 시간 동안 줄지 않음 |
-| DELIVERING 적체 | DELIVERING 시즌 수가 설정 임계치 초과. 짧은 주기 랭킹은 장애 동안 시즌마다 `ranking_submit_key`, `ranking_result` 파티션이 남아 테이블당 파티션 상한(8192)에 다가간다 |
+| DELIVERING 적체 | DELIVERING 시즌 수가 설정 임계치 초과. 짧은 주기 랭킹은 장애 동안 시즌마다 `ranking_entry`, `ranking_submit_key` 파티션이 남아 테이블당 파티션 상한(8192)에 다가간다 |
 
 두 기준은 설정값이다 (이름은 스케줄러 구현 시 정한다).
 
@@ -681,7 +689,7 @@ PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
 
 ```sql
 CREATE TABLE `ranking_exclusion` (
-    `ranking_id`    INT             UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`    INT             UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`     INT             UNSIGNED               NOT NULL        COMMENT '시즌 번호 (0:해당 랭킹 전 시즌, FK 없음)',
     `member_id`     VARCHAR(64)     COLLATE utf8mb4_bin    NOT NULL        COMMENT '멤버 ID (대소문자 구분)',
     `reason`        VARCHAR(255)                           NOT NULL        COMMENT '제재 사유',
@@ -708,18 +716,18 @@ CREATE TABLE `ranking_exclusion` (
 
 | 테이블 | 보관 대상 | 분리 시점 | 분리 방식 |
 | --- | --- | --- | --- |
-| `ranking_entry` | 진행 중 시즌 | SETTLING | 작업 테이블 경유 (7.3) |
+| `ranking_entry` | 진행 중 시즌, 확정 결과, 지난 시즌 조회 | 자기 시즌과 다음 시즌 모두 SETTLED | EXCHANGE → 백업 |
 | `ranking_submit_key` | 진행 + 정산 중 시즌 | SETTLED | EXCHANGE → 백업 |
-| `ranking_result` | 확정 결과, 지난 시즌 조회 | 자기 시즌과 다음 시즌 모두 SETTLED | EXCHANGE → 백업 |
 | `ranking_hall` | 시즌별 Top N | 분리 없음 (영구) | — |
 
-- 제출 이력(로그 DB `ranking_submit_log`)은 이 표의 대상이 아니다. 로그 DB에서 날짜 기준으로 따로 정리한다 (4.5).
-- `ranking_result`는 자기 시즌이 SETTLED가 아니면 분리하지 않는다. 보상 API는 운영 테이블만 읽으므로, 전달이 끝나지 않은 시즌을 분리하면 남은 PENDING을 조회할 수 없다 (7.7).
+- 제출 이력(로그 DB `log_ranking_submit`)은 이 표의 대상이 아니다. 로그 DB에서 날짜 기준으로 따로 정리한다 (4.5).
+- `ranking_entry`는 자기 시즌이 SETTLED가 아니면 분리하지 않는다. 보상 API는 운영 테이블만 읽으므로, 전달이 끝나지 않은 시즌을 분리하면 남은 PENDING을 조회할 수 없다 (7.7).
+- SETTLING에서 작업 테이블로 꺼냈다가 되돌리는 것(7.3)은 분리가 아니다. 파티션은 운영 테이블에 남는다.
 
 백업 테이블 이름: `{원본}_r{rankingId}_s{seasonNo}`
 
 ```text
-EXCHANGE 절차 (submit_key, result)
+EXCHANGE 절차 (entry, submit_key)
 1. CREATE TABLE {원본}_r{id}_s{n} LIKE {원본}
 2. ALTER TABLE {원본}_r{id}_s{n} REMOVE PARTITIONING   (빈 테이블, 즉시)
 3. ALTER TABLE {원본} EXCHANGE PARTITION p_r{id}_s{n} WITH TABLE {원본}_r{id}_s{n}
@@ -740,7 +748,7 @@ EXCHANGE 절차 (submit_key, result)
 
 ```sql
 CREATE TABLE `ranking_hall` (
-    `ranking_id`    INT            UNSIGNED               NOT NULL                 COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`    INT            UNSIGNED               NOT NULL                 COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`     INT            UNSIGNED               NOT NULL                 COMMENT '시즌 번호',
     `final_rank`    INT            UNSIGNED               NOT NULL                 COMMENT '최종 순위',
     `member_id`     VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                 COMMENT '멤버 ID (대소문자 구분)',
@@ -758,20 +766,20 @@ CREATE TABLE `ranking_hall` (
 | 조회 | 원천 |
 | --- | --- |
 | 현재 시즌 순위 | Redis |
-| 직전 시즌 전체 순위, 내 순위 | `ranking_result` |
+| 직전 시즌 전체 순위, 내 순위 | `ranking_entry` (`final_rank`) |
 | 모든 시즌 Top N | `ranking_hall` |
 | 그 외 과거 기록 | 백업 테이블 (운영 조회 대상 아님) |
 
 ### 8.6 자가 복구 판단
 
 ```text
-entry 파티션에 데이터 있음                       → EXCHANGE 필요
-settling 테이블에 해당 시즌 데이터, result 건수 < settling 건수 → result 적재 이어서
-result 건수 = settling 건수                     → RENAME 필요
-백업 테이블 있음, settling 비어 있음              → SETTLING 완료
+settling 비어 있음, entry 파티션에 final_rank NULL 행 있음 → 꺼내기 (EXCHANGE)
+settling에 해당 시즌, final_rank NULL 행 있음              → 가순위 UPDATE 이어서 (MAX(final_rank) 기준, 정렬 인덱스 없으면 추가)
+settling에 해당 시즌, final_rank NULL 행 없음              → 정렬 인덱스 제거 후 되돌리기 (EXCHANGE)
+settling 비어 있음, entry 파티션에 final_rank NULL 행 없음  → SETTLING 완료
 ```
 
-작업 테이블의 `(ranking_id, season_no)` 컬럼으로 어느 시즌 데이터인지 확인한다.
+작업 테이블의 `(ranking_id, season_no)` 컬럼으로 어느 시즌 데이터인지 확인한다. 이 판단은 시즌 상태가 SETTLING일 때만 쓴다. FINALIZING 이후에는 제재 제외 행의 `final_rank`가 NULL이다.
 
 ---
 
@@ -803,7 +811,7 @@ result 건수 = settling 건수                     → RENAME 필요
 ```sql
 CREATE TABLE `ranking_suspicion` (
     `suspicion_id`    BIGINT         UNSIGNED               NOT NULL    AUTO_INCREMENT    COMMENT '어뷰징 근거 ID',
-    `ranking_id`      INT            UNSIGNED               NOT NULL                      COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`      INT            UNSIGNED               NOT NULL                      COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`       INT            UNSIGNED               NOT NULL                      COMMENT '시즌 번호',
     `member_id`       VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                      COMMENT '멤버 ID (대소문자 구분)',
     `rule_code`       VARCHAR(32)    COLLATE utf8mb4_bin    NOT NULL                      COMMENT '탐지 규칙 코드 (suspicion_config의 키, 대소문자 구분)',
@@ -872,12 +880,12 @@ CREATE TABLE `ranking_suspicion` (
 | SP | 역할 | 호출 |
 | --- | --- | --- |
 | `SP_EXEC_DDL(sql)` | 유일한 PREPARE 실행 지점, 감사 로그 기록 | 관리 SP 내부 |
-| `SP_PARTITION_ADD(rid, sno)` | 세 파티션 테이블에 시즌 파티션 추가. 이미 있으면 건너뜀 | 앱 |
-| `SP_PARTITION_EXCHANGE(code, rid, sno)` | entry는 settling과 교환, submit_key·result는 백업 테이블 생성 후 교환 | 앱 |
+| `SP_PARTITION_ADD(rid, sno)` | 두 파티션 테이블(entry, submit_key)에 시즌 파티션 추가. 이미 있으면 건너뜀 | 앱 |
+| `SP_SETTLING_EXCHANGE(rid, sno)` | entry 시즌 파티션 ⇄ settling. settling이 비어 있으면 꺼내기, 해당 시즌만 있으면 `WITHOUT VALIDATION`으로 되돌리기 (7.3) | 앱 |
+| `SP_PARTITION_EXCHANGE(code, rid, sno)` | 백업 테이블 생성 후 교환 (8.2) | 앱 |
 | `SP_PARTITION_DROP(code, rid, sno)` | 파티션이 비어 있을 때만 삭제 | 앱 |
-| `SP_BACKUP_RENAME(rid, sno)` | settling → `ranking_entry_r{id}_s{n}`, 빈 settling 재생성 (이미 있으면 건너뜀) | 앱 |
 
-- 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`, 3 = `ranking_result`
+- 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.
 
@@ -905,7 +913,7 @@ CREATE TABLE `ranking_suspicion` (
 
 | 테이블 | 용도 |
 | --- | --- |
-| `ddl_audit_log` | `SP_EXEC_DDL` 실행 SQL, 시작·종료 시각, 오류 정보 |
+| `log_ddl_audit` | `SP_EXEC_DDL` 실행 SQL, 시작·종료 시각, 오류 정보 |
 | `job_state` | 잡별 워터마크(리컨실러 checkpoint 등), 마지막 실행 시각 |
 | `instance_heartbeat` | 실행 중인 API·워커 인스턴스 (`instance_id`, `process_type`, `app_version`, `last_seen_at`) |
 
@@ -913,7 +921,7 @@ CREATE TABLE `ranking_suspicion` (
 - `instance_id`는 프로세스 기동마다 생성하는 UUID다. PID는 재사용되어 다른 인스턴스의 행을 덮어쓸 수 있다.
 - 비정상 종료로 남은 행은 하트비트 루프가 `last_seen_at`이 1시간 넘게 지난 행을 함께 삭제해 정리한다.
 
-운영 테이블은 `podium_de` DB에 둔다. `ddl_audit_log`는 `SP_EXEC_DDL` 안에서 기록해야 하기 때문이다. 제출 이력은 로그 DB `podium_de_log`에 둔다 (4.5).
+운영 테이블은 `podium_de` DB에 둔다. `log_ddl_audit`는 `SP_EXEC_DDL` 안에서 기록해야 하기 때문이다. 제출 이력은 로그 DB `podium_de_log`에 둔다 (4.5).
 
 **보관 정리 감시**
 
@@ -929,8 +937,8 @@ CREATE TABLE `ranking_suspicion` (
 - 디스크 사용률 알림은 설치 환경(인프라 모니터링)에 둔다.
 
 ```sql
-CREATE TABLE `ddl_audit_log` (
-    `ddl_audit_log_id`    BIGINT          UNSIGNED    NOT NULL    AUTO_INCREMENT    COMMENT '감사 로그 ID',
+CREATE TABLE `log_ddl_audit` (
+    `log_ddl_audit_id`    BIGINT          UNSIGNED    NOT NULL    AUTO_INCREMENT    COMMENT '감사 로그 ID',
     `sql_text`            TEXT                        NOT NULL                      COMMENT '실행한 DDL',
     `status`              TINYINT         UNSIGNED    NOT NULL                      COMMENT '상태 (0:RUNNING 실행 중 또는 중단, 1:SUCCEEDED 성공, 2:FAILED 실패) [codes.DdlAuditStatus]',
     `started_at`          DATETIME(3)                 NOT NULL                      COMMENT '실행 시작 시각 (UTC)',
@@ -938,7 +946,7 @@ CREATE TABLE `ddl_audit_log` (
     `sql_state`           CHAR(5)                                 DEFAULT NULL      COMMENT '실패 시 SQLSTATE',
     `error_no`            INT             UNSIGNED                DEFAULT NULL      COMMENT '실패 시 MySQL 에러 번호',
     `error_message`       VARCHAR(512)                            DEFAULT NULL      COMMENT '실패 시 에러 메시지',
-    PRIMARY KEY (`ddl_audit_log_id`),
+    PRIMARY KEY (`log_ddl_audit_id`),
     KEY `ix_started_at` (`started_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='SP_EXEC_DDL 실행 감사 로그';
 ```
@@ -984,6 +992,7 @@ CREATE TABLE `instance_heartbeat` (
 - 로그 DB 접속 정보와 계정은 메인과 별도이며 필수다. 비었을 때 메인 값으로 대체하지 않는다 (D-48).
 - `SP_EXEC_DDL`은 DB마다 하나다. 로그 DB의 파티션 이름은 `DATE` 파라미터로만 조립한다.
 - 컨벤션과 설계가 충돌하면 컬럼·키 구조는 설계를, 표기 규칙(COMMENT, 헤더 주석, charset/collation, 인덱스 이름)과 SP 이름은 컨벤션을 따른다.
+- 로그성 테이블(쌓기만 하는 이력·감사 기록)은 `log_` 접두어를 붙인다: `log_ranking_submit`, `log_ddl_audit`. 멱등 키(`ranking_submit_key`)처럼 처리에 쓰는 테이블은 해당하지 않는다.
 - 식별자 컬럼(`member_id`, `request_id`, `ranking_code`, `reward_code`, `rule_code`)은 `utf8mb4_bin`이다. 대소문자를 구분하지 않으면 다른 식별자가 하나로 합쳐진다.
 
 **기동 시 확인**

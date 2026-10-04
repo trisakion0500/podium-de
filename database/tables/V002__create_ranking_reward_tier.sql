@@ -6,7 +6,7 @@
 --        ranking_id는 FK 없음: 키 구조는 설계를 따르며, 설계에 FK가 없다 (D-35).
 -- ------------------------------------------------------------------------------------------------------------ --
 CREATE TABLE `ranking_reward_tier` (
-    `ranking_id`     INT            UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`     INT            UNSIGNED               NOT NULL        COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `tier_no`        SMALLINT       UNSIGNED               NOT NULL        COMMENT '구간 번호 (랭킹 안에서 유일)',
     `range_type`     TINYINT        UNSIGNED               NOT NULL        COMMENT '구간 기준 (1:RANK 순위, 2:PERCENT 제재 제외 참가자 수 대비 백분율) [codes.RangeType]',
     `range_from`     INT            UNSIGNED               NOT NULL        COMMENT '구간 시작 (포함)',

@@ -9,7 +9,7 @@
 --        의도적 복합 PK: 파티션 키가 PK에 포함되어야 하며, 시즌 안의 request_id가 멱등 키다 (D-35).
 -- ------------------------------------------------------------------------------------------------------------ --
 CREATE TABLE `ranking_submit_key` (
-    `ranking_id`     INT            UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (ranking_def, FK 없음 — 파티션 테이블은 FK 불가)',
+    `ranking_id`     INT            UNSIGNED               NOT NULL                    COMMENT '랭킹 ID (ranking_definition, FK 없음 — 파티션 테이블은 FK 불가)',
     `season_no`      INT            UNSIGNED               NOT NULL                    COMMENT '시즌 번호 (제출 요청의 seasonNo)',
     `request_id`     VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                    COMMENT '멱등 키 (게임 서버 requestId, 대소문자 구분)',
     `member_id`      VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                    COMMENT '멤버 ID (같은 내용 비교, 검수 목록, 대소문자 구분)',

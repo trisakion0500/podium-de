@@ -7,7 +7,7 @@
 -- ------------------------------------------------------------------------------------------------------------ --
 CREATE TABLE `ranking_suspicion` (
     `suspicion_id`    BIGINT         UNSIGNED               NOT NULL    AUTO_INCREMENT    COMMENT '어뷰징 근거 ID',
-    `ranking_id`      INT            UNSIGNED               NOT NULL                      COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`      INT            UNSIGNED               NOT NULL                      COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`       INT            UNSIGNED               NOT NULL                      COMMENT '시즌 번호',
     `member_id`       VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                      COMMENT '멤버 ID (대소문자 구분)',
     `rule_code`       VARCHAR(32)    COLLATE utf8mb4_bin    NOT NULL                      COMMENT '탐지 규칙 코드 (suspicion_config의 키, 대소문자 구분)',

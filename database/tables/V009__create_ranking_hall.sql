@@ -7,7 +7,7 @@
 --        ranking_id는 FK 없음: 키 구조는 설계를 따르며, 설계에 FK가 없다 (D-35). member_id는 대소문자를 구분한다.
 -- ------------------------------------------------------------------------------------------------------------ --
 CREATE TABLE `ranking_hall` (
-    `ranking_id`    INT            UNSIGNED               NOT NULL                 COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`    INT            UNSIGNED               NOT NULL                 COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`     INT            UNSIGNED               NOT NULL                 COMMENT '시즌 번호',
     `final_rank`    INT            UNSIGNED               NOT NULL                 COMMENT '최종 순위',
     `member_id`     VARCHAR(64)    COLLATE utf8mb4_bin    NOT NULL                 COMMENT '멤버 ID (대소문자 구분)',

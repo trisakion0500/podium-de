@@ -221,7 +221,7 @@
 
 **감수할 것:** 테이블 수 증가. `history_retention`으로 상한을 두고 캐시 관련 설정을 맞춘다. 여러 시즌 교차 조회가 어렵지만 D-23으로 해소한다.
 
-### D-20. entry 분리 시점은 SETTLING — 확정
+### D-20. entry 분리 시점은 SETTLING — 대체됨 (D-49)
 
 **결정:** 정산 시작 시 entry 파티션을 분리하고, 그 데이터로 result를 생성한다.
 
@@ -232,7 +232,9 @@
 - 원본 조사가 필요하면 백업 테이블을 조회할 수 있다.
 - 운영 테이블에는 진행 중인 시즌만 남아 역할이 명확해진다.
 
-### D-21. result 생성은 운영 테이블 밖에서 청크로 — 확정
+**대체 내용:** 결과를 별도 테이블로 복사하지 않고 `ranking_entry`에 기록하면서, entry 시즌 파티션은 SETTLING에 작업 테이블로 꺼냈다가 되돌리고 SETTLED 이후에 분리한다 (D-49).
+
+### D-21. result 생성은 운영 테이블 밖에서 청크로 — 대체됨 (D-49)
 
 **결정:** entry를 EXCHANGE로 먼저 분리한 뒤, 분리된 테이블에 정렬 인덱스를 추가하고 커서 기반 청크로 result를 적재한다.
 
@@ -243,13 +245,17 @@
 - 정렬 인덱스를 운영 테이블에 두면 모든 스코어 제출의 쓰기 비용이 늘어난다.
 - 청크 적재는 중단 시 `MAX(final_rank)` 기준으로 이어갈 수 있다.
 
-### D-22. 고정 이름 작업 테이블 `ranking_entry_settling` — 확정
+**대체 내용:** 운영 테이블 밖(작업 테이블)에서 정렬 인덱스를 붙여 청크로 처리하는 방식은 유지한다. 처리 내용이 result INSERT에서 작업 테이블의 `final_rank` UPDATE로 바뀌었다 (D-49).
+
+### D-22. 고정 이름 작업 테이블 `ranking_entry_settling` — 대체됨 (D-49)
 
 **결정:** entry EXCHANGE 대상을 고정 이름 작업 테이블로 하고, result 적재 후 시즌 이름으로 RENAME한다. `GET_LOCK`으로 정산을 하나씩 처리한다.
 
 **검토한 대안:** 처음부터 시즌별 이름 테이블로 EXCHANGE.
 
 **이유:** 백업 테이블 이름이 시즌마다 달라지면 result 적재 SP가 동적 SQL이 된다. 고정 이름이면 무거운 적재 단계를 정적 SQL로 유지할 수 있다. 작업 테이블의 `(ranking_id, season_no)` 컬럼으로 어느 시즌인지 확인 가능해 자가 복구 판단에 지장이 없다.
+
+**대체 내용:** 고정 이름 작업 테이블과 `GET_LOCK` 직렬화는 유지한다. 가순위를 매긴 뒤 RENAME하지 않고 entry 파티션으로 되돌린다. 작업 테이블은 재생성 없이 계속 쓴다 (D-49).
 
 ### D-23. 과거 시즌 조회는 Top N만 영구 보관 — 확정
 
@@ -265,6 +271,28 @@
 - 회원별 역대 순위는 참가자 × 시즌만큼 행이 쌓여 일간 랭킹 기준 연간 수억 행이 될 수 있다.
 - 백업 테이블 조회는 테이블 이름이 동적이라 데이터 경로에 동적 SQL이 들어간다.
 - Top N은 시즌당 수십~수백 행이라 영구 보관 부담이 없다.
+
+### D-49. 정산 결과를 `ranking_entry`에 함께 기록 — 확정
+
+**결정:** `ranking_result`를 두지 않는다. 결과 컬럼(`final_rank`, `reward_code`, `reward_status`, `reward_held`, `sanctioned`, `delivered_at`)을 `ranking_entry`에 처음부터 두고, SETTLING은 시즌 파티션을 작업 테이블로 꺼내 가순위를 UPDATE한 뒤 같은 파티션으로 되돌린다. entry 시즌 파티션은 자기 시즌과 다음 시즌이 모두 SETTLED일 때 백업으로 분리한다. D-20을 대체하고 D-21, D-22의 일부를 바꾼다.
+
+**배경:** 기존 설계는 시즌 종료 시 참가자 전원의 스코어를 result로 복사하고, 원본은 entry 백업으로 남겨 장기적으로 두 벌을 보관했다. 참가자가 많고 주기가 짧은 랭킹에서 저장 공간과 백업 크기가 두 배가 된다.
+
+**검토한 대안**
+- entry 백업만 SETTLED 시점에 삭제: 장기 이중 보관은 없어지지만 시즌마다 전원 복사 1회는 남는다.
+- 작업 테이블에만 결과 컬럼을 ALTER로 추가: EXCHANGE는 컬럼·인덱스가 같아야 하므로 되돌리기 전에 다시 제거해야 한다. 데이터가 든 테이블의 컬럼 변경은 재구성이 될 수 있어 복사와 비용이 같다.
+- 작업 테이블을 시즌 이름으로 RENAME해 결과로 사용: 보상·지난 시즌 조회가 동적 SQL이 되고(D-25), 전달이 끝나지 않으면 작업 테이블이 점유되어 다음 정산이 막힌다(D-47).
+
+**이유**
+- 복사가 한 번도 없고, 원본 스코어와 결과가 한 행에 남는다. 결과 계산은 `score`, `achieved_at`을 바꾸지 않으므로 원본 증거가 유지된다.
+- 결과 컬럼을 처음부터 두면 작업 테이블은 `LIKE`로 항상 같은 구조라 정산 중 컬럼 DDL이 없다. 추가 저장 공간은 행당 몇 바이트다(NULL 컬럼은 비트, 기본값 0인 TINYINT 3개는 1바이트씩).
+- 데이터 경로 SP는 여전히 고정 이름(`ranking_entry`)만 정적 SQL로 읽는다.
+
+**감수할 것**
+- 운영 테이블에 진행 중에는 쓰지 않는 컬럼과 결과 인덱스 2개가 붙는다. 제출은 결과 컬럼을 바꾸지 않으므로 인덱스 비용은 신규 멤버 INSERT 때만 든다.
+- 끝난 시즌 파티션이 SETTLED 이후까지 운영 테이블에 남는다. 늦은 쓰기는 제출 SP의 시각 검사(4.1)로 막는다. 파티션을 지워 막던 이중 장치는 없어진다.
+- 되돌리기 EXCHANGE는 `WITHOUT VALIDATION`을 쓰며, 다른 시즌 행이 없음을 PK 범위 조회로 먼저 확인한다.
+- 결과 갱신이 `version`, `updated_at`을 건드리면 리컨실러가 변경분으로 오인하므로 바꾸지 않는다.
 
 ---
 
@@ -348,6 +376,18 @@
 | 저장소, 패키지, 이미지, 호스트명 | `podium-de` | npm·Docker는 대문자 불가, Kubernetes·DNS는 언더스코어 불가 |
 | 로컬 폴더 | 자유 | |
 
+### D-50. 랭킹 정의 테이블 이름을 `ranking_definition`으로 변경 — 확정
+
+**결정:** `ranking_def`를 `ranking_definition`으로 바꾼다. 다른 테이블명은 유지한다. 이 결정 이전 기록의 `ranking_def`는 당시 이름 그대로 둔다.
+
+**배경:** 테이블명을 개발자가 처음 봐도 뜻을 알 수 있게 다듬자는 검토에서 `ranking_def`, `ranking_entry`, `ranking_hall` 세 개가 후보였다.
+
+**검토한 대안**
+- `ranking_entry` → `ranking_score`: D-49 이후 이 테이블은 순위와 보상 상태도 담으므로 스코어만 가리키는 이름은 범위를 좁혀 보인다. 컬럼 `score`와 이름이 겹친다.
+- `ranking_hall` → `ranking_top`: 의미 차이가 적고 `hall_size` 등 연쇄 변경이 생긴다. hall(명예의 전당)은 게임 쪽에서 통하는 용어다.
+
+**이유:** 축약 없이 읽히는 이름이 개발자에게 바로 뜻이 전해진다. DB 적용 전이라 바꾸는 비용이 문서와 DDL 수정뿐이다.
+
 ---
 
 ## 1단계 구현 착수 시 결정
@@ -403,14 +443,14 @@
 | 표기 규칙 (COMMENT, 헤더 주석, charset/collation, 인덱스 이름) | 컨벤션 |
 | SP 이름 (대문자) | 컨벤션 |
 | SP 결과 반환 | 컨벤션 RESULT 규약 (단, D-36) |
-| 로그 테이블 위치 | `ddl_audit_log`는 메인 DB, 제출 이력은 로그 DB (D-48) |
+| 로그 테이블 위치 | `log_ddl_audit`는 메인 DB, 제출 이력은 로그 DB (D-48) |
 | 식별자 컬럼 콜레이션 | `utf8mb4_bin` (`member_id`, `request_id`, `ranking_code`, `reward_code`, `rule_code`) |
 | 락 헬퍼의 DB 접근 | SP 미사용, `GET_LOCK` 직접 호출 (컨벤션 예외) |
 
 **이유**
 - 파티션 테이블은 파티션 키가 PK에 포함되어야 하므로 대리키 기반 컨벤션을 그대로 적용할 수 없다.
 - 설계 문서의 소문자 SP 이름은 설명용이었다. 이름 규칙은 기존 컨벤션이 기준이다.
-- `ddl_audit_log`는 `SP_EXEC_DDL` 안에서 기록해야 하므로 물리 분리할 수 없다. 제출 로그는 멱등 키와 이력으로 나눠 이력만 분리한다 (D-48).
+- `log_ddl_audit`는 `SP_EXEC_DDL` 안에서 기록해야 하므로 물리 분리할 수 없다. 제출 로그는 멱등 키와 이력으로 나눠 이력만 분리한다 (D-48).
 - 식별자는 대소문자를 구분하지 않으면 `UserA`와 `usera`가 같은 member로 합쳐진다.
 - 러너는 SP가 생성되기 전에도 락을 잡아야 하므로 락 헬퍼는 SP를 거칠 수 없다.
 
@@ -555,7 +595,7 @@
 
 **결정:** 상태·구분값 컬럼은 `TINYINT UNSIGNED`로 저장한다. 값의 의미는 `src/codes.ts`의 const에서만 관리하고, 컬럼 COMMENT에 코드→의미 매핑과 const 이름(`[codes.SeasonStatus]` 등)을 적는다. SP는 같은 숫자를 리터럴로 쓴다. D-35의 "ENUM은 설계를 따름"을 대체한다.
 
-**대상:** `ranking_def`(status, update_rule, sort_order, time_unit, cycle_type), `ranking_reward_tier.range_type`, `ranking_season.status`, `ranking_result.reward_status`. 이미 숫자였던 `ddl_audit_log.status`, `instance_heartbeat.process_type`과 관리 SP의 파티션 대상 코드도 같은 파일에서 관리한다.
+**대상:** `ranking_def`(status, update_rule, sort_order, time_unit, cycle_type), `ranking_reward_tier.range_type`, `ranking_season.status`, `ranking_entry.reward_status`(D-49 이전 `ranking_result`). 이미 숫자였던 `log_ddl_audit.status`, `instance_heartbeat.process_type`과 관리 SP의 파티션 대상 코드도 같은 파일에서 관리한다.
 
 **이유**
 - 개발 컨벤션 16.1(상태값은 TINYINT + COMMENT 매핑)과 맞춘다.
@@ -569,7 +609,7 @@
 
 ### D-47. 전달 미완료 시즌은 기한 없이 보관, GM 강제 종료만 허용 — 확정
 
-**결정:** DELIVERING 시즌은 PENDING이 모두 ack될 때까지 운영 테이블에 둔다. `ranking_result`는 자기 시즌과 다음 시즌이 모두 SETTLED일 때만 백업으로 분리한다. ack 정체와 DELIVERING 적체는 알림으로 알리고, 포기는 GM 강제 종료(`forced_by`, `forced_reason` 기록)로만 한다.
+**결정:** DELIVERING 시즌은 PENDING이 모두 ack될 때까지 운영 테이블에 둔다. 결과를 담은 테이블(D-49 이후 `ranking_entry`)은 자기 시즌과 다음 시즌이 모두 SETTLED일 때만 백업으로 분리한다. ack 정체와 DELIVERING 적체는 알림으로 알리고, 포기는 GM 강제 종료(`forced_by`, `forced_reason` 기록)로만 한다.
 
 **배경:** 게임 서버 연동이 한 시즌 넘게 장애이면, 기존 "다음 시즌 SETTLED 시 분리" 조건으로는 다음 시즌이 먼저 끝났을 때 전달 중인 시즌의 result가 백업으로 빠져 남은 PENDING을 조회할 수 없었다.
 
@@ -581,7 +621,7 @@
 
 ### D-48. 제출 로그를 멱등 키(메인 DB)와 이력(로그 DB)으로 분리 — 확정
 
-**결정:** `ranking_submit_log`를 나눈다. 멱등 판별에 필요한 최소 컬럼은 메인 DB `ranking_submit_key`에 두어 반영과 같은 트랜잭션에서 기록한다. 전체 이력은 로그 DB `podium_de_log.ranking_submit_log`에 커밋 후 별도로 기록한다. 첫 라이브 전에 적용한다.
+**결정:** 제출 로그를 나눈다. 멱등 판별에 필요한 최소 컬럼은 메인 DB `ranking_submit_key`에 두어 반영과 같은 트랜잭션에서 기록한다. 전체 이력은 로그 DB `podium_de_log.log_ranking_submit`에 커밋 후 별도로 기록한다. 첫 라이브 전에 적용한다.
 
 **배경:** 제출 로그는 제출마다 쌓이는 가장 큰 테이블이다. 메인 DB에 두면 로그 문제가 서비스 장애로 번진다.
 
@@ -596,7 +636,7 @@
 
 **부가 결정**
 - 제출 이력은 결과와 무관하게 모든 제출을 `result_code`로 남긴다(빈도 초과, 비활성, 시즌 불일치, 충돌, 재전송 포함).
-- 로그 DB 보관은 날짜 기준 일 파티션이며, 데이터가 찬 파티션을 DROP한다(서비스 경로가 아님). 파티션 DDL을 위해 로그 DB에도 `SP_EXEC_DDL`과 그 감사 로그 `ddl_audit_log`를 하나씩 둔다 — "PREPARE는 `SP_EXEC_DDL`에만"은 DB마다 하나로 적용한다. 로그 DB 파티션 이름은 `DATE` 파라미터로만 조립한다.
+- 로그 DB 보관은 날짜 기준 일 파티션이며, 데이터가 찬 파티션을 DROP한다(서비스 경로가 아님). 파티션 DDL을 위해 로그 DB에도 `SP_EXEC_DDL`과 그 감사 로그 `log_ddl_audit`를 하나씩 둔다 — "PREPARE는 `SP_EXEC_DDL`에만"은 DB마다 하나로 적용한다. 로그 DB 파티션 이름은 `DATE` 파라미터로만 조립한다.
 - 기동 시 로그 DB가 접속 불가면 경고 후 기동하고, 접속되는데 스키마가 다르면 기동을 거부한다.
 - 로그 DB 접속 정보와 계정은 메인과 별도로 필수로 받는다(`DB_LOG_HOST`, `DB_LOG_PORT`, `DB_LOG_NAME`, `DB_LOG_APP_*`, `DB_LOG_MIGRATE_*`). 비었을 때 메인 값으로 대체하면 설정 누락이 조용히 로그를 메인 인스턴스에 쌓아 장애 격리를 무너뜨린다. 누락은 기동을 막고, 접속 장애는 경고만 한다.
 

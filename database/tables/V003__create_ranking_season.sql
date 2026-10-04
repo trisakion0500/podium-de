@@ -8,13 +8,13 @@
 --        ranking_id는 FK 없음: 키 구조는 설계를 따르며, 설계에 FK가 없다 (D-35).
 -- ------------------------------------------------------------------------------------------------------------ --
 CREATE TABLE `ranking_season` (
-    `ranking_id`           INT             UNSIGNED    NOT NULL                    COMMENT '랭킹 ID (ranking_def, FK 없음)',
+    `ranking_id`           INT             UNSIGNED    NOT NULL                    COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`            INT             UNSIGNED    NOT NULL                    COMMENT '시즌 번호 (랭킹 안에서 1부터)',
     `start_at`             DATETIME(3)                 NOT NULL                    COMMENT '시즌 시작 시각 (UTC, 포함)',
     `end_at`               DATETIME(3)                 NOT NULL                    COMMENT '시즌 종료 시각 (UTC, 미포함)',
     `settle_at`            DATETIME(3)                 NOT NULL                    COMMENT '정산 시작 하한 시각 (UTC, end_at + settle_delay)',
     `review_until`         DATETIME(3)                             DEFAULT NULL    COMMENT '검수 종료 시각 (UTC, 정산 결과 생성 후 확정)',
-    `status`               TINYINT         UNSIGNED    NOT NULL                    COMMENT '상태, 진행 순서대로 증가 (1:SCHEDULED 예정, 2:OPEN 적재, 3:CLOSED 적재 차단, 4:SETTLING entry 분리·가순위, 5:REVIEW 검수, 6:FINALIZING 확정, 7:DELIVERING 보상 전달, 8:SETTLED 완료) [codes.SeasonStatus]',
+    `status`               TINYINT         UNSIGNED    NOT NULL                    COMMENT '상태, 진행 순서대로 증가 (1:SCHEDULED 예정, 2:OPEN 적재, 3:CLOSED 적재 차단, 4:SETTLING 가순위 생성, 5:REVIEW 검수, 6:FINALIZING 확정, 7:DELIVERING 보상 전달, 8:SETTLED 완료) [codes.SeasonStatus]',
     `review_hold`          TINYINT(1)                  NOT NULL    DEFAULT 0       COMMENT '검수 보류 (1:보류 — 해제 전까지 확정하지 않음, 0:없음)',
     `participant_count`    INT             UNSIGNED                DEFAULT NULL    COMMENT '제재 제외 후 확정 참가자 수 (FINALIZING에서 기록)',
     `tier_snapshot`        JSON                                    DEFAULT NULL    COMMENT '정산 시 적용된 보상 구간 스냅샷',
