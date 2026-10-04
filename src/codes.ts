@@ -166,9 +166,10 @@ export const PartitionTarget = {
 } as const;
 
 /**
- * 관리·운영 SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
- * SP는 같은 숫자를 리터럴로 쓴다. API 결과 코드와 섞이지 않게 1000번대를 쓴다.
+ * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
+ * SP는 같은 숫자를 리터럴로 쓴다. API 결과 코드와 섞이지 않게 1000번대를 쓴다(1000번대 관리, 1100번대 제출).
  * @author trisakion
+ * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -189,6 +190,20 @@ export const SpResult = {
     SETTLING_OCCUPIED: 1007,
     /** 되돌리기 직전 entry 시즌 파티션에 행이 있음 (꺼낸 뒤 쓰기 발생) — 사람이 확인해야 함 */
     SETTLING_CONFLICT: 1008,
+    /** 제출: ranking_definition에 랭킹이 없음 */
+    RANKING_NOT_FOUND: 1101,
+    /** 제출: 랭킹이 ACTIVE가 아님 (D-34) */
+    RANKING_INACTIVE: 1102,
+    /** 제출: 시즌 행이 없거나 지금 시각이 그 시즌의 [start_at, end_at) 밖 (D-30) */
+    SEASON_MISMATCH: 1103,
+    /** 제출: 같은 requestId에 다른 내용(member, 값) (D-33) */
+    IDEMPOTENCY_CONFLICT: 1104,
+    /** 제출 하드 검증: BEST 값이 0 미만이거나 score_max 초과 (rejected 'SCORE_RANGE') */
+    SCORE_OUT_OF_RANGE: 1105,
+    /** 제출 하드 검증: SUM 증분의 절댓값이 max_delta 초과 (rejected 'MAX_DELTA') */
+    DELTA_EXCEEDED: 1106,
+    /** 제출 하드 검증: SUM 결과가 score_max 초과 (rejected 'SCORE_MAX', D-31) */
+    SCORE_MAX_EXCEEDED: 1107,
 } as const;
 
 /**
