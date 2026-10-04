@@ -164,3 +164,40 @@ export const PartitionTarget = {
     /** ranking_submit_key */
     SUBMIT_KEY: 2,
 } as const;
+
+/**
+ * 관리·운영 SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
+ * SP는 같은 숫자를 리터럴로 쓴다. API 결과 코드와 섞이지 않게 1000번대를 쓴다.
+ * @author trisakion
+ */
+export const SpResult = {
+    /** 성공 */
+    OK: 0,
+    /** 파라미터 형식 오류 (0, NULL, 허용 범위 밖) */
+    INVALID_PARAM: 1001,
+    /** ranking_season에 시즌 행이 없음 */
+    SEASON_NOT_FOUND: 1002,
+    /** 시즌 상태가 이 작업의 전제와 다름 (예: SETTLED가 아닌 시즌의 분리) */
+    SEASON_STATUS_INVALID: 1003,
+    /** ranking_entry 분리 조건 미충족: 다음 시즌이 SETTLED가 아님, 또는 마지막 시즌이 아닌데 다음 시즌 행이 없음 (D-52) */
+    NEXT_SEASON_NOT_SETTLED: 1004,
+    /** 운영 테이블에 시즌 파티션이 없음 (SETTLING인데 파티션 없음) */
+    PARTITION_NOT_FOUND: 1005,
+    /** 삭제하려는 파티션에 행이 있음 (먼저 백업으로 분리해야 함) */
+    PARTITION_NOT_EMPTY: 1006,
+    /** ranking_entry_settling에 다른 시즌 행이 있음 — 사람이 확인해야 함 */
+    SETTLING_OCCUPIED: 1007,
+    /** 되돌리기 직전 entry 시즌 파티션에 행이 있음 (꺼낸 뒤 쓰기 발생) — 사람이 확인해야 함 */
+    SETTLING_CONFLICT: 1008,
+} as const;
+
+/**
+ * SP_SETTLING_EXCHANGE가 돌려주는 settling 단계 (01_DESIGN 7.3, 8.6)
+ * @author trisakion
+ */
+export const SettlingState = {
+    /** 시즌 데이터가 ranking_entry_settling에 있고 정렬 인덱스가 준비됨. 가순위 UPDATE를 이어서 한 뒤 다시 호출한다 */
+    OUT: 1,
+    /** 시즌 데이터가 ranking_entry 파티션으로 돌아옴. Redis 키 삭제와 REVIEW 전이로 넘어간다 */
+    RETURNED: 2,
+} as const;

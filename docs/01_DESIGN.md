@@ -320,7 +320,7 @@ PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
 ```
 
 - 시즌의 스코어와 정산 결과를 한 행에 둔다. 결과 컬럼(`final_rank`~`delivered_at`)은 진행 중에는 비어 있고, 정산 단계에서 채운다 (7.3~7.7, D-49).
-- 시즌 데이터는 결과가 백업으로 분리될 때(자기 시즌과 다음 시즌 모두 SETTLED)까지 보관한다 (8.2).
+- 시즌 데이터는 결과가 백업으로 분리될 때(자기 시즌과 다음 시즌 모두 SETTLED, 마지막 시즌은 자기 시즌 SETTLED)까지 보관한다 (8.2).
 - 제출이 결과 컬럼을 건드리지 않으므로 결과 인덱스(`ix_final_rank`, `ix_reward_status`)는 신규 멤버 INSERT 때만 비용이 든다.
 - LIST 파티션 테이블은 생성 시 파티션이 최소 하나 필요하므로 `p_init ((0,0))`을 둔다. `ranking_id`는 1부터 시작한다. `ranking_submit_key`도 동일하다.
 - 정의되지 않은 `(ranking_id, season_no)`는 INSERT 시 에러가 발생한다. 잘못된 파티션에 조용히 들어가는 것을 방지한다.
@@ -395,8 +395,8 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 );
 ```
 
-- 앱이 응답을 만든 뒤 로그 DB 전용 커넥션 풀로 기록한다. 메인 트랜잭션과 묶지 않으며, 실패해도 응답과 재시도에 영향이 없다 (개발 컨벤션 7장). 실패하면 앱 로그 파일에 같은 내용을 한 줄 남긴다.
-- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 매일 다음 며칠의 일 파티션을 `p_max`에서 떼어 만들고, 보관 기간이 지난 일 파티션을 DROP한다. 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다.
+- 앱이 응답을 만든 뒤 로그 DB 전용 커넥션 풀로 `SP_INSERT_LOG_RANKING_SUBMIT`을 호출해 기록한다. 메인 트랜잭션과 묶지 않으며, 실패해도 응답과 재시도에 영향이 없다 (개발 컨벤션 7장). 실패하면 앱 로그 파일에 같은 내용을 한 줄 남긴다.
+- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 매일 다음 며칠의 일 파티션을 `p_max`에서 떼어 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 DROP한다(`SP_LOG_PARTITION_DROP`). 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다.
 - `p_max`는 안전망이다. 정리 잡이 멈춰도 INSERT가 실패하지 않는다. `p_max`에 행이 쌓이면 정리 잡 이상으로 보고 알린다 (11.4).
 - 조사 목적의 임의 조회는 이 테이블에서 한다. 메인 DB 운영 테이블에는 하지 않는다.
 - 로그 DB에는 자기 `SP_EXEC_DDL`의 감사 로그용으로 `log_ddl_audit`를 하나 더 둔다. 구조는 메인과 같다 (11.4). 감사 로그는 DDL을 실행한 DB에 기록해야 하고, 로그 DB는 별도 인스턴스일 수 있기 때문이다.
@@ -566,7 +566,9 @@ AND 리컨실러 워터마크 > end_at + 안전마진
 7. REVIEW 전이, review_until = NOW + review_period
 ```
 
+- 1·2단계와 4·5단계는 `SP_SETTLING_EXCHANGE` 하나가 맡는다. 호출마다 실제 상태를 보고(8.6) 다음 단계만 실행하고, 단계를 반환한다(1: OUT 가순위 진행 중, 2: RETURNED 되돌림 완료). 잡은 OUT이면 3단계를 이어서 한 뒤 다시 호출하고, RETURNED면 6단계로 간다.
 - 정렬 인덱스는 운영 테이블에 두지 않는다. 스코어 제출마다 쓰기 비용이 늘기 때문이다. EXCHANGE는 인덱스까지 같아야 하므로 되돌리기 전에 제거한다.
+- 정렬 인덱스는 `(ranking_id, season_no)` 뒤에 정렬 키를 둔다. 접두가 없으면 시즌 조건 때문에 옵티마이저가 PK 범위 조회 + filesort를 고를 수 있다.
 - 3단계는 커서 기반 청크로 짧은 트랜잭션을 반복한다. 단일 대형 UPDATE는 언두 증가, 복제 지연, 버퍼 풀 오염을 일으킨다.
 - 5단계: 기본 EXCHANGE는 일반 테이블의 모든 행이 파티션 값에 맞는지 읽어서 확인한다. 수백만 행을 읽는 동안 운영 테이블 DDL이 길어지므로, PK 범위 조회 두 번(`(ranking_id, season_no)`보다 앞·뒤 행 존재 여부)으로 다른 시즌 행이 없음을 먼저 확인하고 `WITHOUT VALIDATION`으로 교환한다.
 - 5단계가 끝나면 settling은 비어 있으므로 다시 만들 필요가 없다.
@@ -716,12 +718,13 @@ CREATE TABLE `ranking_exclusion` (
 
 | 테이블 | 보관 대상 | 분리 시점 | 분리 방식 |
 | --- | --- | --- | --- |
-| `ranking_entry` | 진행 중 시즌, 확정 결과, 지난 시즌 조회 | 자기 시즌과 다음 시즌 모두 SETTLED | EXCHANGE → 백업 |
+| `ranking_entry` | 진행 중 시즌, 확정 결과, 지난 시즌 조회 | 자기 시즌과 다음 시즌 모두 SETTLED (마지막 시즌은 자기 시즌 SETTLED) | EXCHANGE → 백업 |
 | `ranking_submit_key` | 진행 + 정산 중 시즌 | SETTLED | EXCHANGE → 백업 |
 | `ranking_hall` | 시즌별 Top N | 분리 없음 (영구) | — |
 
 - 제출 이력(로그 DB `log_ranking_submit`)은 이 표의 대상이 아니다. 로그 DB에서 날짜 기준으로 따로 정리한다 (4.5).
 - `ranking_entry`는 자기 시즌이 SETTLED가 아니면 분리하지 않는다. 보상 API는 운영 테이블만 읽으므로, 전달이 끝나지 않은 시즌을 분리하면 남은 PENDING을 조회할 수 없다 (7.7).
+- 마지막 시즌은 다음 시즌 행이 없고, 랭킹이 반복 없음(NONE)이거나 종료(ENDED)되었거나 랭킹 `end_at`이 그 시즌 `end_at` 이하인 시즌이다. 다음 시즌이 생기지 않으므로 기다리지 않고 분리한다. 다음 시즌 행이 아직 생성되지 않았을 뿐인 반복 랭킹은 기다린다 (D-52).
 - SETTLING에서 작업 테이블로 꺼냈다가 되돌리는 것(7.3)은 분리가 아니다. 파티션은 운영 테이블에 남는다.
 
 백업 테이블 이름: `{원본}_r{rankingId}_s{seasonNo}`
@@ -777,6 +780,8 @@ settling 비어 있음, entry 파티션에 final_rank NULL 행 있음 → 꺼내
 settling에 해당 시즌, final_rank NULL 행 있음              → 가순위 UPDATE 이어서 (MAX(final_rank) 기준, 정렬 인덱스 없으면 추가)
 settling에 해당 시즌, final_rank NULL 행 없음              → 정렬 인덱스 제거 후 되돌리기 (EXCHANGE)
 settling 비어 있음, entry 파티션에 final_rank NULL 행 없음  → SETTLING 완료
+settling에 다른 시즌 행                                    → 멈춤, 알림 (1007)
+되돌리기 직전 entry 파티션에 행 있음                        → 멈춤, 알림 (1008: 꺼낸 뒤 쓰기 발생)
 ```
 
 작업 테이블의 `(ranking_id, season_no)` 컬럼으로 어느 시즌 데이터인지 확인한다. 이 판단은 시즌 상태가 SETTLING일 때만 쓴다. FINALIZING 이후에는 제재 제외 행의 `final_rank`가 NULL이다.
@@ -879,13 +884,17 @@ CREATE TABLE `ranking_suspicion` (
 
 | SP | 역할 | 호출 |
 | --- | --- | --- |
-| `SP_EXEC_DDL(sql)` | 유일한 PREPARE 실행 지점, 감사 로그 기록 | 관리 SP 내부 |
+| `SP_EXEC_DDL(sql)` | 유일한 PREPARE 실행 지점, 감사 로그 기록. `SQL SECURITY INVOKER` (D-51) | 관리 SP 내부 |
 | `SP_PARTITION_ADD(rid, sno)` | 두 파티션 테이블(entry, submit_key)에 시즌 파티션 추가. 이미 있으면 건너뜀 | 앱 |
-| `SP_SETTLING_EXCHANGE(rid, sno)` | entry 시즌 파티션 ⇄ settling. settling이 비어 있으면 꺼내기, 해당 시즌만 있으면 `WITHOUT VALIDATION`으로 되돌리기 (7.3) | 앱 |
-| `SP_PARTITION_EXCHANGE(code, rid, sno)` | 백업 테이블 생성 후 교환 (8.2) | 앱 |
-| `SP_PARTITION_DROP(code, rid, sno)` | 파티션이 비어 있을 때만 삭제 | 앱 |
+| `SP_SETTLING_EXCHANGE(rid, sno)` | SETTLING의 DDL 단계를 상태를 보고 진행: 꺼내기와 정렬 인덱스 추가, 또는 인덱스 제거와 `WITHOUT VALIDATION` 되돌리기. 단계 반환 (7.3, 8.6) | 앱 |
+| `SP_PARTITION_EXCHANGE(code, rid, sno)` | 분리 조건(8.2)을 다시 확인한 뒤 백업 테이블 생성 후 교환. 파티션이 비어 있으면 교환하지 않음 (재실행 시 되돌아감 방지) | 앱 |
+| `SP_PARTITION_DROP(code, rid, sno)` | 파티션이 비어 있고 시즌이 SETTLED(또는 시즌 행 없음)일 때만 삭제 | 앱 |
+| `SP_LOG_PARTITION_ADD(day)` | 로그 DB. `log_ranking_submit` 일 파티션을 `day`까지 생성 (호출당 최대 64일) | 앱 |
+| `SP_LOG_PARTITION_DROP(day)` | 로그 DB. `day` 이전 일 파티션 삭제 (호출당 최대 31개) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
+- 관리 SP의 RESULT 코드는 `src/codes.ts`의 `SpResult`(1001~1008)다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
+- 관리 SP는 상태를 관측해 다음 단계만 실행하므로 같은 인자로 다시 호출해도 안전하다.
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.
 
@@ -917,7 +926,7 @@ CREATE TABLE `ranking_suspicion` (
 | `job_state` | 잡별 워터마크(리컨실러 checkpoint 등), 마지막 실행 시각 |
 | `instance_heartbeat` | 실행 중인 API·워커 인스턴스 (`instance_id`, `process_type`, `app_version`, `last_seen_at`) |
 
-- 인스턴스는 기동 후 주기적으로(예: 10초) 하트비트를 갱신하고, 정상 종료 시 자기 행을 삭제한다. 최근 30초 안의 하트비트를 살아 있는 인스턴스로 본다.
+- 인스턴스는 기동 후 주기적으로(예: 10초) 하트비트를 갱신하고(`SP_UPSERT_INSTANCE_HEARTBEAT`), 정상 종료 시 자기 행을 삭제한다(`SP_DELETE_INSTANCE_HEARTBEAT`). 최근 30초 안의 하트비트를 살아 있는 인스턴스로 본다.
 - `instance_id`는 프로세스 기동마다 생성하는 UUID다. PID는 재사용되어 다른 인스턴스의 행을 덮어쓸 수 있다.
 - 비정상 종료로 남은 행은 하트비트 루프가 `last_seen_at`이 1시간 넘게 지난 행을 함께 삭제해 정리한다.
 

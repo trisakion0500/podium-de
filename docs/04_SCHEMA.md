@@ -23,7 +23,7 @@ GM 도구(관리 API)로 행을 만든다.
 | 테이블 | 용도 | 쓰는 주체 | 관리자 조작 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, 상태 전이) | SCHEDULED 수정, OPEN `end_at` 변경, 검수 보류·조기 확정, DELIVERING 강제 종료 | — | 영구 | [3.1](01_DESIGN.md#31-ranking_season), [3.4](01_DESIGN.md#34-관리자-수정-범위), [7.5](01_DESIGN.md#75-review-검수), [7.7](01_DESIGN.md#77-delivering-보상-전달) |
-| `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | 보류(held) 건을 PENDING 또는 REJECTED로 전환 | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED에 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [7.4](01_DESIGN.md#74-결과-컬럼), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
+| `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | 보류(held) 건을 PENDING 또는 REJECTED로 전환 | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED(마지막 시즌은 자기 시즌)에 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [7.4](01_DESIGN.md#74-결과-컬럼), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
 | `ranking_submit_key` | 제출 멱등 키 (재전송 판별, 하드 검증 거부 사유) | 제출 API | — | 시즌 | 자기 시즌 SETTLED에 분리 | [4.4](01_DESIGN.md#44-ranking_submit_key), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
 | `ranking_entry_settling` | 정산 작업 테이블 (entry 시즌 파티션을 꺼내 가순위를 매긴 뒤 되돌림) | 정산 잡 | — | — | 평소 비어 있음 | [7.3](01_DESIGN.md#73-settling-가순위-생성) |
 | `ranking_hall` | 시즌별 상위 `hall_size` | 정산 잡 (FINALIZING) | — (지급 후 제재 시 `sanctioned`는 제재 처리가 갱신) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_hall) |
@@ -283,7 +283,7 @@ flowchart LR
     ENT -- "⑤ PENDING 목록" --> GS
     GS -- "⑤ ack → DELIVERED" --> ENT
     KEY == "⑥ 자기 시즌 SETTLED" ==> KB
-    ENT == "⑥ 자기 · 다음 시즌 SETTLED" ==> EB
+    ENT == "⑥ 자기 · 다음 시즌 SETTLED (마지막 시즌은 자기)" ==> EB
 ```
 
 | 단계 | 3절 구간 | 데이터 이동 |
@@ -293,7 +293,7 @@ flowchart LR
 | ③ | 마감과 정산 | `ranking_entry` 파티션을 `ranking_entry_settling`으로 꺼내(EXCHANGE) `final_rank` 가순위를 매기고 같은 파티션으로 되돌린다(EXCHANGE). 행 복사 없음. Redis 시즌 키 삭제 |
 | ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트로 보류, 상위 N → `ranking_hall` |
 | ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED |
-| ⑥ | SETTLED 이후 | `ranking_submit_key`(자기 시즌 SETTLED), `ranking_entry`(자기·다음 시즌 SETTLED) 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 삭제 |
+| ⑥ | SETTLED 이후 | `ranking_submit_key`(자기 시즌 SETTLED), `ranking_entry`(자기·다음 시즌 SETTLED, 마지막 시즌은 자기 시즌) 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 삭제 |
 
 - Redis는 `ranking_entry`의 투영이다. 언제든 MySQL로 재구축할 수 있으므로 흐름의 끝점이 아니다 (1.5, 6.3).
 - 로그 DB는 서비스 경로가 아니라서 시즌과 무관하게 날짜로 정리하며, 데이터가 찬 일 파티션을 DROP한다 (4.5).
