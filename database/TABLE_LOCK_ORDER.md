@@ -16,7 +16,8 @@ SP를 새로 만들거나 기존 SP에 테이블 쓰기를 추가할 때 먼저 
 | 9 | `ranking_hall` | FINALIZING 적재, 지급 후 제재 표시 |
 | 10 | `job_state` | 잡 워터마크 |
 | 11 | `instance_heartbeat` | 하트비트 (단독 자동 커밋) |
-| 12 | `log_ddl_audit` | `SP_EXEC_DDL` 전용 (단독 자동 커밋) |
+| 12 | `api_credential` | API 키 발급·폐기 (단독 자동 커밋) |
+| 13 | `log_ddl_audit` | `SP_EXEC_DDL` 전용 (단독 자동 커밋) |
 
 - 설정 → 상태 → 데이터 → 부가 기록 순이다. 상위(부모) 행을 먼저 잠그면 하위 행 갱신이 같은 순서로 줄을 선다.
 - 잠그지 않는 일반 SELECT(일관된 읽기)는 순서의 대상이 아니다. `SELECT ... FOR UPDATE`, `FOR SHARE`, 쓰기만 해당한다.

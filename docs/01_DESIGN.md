@@ -22,6 +22,8 @@
 | 구성 | 버전 | 역할 |
 | --- | --- | --- |
 | Node.js | 22 LTS | API, 스케줄러 |
+| Fastify | 5 | HTTP 서버, 요청 스키마 검증, Swagger 문서 |
+| node-redis | 5 | Redis 클라이언트 (클러스터, Lua) |
 | MySQL | 8.4 | 원장. 모든 DB 로직은 Stored Procedure |
 | Redis | 7.4 | 실시간 랭킹 (MySQL의 투영) |
 
@@ -842,6 +844,25 @@ CREATE TABLE `ranking_suspicion` (
 - TLS 필수. 가능하면 IP 허용 목록.
 - 권한 분리: `write`(제출), `read`(조회), `reward`(보상 수신). 관리 API는 GM 도구 인증으로 분리한다.
 - 복수 키 동시 활성 (무중단 교체). DB에는 해시만 저장한다.
+- 키는 32바이트 난수(base64url 43자)이며 발급 시 한 번만 보여준다. 저장은 SHA-256 해시다. 엔트로피가 충분한 난수라 느린 해시(bcrypt 등)가 필요 없고, 요청마다 드는 비용을 피한다.
+- API는 기동 시 활성 키 목록을 메모리에 올리고 30초마다 다시 읽는다. 요청마다 DB를 조회하지 않는다. 기동 시 읽기에 실패하면 기동을 거부하고, 재조회 실패 시 기존 목록을 유지하고 경고한다.
+- 새 키는 발급 후 30초가 지나야 모든 인스턴스에서 통과한다. 교체는 발급 → 30초 대기 → 게임 서버 설정 변경 → 옛 키 폐기 순으로 한다.
+- 유출 대응처럼 폐기를 즉시 반영해야 하면 폐기 후 API를 재시작한다. 재조회가 연속으로 실패하면(DB 장애 등) 폐기가 반영되지 않으므로 알린다.
+- 발급과 폐기는 CLI(`npm run apikey`)로 한다. 관리 API가 생기면 같은 SP를 쓴다.
+- 로그에는 키 대신 `api_credential_id`를 남긴다.
+
+```sql
+CREATE TABLE `api_credential` (
+    `api_credential_id`    INT            UNSIGNED    NOT NULL    AUTO_INCREMENT    COMMENT 'API 키 ID',
+    `key_name`             VARCHAR(64)                NOT NULL                      COMMENT '키 이름 (용도 식별, 예: game-server-live)',
+    `key_hash`             BINARY(32)                 NOT NULL                      COMMENT '키 SHA-256 해시',
+    `scopes`               TINYINT        UNSIGNED    NOT NULL                      COMMENT '권한 비트 (1:WRITE 제출, 2:READ 조회, 4:REWARD 보상 수신) [codes.ApiScope]',
+    `created_at`           DATETIME(3)                NOT NULL                      COMMENT '발급 시각 (UTC)',
+    `revoked_at`           DATETIME(3)                            DEFAULT NULL      COMMENT '폐기 시각 (UTC, NULL:활성)',
+    PRIMARY KEY (`api_credential_id`),
+    UNIQUE KEY `ux_key_hash` (`key_hash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='서버 간 호출 API 키';
+```
 
 ### 10.2 엔드포인트
 

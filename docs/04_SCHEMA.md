@@ -8,13 +8,14 @@
 
 ### 1.1 관리자 등록
 
-GM 도구(관리 API)로 행을 만든다.
+GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생기기 전까지 CLI로 만든다.
 
 | 테이블 | 용도 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- |
 | `ranking_definition` | 랭킹 정의 (갱신 규칙, 정렬, 일정, 보관, 검증 설정). 순위 규칙은 등록 후 불변 | — | 영구 | [2.1](01_DESIGN.md#21-ranking_definition), [2.7](01_DESIGN.md#27-등록-검증) |
 | `ranking_reward_tier` | 랭킹별 보상 구간 (순위·백분율 → `reward_code`) | — | 영구. 정산 시 `tier_snapshot`에 고정 | [2.6](01_DESIGN.md#26-보상-구간) |
 | `ranking_exclusion` | 제재로 순위에서 제외할 멤버 (`season_no = 0`은 전 시즌) | — | 영구 | [7.8](01_DESIGN.md#78-제재-처리) |
+| `api_credential` | 서버 간 호출 API 키 (해시와 권한) | — | 폐기 후에도 보관 | [10.1](01_DESIGN.md#101-인증) |
 
 ### 1.2 시스템 관리
 
@@ -144,6 +145,11 @@ erDiagram
     schema_migration {
         varchar script_name PK
         char checksum
+    }
+    api_credential {
+        int api_credential_id PK
+        binary key_hash UK
+        tinyint scopes "ApiScope"
     }
 ```
 

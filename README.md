@@ -120,8 +120,9 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 | 항목 | 스택 |
 |---|---|
 | 런타임/언어 | Node.js 22 LTS + TypeScript |
+| HTTP | Fastify 5 (요청 스키마 검증, Swagger) |
 | DB | MySQL 8.4 (mysql2, ORM 미사용 — 모든 DB 로직은 Stored Procedure) |
-| 캐시 | Redis 7.4 (ioredis) |
+| 캐시 | Redis 7.4 (node-redis) |
 | 배포 모델 | 싱글테넌트, 프로젝트별 독립 배포 |
 
 ---
