@@ -323,7 +323,7 @@ flowchart TD
         HARD -- "통과" --> RULE{"update_rule"}
         RULE -- "BEST" --> BEST["ranking_entry ODKU<br/>새 기록이 더 좋을 때만<br/>achieved_at, version, updated_at 갱신<br/>score는 마지막에 (4.3)"]
         RULE -- "SUM" --> SUMQ{"entry 행 있음?"}
-        SUMQ -- "없음, 증분 ≤ 0" --> NOROW["entry 행 만들지 않음 (D-32)"]
+        SUMQ -- "없음, 증분 ≤ 0" --> NOROW["entry 행 만들지 않음 (D-32)<br/>score = 0, version = 0 반환"]
         SUMQ -- "없음, 증분 > 0" --> SUMI["ranking_entry INSERT<br/>score = 증분, version = 1"]
         SUMQ -- "있음" --> SUMU["score = GREATEST(score + 증분, 0)<br/>실제로 바뀔 때만<br/>achieved_at, version, updated_at 갱신"]
         BEST --> KEYW
@@ -333,7 +333,7 @@ flowchart TD
         KEYW["ranking_submit_key INSERT<br/>member_id, input_value"] --> RET["COMMIT<br/>score, achieved_at, version, replayed = 0 반환"]
     end
 
-    RET --> RED["composite 계산 → Redis Lua (5.3)<br/>센티넬 없으면 버림<br/>BEST: ZADD GT, SUM: version 비교 후 ZADD<br/>(바뀌지 않은 값은 GT·version 비교로 무시됨)"]
+    RET --> RED["composite 계산 → Redis Lua (5.3)<br/>version = 0이면 생략, 센티넬 없으면 버림<br/>BEST: ZADD GT, SUM: version 비교 후 ZADD<br/>(바뀌지 않은 값은 GT·version 비교로 무시됨)"]
     RP --> RED
     RED -- "실패 시 L1 재시도 (6.1)<br/>그래도 실패하면 리컨실러가 맞춤 (6.2)" --> OK["성공 응답"]
     OK & X0 & X1 & X2 & X3 & X4 -.-> HIST["제출 이력 기록 (로그 DB, 4.5)<br/>모든 결과, result_code 포함<br/>실패해도 응답에 영향 없음"]

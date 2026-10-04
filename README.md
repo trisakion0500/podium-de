@@ -168,7 +168,10 @@ podiumDE/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)
 │   └── TABLE_LOCK_ORDER.md
-├── database_log/        # 로그 DB(podium_de_log) — tables/, procedures/
+├── database_log/        # 로그 DB(podium_de_log), database/와 같은 규칙
+│   ├── tables/
+│   ├── procedures/
+│   └── TABLE_LOCK_ORDER.md
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
 └── docs/                # 설계 문서(위 목록)
 ```

@@ -101,7 +101,7 @@ CREATE TABLE `ranking_definition` (
 
 - 값이 실제로 바뀌지 않으면 `version`, `achieved_at`, `updated_at`을 갱신하지 않는다. (예: 0점에서 음수 증분)
 - SUM 결과가 `score_max`를 넘으면 거부한다. 거부 사유는 멱등 키(`rejected`)와 제출 이력에 남긴다.
-- SUM 첫 제출의 증분이 0 이하면 entry 행을 만들지 않고 로그에만 남긴다. 0점 유저가 참가자 수와 PERCENT 구간 계산에 섞이지 않게 한다.
+- SUM 첫 제출의 증분이 0 이하면 entry 행을 만들지 않고 로그에만 남긴다. 0점 유저가 참가자 수와 PERCENT 구간 계산에 섞이지 않게 한다. 응답은 성공(`RESULT 0`)이며 `score = 0`, `version = 0`, `achieved_at = NULL`이다. 앱은 `version = 0`이면 Redis 반영을 건너뛴다 (D-32).
 - LATEST는 코드(3)만 정의하고, 구현 전까지 등록을 거부한다.
 
 | 랭킹 예시 | 규칙 | 정렬 |
@@ -265,7 +265,7 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
        규칙 적용 upsert
        멱등 키 기록 (같은 트랜잭션)
        결과 반환 (RESULT, season_no, season_start_at, score, achieved_at, version, replayed)
-  3. composite 계산 → Redis 반영 (실패해도 응답은 성공)
+  3. composite 계산 → Redis 반영 (실패해도 응답은 성공, version = 0이면 생략)
   4. 제출 이력 기록 → 로그 DB (모든 결과, 실패해도 응답에 영향 없음, 4.5)
 ```
 
