@@ -8,6 +8,13 @@ import { config } from './config.js';
 import { BusinessException, ERROR_MAP, type ErrorCode } from './errors.js';
 import { logger } from './logger.js';
 
+declare module 'fastify' {
+    interface FastifyRequest {
+        /** 인증 가드를 통과한 키의 api_credential_id (인증 없는 경로·인증 실패는 null). 로그에는 키 대신 이 값을 남긴다 */
+        credentialId: number | null;
+    }
+}
+
 /**
  * 로그에서 값을 가리는 키 (소문자, 개발 컨벤션 7.1). 새 비밀값 필드가 생기면 여기에 추가한다.
  * x-api-key는 헤더라 지금은 로그에 남기지 않지만, 바디나 헤더 로그가 추가돼도 새지 않게 둔다.
@@ -87,6 +94,7 @@ function resultCodeTable(): string {
  * Fastify 자체 로거(pino)는 끈다 — 로그는 log4js 하나로만 남긴다.
  * @returns 라우트 등록 전 Fastify 인스턴스
  * @author trisakion
+ * @modified 2026-10-06 trisakion 인증 키 ID(credentialId)를 요청에 선언하고 응답 로그에 추가
  */
 export async function buildServer(): Promise<FastifyInstance> {
     // Fastify 요청 처리 순서(아래 훅·핸들러가 끼어드는 위치):
@@ -102,6 +110,10 @@ export async function buildServer(): Promise<FastifyInstance> {
         // Swagger 문서용 example 키워드를 검증기(ajv strict)가 모르는 키워드로 거부하지 않게 한다.
         ajv: { customOptions: { keywords: ['example'] } },
     });
+
+    // decorateRequest: 요청 객체에 필드를 미리 선언한다. 요청마다 필드를 새로 붙이면 객체 형태가 달라져 V8 최적화가 깨지므로
+    // Fastify는 미리 선언하게 한다. 인증 가드(auth.ts)가 채운다.
+    app.decorateRequest('credentialId', null);
 
     // addSchema: 여러 라우트가 함께 쓰는 JSON 스키마를 이름($id)으로 등록한다. 라우트는 { $ref: 'ErrorResponse#' }로
     // 참조해 실패 응답 형식을 한 곳에서만 정의한다. Swagger 문서에는 components.schemas.ErrorResponse로 나온다.
@@ -144,7 +156,8 @@ export async function buildServer(): Promise<FastifyInstance> {
     // 한 곳에서 빠짐없이 남는다. payload는 직렬화된 응답 바디이며, 바꾸지 않고 그대로 돌려줘야 전송된다.
     app.addHook('onSend', async (req, reply, payload) => {
         const body = typeof payload === 'string' ? ` body=${bodyForLog(payload)}` : '';
-        logger.info(`[${req.id}] <-- ${reply.statusCode} ${Math.round(reply.elapsedTime)}ms${body}`);
+        const cred = req.credentialId === null ? '' : ` cred=${req.credentialId}`;
+        logger.info(`[${req.id}] <-- ${reply.statusCode} ${Math.round(reply.elapsedTime)}ms${cred}${body}`);
         return payload;
     });
 

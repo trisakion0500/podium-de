@@ -1,5 +1,6 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { Pool } from 'mysql2/promise';
+import { hashApiKey } from './auth.js';
 import { ApiScope, SpResult } from './codes.js';
 import { createPool, callSp } from './db.js';
 import { logger, shutdownLogger } from './logger.js';
@@ -41,7 +42,7 @@ async function create(pool: Pool, name: string, scopeArg: string): Promise<boole
         scopes |= bit;
     }
     const key = randomBytes(32).toString('base64url');
-    const hash = createHash('sha256').update(key).digest();
+    const hash = hashApiKey(key);
     const { result, rows } = await callSp(pool, 'SP_INSERT_API_CREDENTIAL', [name, hash, scopes]);
     if (result !== SpResult.OK) {
         logger.error(`발급 실패 RESULT ${result} (이름은 1~64자, 권한은 하나 이상)`);
