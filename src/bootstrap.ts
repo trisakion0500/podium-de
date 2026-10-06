@@ -12,11 +12,12 @@ import { verifySchema } from './migrate.js';
  * 지워야 migrate가 아직 일하는 인스턴스를 놓치지 않고, 풀은 마지막에 닫아야 정지 중인 작업이 실패하지 않는다.
  * @param name 로그용 프로세스 이름
  * @param processType 하트비트 프로세스 유형 (codes.ProcessType)
- * @returns 커넥션 풀과 종료 훅 등록 함수
+ * @returns 커넥션 풀과 종료 훅 등록 함수. 등록 함수는 같은 종료 절차를 직접 부르는 함수를 돌려준다(listen 실패 등 기동 후반 실패용)
  * @author trisakion
  * @modified 2026-10-01 trisakion 하트비트 기록 후 migrate 락 안에서 스키마 확인, 실패 시 하트비트 삭제
+ * @modified 2026-10-06 trisakion 종료 훅 등록 시 종료 함수 반환
  */
-export async function bootstrap(name: string, processType: number): Promise<{ pool: Pool; onShutdown: (beforeClose: () => Promise<void>) => void }> {
+export async function bootstrap(name: string, processType: number): Promise<{ pool: Pool; onShutdown: (beforeClose: () => Promise<void>) => (reason: string) => Promise<void> }> {
     const pool = createPool('APP');
     let stopHeartbeat: (() => Promise<void>) | undefined;
     try {
@@ -30,9 +31,9 @@ export async function bootstrap(name: string, processType: number): Promise<{ po
         process.exit(1);
     }
 
-    const onShutdown = (beforeClose: () => Promise<void>): void => {
-        const shutdown = async (signal: string): Promise<void> => {
-            logger.info(`${name} shutting down (${signal})`);
+    const onShutdown = (beforeClose: () => Promise<void>): ((reason: string) => Promise<void>) => {
+        const shutdown = async (reason: string): Promise<void> => {
+            logger.info(`${name} shutting down (${reason})`);
             await beforeClose();
             await stopHeartbeat();
             await pool.end();
@@ -40,6 +41,7 @@ export async function bootstrap(name: string, processType: number): Promise<{ po
         };
         process.once('SIGINT', shutdown);
         process.once('SIGTERM', shutdown);
+        return shutdown;
     };
     return { pool, onShutdown };
 }

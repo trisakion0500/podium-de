@@ -71,6 +71,7 @@ const mainDb = {
  * @author trisakion
  * @modified 2026-10-01 trisakion DB 계정을 APP/MIGRATE로 분리 (dbCredential)
  * @modified 2026-10-02 trisakion 로그 DB 접속 설정 추가 (D-48)
+ * @modified 2026-10-06 trisakion API 수신 주소, 처리 제한 시간, Swagger UI 설정 추가
  */
 export const config = {
     db: mainDb,
@@ -87,6 +88,16 @@ export const config = {
     /** 로그 DB 제출 이력 보관 일수 (01_DESIGN 4.5) */
     logRetentionDays: int('LOG_RETENTION_DAYS', 90),
     apiPort: int('API_PORT', 3000),
+    /**
+     * 수신 주소. Fastify 기본값(localhost)은 로드밸런서에서 닿지 않아 '::'(IPv6+IPv4 겸용)을 쓴다.
+     * '0.0.0.0'은 Windows에서 같은 포트를 쓰는 다른 프로세스가 있어도 오류 없이 함께 열려 충돌을 숨긴다.
+     * IPv6가 꺼진 호스트만 0.0.0.0으로 바꾼다.
+     */
+    apiHost: process.env.API_HOST || '::',
+    /** 요청 처리 제한 시간(ms). 넘으면 TIMEOUT 응답만 보내고 진행 중 작업은 취소하지 않는다 (개발 컨벤션 7.2) */
+    apiTimeoutMs: int('API_TIMEOUT_MS', 30000),
+    /** 1이면 Swagger UI(/docs)를 연다. 설치본 운영 환경에 API 구조를 기본으로 드러내지 않도록 기본은 끈다 */
+    apiDocs: int('API_DOCS', 0) === 1,
     /** npm run upgrade 설정. 명령이 없으면 upgrade가 1단계 전에 중단한다 */
     upgrade: {
         stopCmd: process.env.UPGRADE_STOP_CMD ?? '',

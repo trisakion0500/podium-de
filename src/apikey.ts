@@ -6,9 +6,9 @@ import { logger, shutdownLogger } from './logger.js';
 
 const USAGE = [
     '사용법:',
-    '  npm run apikey -- create <이름> <권한>   권한: write,read,reward 중 쉼표로 조합',
-    '  npm run apikey -- revoke <ID>',
-    '  npm run apikey -- list [--all]           --all: 폐기된 키 포함',
+    '  npm run credential -- create <이름> <권한>   권한: write,read,reward 중 쉼표로 조합',
+    '  npm run credential -- revoke <ID>',
+    '  npm run credential -- list [--all]           --all: 폐기된 키 포함',
 ].join('\n');
 
 const SCOPE_NAMES: Record<string, number> = { write: ApiScope.WRITE, read: ApiScope.READ, reward: ApiScope.REWARD };

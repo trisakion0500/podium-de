@@ -13,9 +13,12 @@
         "start:api": "node dist/api.js",
         "start:worker": "node dist/worker.js",
         "upgrade": "node dist/upgrade.js",
-        "apikey": "node dist/apikey.js"
+        "credential": "node dist/apikey.js"
     },
     "dependencies": {
+        "@fastify/swagger": "9.9.1",
+        "@fastify/swagger-ui": "6.1.1",
+        "fastify": "5.12.5",
         "log4js": "6.9.1",
         "mysql2": "3.24.5"
     },

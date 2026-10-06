@@ -102,6 +102,7 @@ API·워커만 실행하는 호스트의 `.env`에는 `DB_MIGRATE_*`를 두지 �
 npm run build          # tsc → dist/
 npm run migrate        # 테이블·SP 적용 (migrate 계정)
 npm run start:api      # API 실행 (http://localhost:3000, API_PORT로 변경 가능)
+                       # API_DOCS=1이면 http://localhost:3000/docs 에 Swagger UI
 npm run start:worker   # 워커 실행
 ```
 

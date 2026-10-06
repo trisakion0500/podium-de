@@ -162,8 +162,10 @@ podiumDE/
 │   ├── bootstrap.ts     # API·워커 공통 기동(스키마 확인, 하트비트)과 정상 종료 순서
 │   ├── heartbeat.ts     # 인스턴스 하트비트
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
-│   ├── apikey.ts        # API 키 발급·폐기·목록(npm run apikey)
-│   ├── db.ts            # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출, GET_LOCK 헬퍼
+│   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
+│   ├── server.ts        # Fastify 공통 처리(요청 로그·마스킹, 시간 초과, 오류 변환, Swagger, /health)
+│   ├── errors.ts        # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
+│   ├── db.ts            # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001은 BusinessException), GET_LOCK 헬퍼
 │   ├── logger.ts        # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
 │   └── config.ts        # 환경변수 로딩
 ├── database/
@@ -205,7 +207,7 @@ migrate와 같은 락을 잡고 DB 스키마가 패키지와 같은지 확인만
 | `npm run start:api` | API 프로세스 실행 |
 | `npm run start:worker` | 워커 프로세스 실행 |
 | `npm run upgrade` | 중단 패치 일괄 실행(중지 → migrate → 기동 → 새 버전 확인) |
-| `npm run apikey` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
+| `npm run credential` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
 
 ### 배포
 
@@ -328,8 +330,18 @@ migrate가 하트비트로 거부되면
 
 ## 현재 상태
 
-- [ ] 1단계: 프로젝트 골격, 마이그레이션 러너, 스키마, 파티션 관리 SP, 스코어 적재 SP
+- [x] 1단계: 프로젝트 골격, 마이그레이션 러너, 스키마, 파티션 관리 SP, 스코어 적재 SP
+  - [x] 마이그레이션 러너(버전·반복 마이그레이션, 체크섬, 기동 시 스키마 확인), 하트비트, 중단 패치(`npm run upgrade`)
+  - [x] 테이블 DDL — 메인 DB 14개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리)
+  - [x] 파티션·정산 관리 SP (`SP_PARTITION_*`, `SP_SETTLING_EXCHANGE`, 로그 DB 일 파티션)
+  - [x] 스코어 적재 SP `SP_SUBMIT_SCORE` (BEST/SUM, 멱등 키, 하드 검증)
 - [ ] 2단계: API 인증, 제출 API, Redis 반영, 순위 조회 → 부하 테스트
+  - [x] API 키 테이블·SP, 발급·폐기 CLI(`npm run credential`)
+  - [x] Fastify 서버 기반 — 결과 코드 체계, 오류 변환, 요청 로그·마스킹, 시간 초과, Swagger
+  - [ ] 인증 가드 (활성 키 메모리 목록, 권한 비트)
+  - [ ] 스코어 제출 API + Redis 반영
+  - [ ] 순위 조회 API (상위, 내 순위, 현재 시즌)
+  - [ ] 부하 테스트
 - [ ] 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
 - [ ] 4단계: 시즌 스케줄러(생성, 상태 전이, 정산, 전달)
 - [ ] 5단계: 아카이브 로테이션

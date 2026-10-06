@@ -848,7 +848,7 @@ CREATE TABLE `ranking_suspicion` (
 - API는 기동 시 활성 키 목록을 메모리에 올리고 30초마다 다시 읽는다. 요청마다 DB를 조회하지 않는다. 기동 시 읽기에 실패하면 기동을 거부하고, 재조회 실패 시 기존 목록을 유지하고 경고한다.
 - 새 키는 발급 후 30초가 지나야 모든 인스턴스에서 통과한다. 교체는 발급 → 30초 대기 → 게임 서버 설정 변경 → 옛 키 폐기 순으로 한다.
 - 유출 대응처럼 폐기를 즉시 반영해야 하면 폐기 후 API를 재시작한다. 재조회가 연속으로 실패하면(DB 장애 등) 폐기가 반영되지 않으므로 알린다.
-- 발급과 폐기는 CLI(`npm run apikey`)로 한다. 관리 API가 생기면 같은 SP를 쓴다.
+- 발급과 폐기는 CLI(`npm run credential`)로 한다. 관리 API가 생기면 같은 SP를 쓴다.
 - 로그에는 키 대신 `api_credential_id`를 남긴다.
 
 ```sql
@@ -883,6 +883,26 @@ CREATE TABLE `api_credential` (
 
 게임 서버는 `seasons/current`로 시즌 번호, 시작·종료 시각을 조회해 캐시하고 클라이언트 표시와 제출(`seasonNo`)에 사용한다. 시즌 경계(`end_at`)가 지나면 다시 조회한다.
 
+### 10.3 응답과 결과 코드
+
+- 성공은 HTTP 200과 `{ result: 0, data }`, 실패는 `{ result, message }`다. 비즈니스 실패를 200으로 보내지 않는다.
+- SP 코드와 API 코드는 한 번호 공간이다(D-55). SP의 RESULT를 변환 없이 응답 `result`와 `log_ranking_submit.result_code`로 내보내, 대역만 보고 발생 위치를 안다. 이미 쓴 번호의 의미는 바꾸지 않는다.
+
+| 대역 | 발생 위치 | HTTP |
+| --- | --- | --- |
+| 10xx | SP: 관리·공통 | 400 등 |
+| 11xx | SP: 제출 | 400·404·409 등 (코드별) |
+| 12xx | SP: API 키 | (CLI 전용) |
+| 20xx | API 계층: 2001 요청 형식, 2002 인증, 2003 권한, 2004 경로 없음, 2005 시간 초과 | 400, 401, 403, 404, 503 |
+| 5000 | 앱 미분류 예외 | 500 |
+| 50001 | DB 시스템 오류 (SP EXIT HANDLER) | 500 |
+
+- 도메인당 99개다. 넘치면 예비 대역을 준다.
+- 코드별 메시지와 HTTP 상태는 `src/errors.ts`의 `ERROR_MAP`에서만 관리하고, Swagger 문서의 결과 코드 표도 여기서 만든다.
+- 응답 헤더 `x-request-id`는 그 요청의 로그 두 줄(요청/응답)을 짝짓는 ID다. 문의 시 이 값을 받는다.
+- 처리 제한 시간(`API_TIMEOUT_MS`, 기본 30초)을 넘으면 2005를 응답하지만 진행 중인 SP는 취소되지 않아 반영될 수 있다. 제출은 같은 `requestId`로 재시도한다.
+- Swagger UI(`/docs`)는 `API_DOCS=1`일 때만 연다.
+
 ---
 
 ## 11. 운영 원칙
@@ -914,7 +934,7 @@ CREATE TABLE `api_credential` (
 | `SP_LOG_PARTITION_DROP(day)` | 로그 DB. `day` 이전 일 파티션 삭제 (호출당 최대 31개) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
-- SP의 RESULT 코드는 `src/codes.ts`의 `SpResult`다. 관리 SP는 1001~1008, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
+- SP의 RESULT 코드는 `src/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1008, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
 - 관리 SP는 상태를 관측해 다음 단계만 실행하므로 같은 인자로 다시 호출해도 안전하다.
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.

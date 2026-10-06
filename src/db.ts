@@ -1,10 +1,10 @@
 import mysql from 'mysql2/promise';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import { ApiResult } from './codes.js';
 import { config, dbCredential, type DbAccount, type DbTarget } from './config.js';
+import { BusinessException } from './errors.js';
 import { logger } from './logger.js';
 
-/** SP 시스템 오류 RESULT (개발 컨벤션 4.4) */
-const RESULT_DB_ERROR = 50001;
 const ER_SP_DOES_NOT_EXIST = 1305;
 
 /**
@@ -64,6 +64,7 @@ export interface SpResult {
  * @returns RESULT 코드와 데이터 행
  * @author trisakion
  * @modified 2026-10-01 trisakion SP 없음(1305)을 migrate 안내 오류로 변환
+ * @modified 2026-10-06 trisakion RESULT=50001을 BusinessException(DATABASE_ERROR)으로 던짐
  */
 export async function callSp(db: Pool | PoolConnection, name: string, params: unknown[]): Promise<SpResult> {
     if (!/^SP_[A-Z0-9_]+$/.test(name))
@@ -80,8 +81,8 @@ export async function callSp(db: Pool | PoolConnection, name: string, params: un
     const head = sets[0]?.[0];
     if (!head || typeof head.RESULT !== 'number')
         throw new Error(`${name}: RESULT 결과셋이 없습니다.`);
-    if (head.RESULT === RESULT_DB_ERROR)
-        throw Object.assign(new Error(`${name}: DB 오류 ${head.ERROR_NO} (${head.SQL_STATE}) ${head.ERROR_MESSAGE}`), {
+    if (head.RESULT === ApiResult.DATABASE_ERROR)
+        throw new BusinessException(ApiResult.DATABASE_ERROR, `${name}: DB 오류 ${head.ERROR_NO} (${head.SQL_STATE}) ${head.ERROR_MESSAGE}`, {
             sqlState: head.SQL_STATE,
             errorNo: head.ERROR_NO,
         });

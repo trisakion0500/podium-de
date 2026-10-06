@@ -180,10 +180,12 @@ export const PartitionTarget = {
 
 /**
  * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
- * SP는 같은 숫자를 리터럴로 쓴다. API 결과 코드와 섞이지 않게 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키).
+ * SP는 같은 숫자를 리터럴로 쓴다. API 응답 result로 그대로 나가며, API 계층 코드(ApiResult 20xx)와 겹치지 않게
+ * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키). 도메인당 99개, 넘치면 예비 대역을 준다.
  * @author trisakion
  * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
  * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
+ * @modified 2026-10-06 trisakion API 계층 코드와 한 번호 공간으로 정리
  */
 export const SpResult = {
     /** 성공 */
@@ -222,6 +224,29 @@ export const SpResult = {
     CREDENTIAL_NOT_FOUND: 1201,
     /** API 키: 이미 폐기된 키 */
     CREDENTIAL_ALREADY_REVOKED: 1202,
+} as const;
+
+/**
+ * API 계층 결과 코드. SpResult와 한 번호 공간을 쓴다 — SP 코드는 변환 없이 API 응답 result와
+ * log_ranking_submit.result_code로 그대로 나가므로, 대역만 보고 발생 위치를 안다(10xx~12xx SP, 20xx API 계층,
+ * 5000 앱 미분류, 50001 DB 시스템 오류). 메시지와 HTTP 상태는 errors.ts의 ERROR_MAP에서만 관리한다.
+ * @author trisakion
+ */
+export const ApiResult = {
+    /** 요청 형식 오류 (스키마 검증 실패, JSON 파싱 실패 등) */
+    VALIDATION_FAILED: 2001,
+    /** API 키가 없거나 등록되지 않음 */
+    UNAUTHORIZED: 2002,
+    /** API 키에 이 요청의 권한 비트가 없음 */
+    FORBIDDEN: 2003,
+    /** 없는 경로 */
+    NOT_FOUND: 2004,
+    /** 처리 시간 초과. 작업은 서버에서 계속되어 반영될 수 있다 (개발 컨벤션 7.2) */
+    TIMEOUT: 2005,
+    /** 분류되지 않은 앱 예외 */
+    INTERNAL_ERROR: 5000,
+    /** SP 내부 시스템 오류 (SP RESULT 50001, db.ts callSp가 던짐) */
+    DATABASE_ERROR: 50001,
 } as const;
 
 /**
