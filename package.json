@@ -12,7 +12,8 @@
         "migrate": "node dist/migrate.js",
         "start:api": "node dist/api.js",
         "start:worker": "node dist/worker.js",
-        "upgrade": "node dist/upgrade.js"
+        "upgrade": "node dist/upgrade.js",
+        "apikey": "node dist/apikey.js"
     },
     "dependencies": {
         "log4js": "6.9.1",

@@ -154,6 +154,19 @@ export const ProcessType = {
 } as const;
 
 /**
+ * API 키 권한 비트 (api_credential.scopes, 01_DESIGN 10.1). 한 키에 여러 권한을 OR로 조합한다
+ * @author trisakion
+ */
+export const ApiScope = {
+    /** 스코어 제출 */
+    WRITE: 1,
+    /** 순위·결과 조회 */
+    READ: 2,
+    /** 보상 목록 수신과 ack */
+    REWARD: 4,
+} as const;
+
+/**
  * 관리 SP의 파티션 대상 테이블 코드 (SP_PARTITION_EXCHANGE, SP_PARTITION_DROP의 code 파라미터, 01_DESIGN 11.2)
  * @author trisakion
  * @modified 2026-10-03 trisakion RESULT 제거 (D-49)
@@ -167,9 +180,10 @@ export const PartitionTarget = {
 
 /**
  * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
- * SP는 같은 숫자를 리터럴로 쓴다. API 결과 코드와 섞이지 않게 1000번대를 쓴다(1000번대 관리, 1100번대 제출).
+ * SP는 같은 숫자를 리터럴로 쓴다. API 결과 코드와 섞이지 않게 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키).
  * @author trisakion
  * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
+ * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -204,6 +218,10 @@ export const SpResult = {
     DELTA_EXCEEDED: 1106,
     /** 제출 하드 검증: SUM 결과가 score_max 초과 (rejected 'SCORE_MAX', D-31) */
     SCORE_MAX_EXCEEDED: 1107,
+    /** API 키: api_credential에 키가 없음 */
+    CREDENTIAL_NOT_FOUND: 1201,
+    /** API 키: 이미 폐기된 키 */
+    CREDENTIAL_ALREADY_REVOKED: 1202,
 } as const;
 
 /**

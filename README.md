@@ -162,6 +162,7 @@ podiumDE/
 │   ├── bootstrap.ts     # API·워커 공통 기동(스키마 확인, 하트비트)과 정상 종료 순서
 │   ├── heartbeat.ts     # 인스턴스 하트비트
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
+│   ├── apikey.ts        # API 키 발급·폐기·목록(npm run apikey)
 │   ├── db.ts            # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출, GET_LOCK 헬퍼
 │   ├── logger.ts        # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
 │   └── config.ts        # 환경변수 로딩
@@ -204,6 +205,7 @@ migrate와 같은 락을 잡고 DB 스키마가 패키지와 같은지 확인만
 | `npm run start:api` | API 프로세스 실행 |
 | `npm run start:worker` | 워커 프로세스 실행 |
 | `npm run upgrade` | 중단 패치 일괄 실행(중지 → migrate → 기동 → 새 버전 확인) |
+| `npm run apikey` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
 
 ### 배포
 
