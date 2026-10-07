@@ -149,6 +149,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 | [03_DEV_SETUP.md](docs/03_DEV_SETUP.md) | 로컬 개발 환경 설정(스키마·계정 생성) |
 | [04_SCHEMA.md](docs/04_SCHEMA.md) | 테이블 목록, ERD, 시즌 데이터 흐름 |
 | [05_TROUBLESHOOTING.md](docs/05_TROUBLESHOOTING.md) | 운영 장애 대응, 개발 중 겪은 문제와 해결 |
+| [06_LOAD_TEST.md](docs/06_LOAD_TEST.md) | 부하 테스트 결과 보고서 (처리량, 지연, 병목, 재현 방법) |
 
 ---
 
@@ -184,6 +185,7 @@ podiumDE/
 │   ├── procedures/
 │   └── TABLE_LOCK_ORDER.md
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
+├── loadtest/load.mjs    # 부하 테스트 스크립트(로컬 전용, docs/06_LOAD_TEST.md)
 └── docs/                # 설계 문서(위 목록)
 ```
 
@@ -342,13 +344,13 @@ migrate가 하트비트로 거부되면
   - ✅ 테이블 DDL — 메인 DB 14개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리)
   - ✅ 파티션·정산 관리 SP (`SP_PARTITION_*`, `SP_SETTLING_EXCHANGE`, 로그 DB 일 파티션)
   - ✅ 스코어 적재 SP `SP_SUBMIT_SCORE` (BEST/SUM, 멱등 키, 하드 검증)
-- ⬜ 2단계: API 인증, 제출 API, Redis 반영, 순위 조회 → 부하 테스트
+- ✅ 2단계: API 인증, 제출 API, Redis 반영, 순위 조회 → 부하 테스트
   - ✅ API 키 테이블·SP, 발급·폐기 CLI(`npm run credential`)
   - ✅ Fastify 서버 기반 — 결과 코드 체계, 오류 변환, 요청 로그·마스킹, 시간 초과, Swagger
   - ✅ 인증 가드 (활성 키 메모리 목록, 권한 비트)
   - ✅ 스코어 제출 API + Redis 반영 (빈도 검사, 멱등 재전송, 제출 이력)
   - ✅ 순위 조회 API (상위, 내 순위, 현재 시즌)
-  - ⬜ 부하 테스트
+  - ✅ 부하 테스트 — API 2개로 피크 제출 2,300건/초, p99 130ms 이하 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
 - ⬜ 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
 - ⬜ 4단계: 시즌 스케줄러(생성, 상태 전이, 정산, 전달)
 - ⬜ 5단계: 아카이브 로테이션
@@ -360,8 +362,9 @@ migrate가 하트비트로 거부되면
 
 - **2차 이후 범위** — LATEST 갱신 규칙, 늦은 제출 허용, 친구·길드 랭킹 등은 1차 범위
   밖이다. 목록: [01_DESIGN 12.2](docs/01_DESIGN.md#122-2차-이후)
-- **쓰기 처리량 미검증** — MySQL 원장 구조의 감당 범위는 추정치이며 부하 테스트로 검증할
-  예정이다. 근거: [D-02](docs/02_DECISIONS.md#d-02-mysql-원장-redis-투영--확정)
+- **처리량은 단일 장비 측정치** — 로컬 PC 한 대에서 API 2개로 피크 추정치(2,300건/초)를
+  처리했다. DB·Redis·API를 분리한 환경의 상한은 미측정이다.
+  결과: [06_LOAD_TEST](docs/06_LOAD_TEST.md), 근거: [D-02](docs/02_DECISIONS.md#d-02-mysql-원장-redis-투영--확정)
 
 ## 라이선스
 
