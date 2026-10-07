@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import type { Pool } from 'mysql2/promise';
-import { hashApiKey } from './auth.js';
-import { ApiScope, SpResult } from './codes.js';
-import { createPool, callSp } from './db.js';
-import { logger, shutdownLogger } from './logger.js';
+import { hashApiKey } from './api/auth.js';
+import { ApiScope, SpResult } from './core/codes.js';
+import { createPool, callSp } from './core/db.js';
+import { logger, shutdownLogger } from './core/logger.js';
 
 const USAGE = [
     '사용법:',

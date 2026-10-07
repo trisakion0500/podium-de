@@ -117,5 +117,5 @@ export const config = {
         timeoutSec: int('UPGRADE_TIMEOUT_SEC', 120),
     },
     /** 패키지 버전 (package.json version). 마이그레이션 기록과 하트비트에 남긴다 */
-    appVersion: JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')).version as string,
+    appVersion: JSON.parse(readFileSync(join(import.meta.dirname, '..', '..', 'package.json'), 'utf8')).version as string,
 } as const;

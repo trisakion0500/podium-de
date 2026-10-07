@@ -46,7 +46,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 **메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`). 시즌마다 생기며 `history_retention`이 지나면 삭제한다 ([8.3](01_DESIGN.md#83-보관-방식)). 정리가 멈추면 알린다 ([11.4](01_DESIGN.md#114-운영-테이블)).
 
-**코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/codes.ts`에 있다 (D-46).
+**코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/core/codes.ts`에 있다 (D-46).
 
 ## 2. ERD
 

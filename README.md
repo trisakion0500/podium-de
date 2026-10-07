@@ -160,22 +160,26 @@ podiumDE/
 ├── src/
 │   ├── api.ts           # API 프로세스 엔트리
 │   ├── worker.ts        # 워커(스케줄러) 프로세스 엔트리
-│   ├── migrate.ts       # 마이그레이션 러너(npm run migrate 적용, 기동 시 스키마 확인)
-│   ├── bootstrap.ts     # API·워커 공통 기동(스키마 확인, 하트비트)과 정상 종료 순서
-│   ├── heartbeat.ts     # 인스턴스 하트비트
+│   ├── migrate.ts       # 마이그레이션 적용 CLI(npm run migrate)
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
 │   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
-│   ├── server.ts        # Fastify 공통 처리(요청 로그·마스킹, 시간 초과, 오류 변환, Swagger, /health)
-│   ├── submit.ts        # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
-│   ├── ranks.ts         # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
-│   ├── auth.ts          # API 키 인증 가드(활성 키 메모리 목록, 권한 비트)
-│   ├── rankings.ts      # 랭킹 정의·현재 시즌 메모리 캐시, composite 계산·디코드
-│   ├── redis.ts         # node-redis 클라이언트, 반영·빈도·조회 Lua, 명령 제한 시간, 재시도
-│   ├── refresh.ts       # 메모리 목록 주기 재조회(키·랭킹 정의 공용)
-│   ├── errors.ts        # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
-│   ├── db.ts            # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001은 BusinessException), GET_LOCK 헬퍼
-│   ├── logger.ts        # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
-│   └── config.ts        # 환경변수 로딩
+│   ├── core/            # API·워커·CLI 공통 기반
+│   │   ├── bootstrap.ts # API·워커 공통 기동(스키마 확인, 하트비트)과 정상 종료 순서
+│   │   ├── migration.ts # 마이그레이션 적용·기동 시 스키마 확인
+│   │   ├── heartbeat.ts # 인스턴스 하트비트
+│   │   ├── server.ts    # Fastify 공통 처리(요청 로그·마스킹, 시간 초과, 오류 변환, Swagger, /health)
+│   │   ├── redis.ts     # node-redis 클라이언트, 반영·빈도·조회 Lua, 명령 제한 시간, 재시도
+│   │   ├── refresh.ts   # 메모리 목록 주기 재조회(키·랭킹 정의 공용)
+│   │   ├── errors.ts    # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
+│   │   ├── codes.ts     # 상태·구분값 코드와 결과 코드(SpResult·ApiResult)
+│   │   ├── db.ts        # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001은 BusinessException), GET_LOCK 헬퍼
+│   │   ├── logger.ts    # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
+│   │   └── config.ts    # 환경변수 로딩
+│   └── api/             # API 도메인
+│       ├── auth.ts      # API 키 인증 가드(활성 키 메모리 목록, 권한 비트)
+│       ├── submit.ts    # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
+│       ├── ranks.ts     # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
+│       └── rankings.ts  # 랭킹 정의·현재 시즌 메모리 캐시, composite 계산·디코드
 ├── database/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)

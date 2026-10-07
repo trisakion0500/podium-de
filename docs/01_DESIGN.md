@@ -934,7 +934,7 @@ CREATE TABLE `api_credential` (
 | 50001 | DB 시스템 오류 (SP EXIT HANDLER) | 500 |
 
 - 도메인당 99개다. 넘치면 예비 대역을 준다.
-- 코드별 메시지와 HTTP 상태는 `src/errors.ts`의 `ERROR_MAP`에서만 관리하고, Swagger 문서의 결과 코드 표도 여기서 만든다.
+- 코드별 메시지와 HTTP 상태는 `src/core/errors.ts`의 `ERROR_MAP`에서만 관리하고, Swagger 문서의 결과 코드 표도 여기서 만든다.
 - 응답 헤더 `x-request-id`는 그 요청의 로그 두 줄(요청/응답)을 짝짓는 ID다. 문의 시 이 값을 받는다.
 - 처리 제한 시간(`API_TIMEOUT_MS`, 기본 30초)을 넘으면 2005를 응답하지만 진행 중인 SP는 취소되지 않아 반영될 수 있다. 제출은 같은 `requestId`로 재시도한다.
 - Swagger UI(`/docs`)는 `API_DOCS=1`일 때만 연다.
@@ -970,7 +970,7 @@ CREATE TABLE `api_credential` (
 | `SP_LOG_PARTITION_DROP(day)` | 로그 DB. `day` 이전 일 파티션 삭제 (호출당 최대 31개) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
-- SP의 RESULT 코드는 `src/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1008, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
+- SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1008, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
 - 관리 SP는 상태를 관측해 다음 단계만 실행하므로 같은 인자로 다시 호출해도 안전하다.
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.
@@ -1075,7 +1075,7 @@ CREATE TABLE `instance_heartbeat` (
 - **테이블:** 버전 마이그레이션. 버전 테이블과 체크섬으로 관리한다. 적용 후 내용이 바뀐 버전 파일은 오류로 처리한다. 파일 하나에는 DDL 구문 하나만 둔다 (DDL은 암묵적 커밋이라 여러 구문이면 일부만 적용된 채 남을 수 있다).
 - **SP:** 반복 마이그레이션. 체크섬이 바뀌면 DROP 후 CREATE한다.
 - 통합 SQL 파일은 두지 않는다. 같은 내용을 두 곳에서 관리하지 않기 위해서다.
-- 상태·구분값은 ENUM 대신 `TINYINT UNSIGNED` 코드로 저장한다. 값의 의미는 `src/codes.ts`의 const에서만 관리하고, 컬럼 COMMENT에 코드→의미 매핑과 const 이름을 함께 적는다 (D-46). 이 문서 본문의 상태 이름(OPEN, PENDING 등)은 해당 const 키를 가리킨다.
+- 상태·구분값은 ENUM 대신 `TINYINT UNSIGNED` 코드로 저장한다. 값의 의미는 `src/core/codes.ts`의 const에서만 관리하고, 컬럼 COMMENT에 코드→의미 매핑과 const 이름을 함께 적는다 (D-46). 이 문서 본문의 상태 이름(OPEN, PENDING 등)은 해당 const 키를 가리킨다.
 - 이 문서의 DDL은 `database/tables/`의 최종 스키마와 같게 유지한다. 테이블 변경 마이그레이션을 추가하면 해당 절의 DDL도 함께 고친다. 테이블 추가나 관계 변경은 [04_SCHEMA](04_SCHEMA.md)의 목록과 ERD에도 반영한다.
 - **적용은 `npm run migrate`로만 한다.** API와 워커는 기동 시 적용하지 않고 확인만 한다.
 - **DB별 디렉터리:** 메인은 `database/{tables,procedures}`, 로그 DB는 `database_log/{tables,procedures}`. 각 DB에 자기 `schema_migration`을 둔다.

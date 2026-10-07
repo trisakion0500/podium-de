@@ -1,13 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'mysql2/promise';
 import { requireScope } from './auth.js';
-import { ApiResult, ApiScope, SortOrder, SpResult, UpdateRule } from './codes.js';
-import { callSp } from './db.js';
-import { BusinessException, ERROR_MAP, type ErrorCode } from './errors.js';
-import { logger } from './logger.js';
+import { ApiResult, ApiScope, SortOrder, SpResult, UpdateRule } from '../core/codes.js';
+import { callSp } from '../core/db.js';
+import { BusinessException, ERROR_MAP, type ErrorCode } from '../core/errors.js';
+import { logger } from '../core/logger.js';
 import { composite, getRanking } from './rankings.js';
-import { allowSubmit, applyScore, type Redis } from './redis.js';
-import { bodyForLog } from './server.js';
+import { allowSubmit, applyScore, type Redis } from '../core/redis.js';
+import { bodyForLog } from '../core/server.js';
 
 /** 제출 이력(log_ranking_submit.rejected)에 남기는 거부 사유. SP 하드 검증 사유와 같은 문자열을 쓴다 */
 const REJECTED_REASON: Partial<Record<number, string>> = {

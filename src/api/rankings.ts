@@ -1,8 +1,8 @@
 import type { Pool } from 'mysql2/promise';
-import { SortOrder, SpResult, TimeUnit } from './codes.js';
-import { callSp } from './db.js';
-import { BusinessException } from './errors.js';
-import { startPeriodicLoad } from './refresh.js';
+import { SortOrder, SpResult, TimeUnit } from '../core/codes.js';
+import { callSp } from '../core/db.js';
+import { BusinessException } from '../core/errors.js';
+import { startPeriodicLoad } from '../core/refresh.js';
 
 /** 랭킹 정의 재조회 주기. 순위 규칙은 불변이라 늦게 반영되는 것은 제출 빈도 한도뿐이다 */
 const REFRESH_INTERVAL_MS = 30_000;

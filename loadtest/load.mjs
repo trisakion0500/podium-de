@@ -32,14 +32,14 @@ const [mode, kind, rateArg, secArg, membersArg] = process.argv.slice(2);
  * @returns 풀·클라이언트와 닫기 함수
  */
 async function db() {
-    const { createPool, callSp } = await import(root + 'db.js');
-    const { config } = await import(root + 'config.js');
+    const { createPool, callSp } = await import(root + 'core/db.js');
+    const { config } = await import(root + 'core/config.js');
     const { createClient } = await import('redis');
     const M = createPool('MIGRATE'), A = createPool('APP'), LM = createPool('MIGRATE', 'LOG');
     const R = createClient({ url: config.redis.url, password: config.redis.password });
     await R.connect();
     const q = async (sql, p = []) => (await M.query(sql, p))[0];
-    const close = async () => { await R.close(); await M.end(); await A.end(); await LM.end(); (await import(root + 'logger.js')).shutdownLogger(); };
+    const close = async () => { await R.close(); await M.end(); await A.end(); await LM.end(); (await import(root + 'core/logger.js')).shutdownLogger(); };
     return { M, A, LM, R, q, callSp, config, close };
 }
 
@@ -78,9 +78,9 @@ if (mode === 'setup' || mode === 'clean' || mode === 'verify') {
         if (mode === 'setup') {
             await clean(d);
             const { q, A, M, R, callSp } = d;
-            const { hashApiKey } = await import(root + 'auth.js');
-            const { seasonKeys } = await import(root + 'redis.js');
-            const { ApiScope } = await import(root + 'codes.js');
+            const { hashApiKey } = await import(root + 'api/auth.js');
+            const { seasonKeys } = await import(root + 'core/redis.js');
+            const { ApiScope } = await import(root + 'core/codes.js');
             // update_rule 1=BEST 2=SUM, sort 1=DESC. score_max 8000: time_bits 40이면 score × 2^40이 2^53 안에 들어야 한다
             for (const [id, rule] of [[931, 1], [932, 2]]) {
                 await q(`INSERT INTO ranking_definition (ranking_id, ranking_code, ranking_name, status, update_rule, sort_order, score_max, time_unit, time_bits,
@@ -101,7 +101,7 @@ if (mode === 'setup' || mode === 'clean' || mode === 'verify') {
             // 커밋마다 fsync하는지에 따라 처리량이 크게 달라져 결과와 함께 남긴다
             const vars = await q("SHOW VARIABLES WHERE Variable_name IN ('innodb_flush_log_at_trx_commit', 'sync_binlog', 'log_bin')");
             console.log(vars.map((v) => `${v.Variable_name}=${v.Value}`).join(' '));
-            const { seasonKeys } = await import(root + 'redis.js');
+            const { seasonKeys } = await import(root + 'core/redis.js');
             for (const id of IDS) {
                 const [{ n, s }] = await q('SELECT COUNT(*) n, COALESCE(SUM(score), 0) s FROM ranking_entry WHERE ranking_id = ?', [id]);
                 const [{ k }] = await q('SELECT COUNT(*) k FROM ranking_submit_key WHERE ranking_id = ?', [id]);

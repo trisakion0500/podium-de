@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'mysql2/promise';
-import { ApiResult, SpResult } from './codes.js';
-import { callSp } from './db.js';
-import { BusinessException } from './errors.js';
-import { logger } from './logger.js';
-import { startPeriodicLoad } from './refresh.js';
+import { ApiResult, SpResult } from '../core/codes.js';
+import { callSp } from '../core/db.js';
+import { BusinessException } from '../core/errors.js';
+import { logger } from '../core/logger.js';
+import { startPeriodicLoad } from '../core/refresh.js';
 
 /** 활성 키 목록 재조회 주기 (01_DESIGN 10.1) */
 const REFRESH_INTERVAL_MS = 30_000;

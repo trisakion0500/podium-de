@@ -1,10 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'mysql2/promise';
 import { requireScope } from './auth.js';
-import { ApiScope, SortOrder, SpResult } from './codes.js';
-import { BusinessException } from './errors.js';
+import { ApiScope, SortOrder, SpResult } from '../core/codes.js';
+import { BusinessException } from '../core/errors.js';
 import { decodeScore, getCurrentSeason, getRanking, type RankingRule } from './rankings.js';
-import { readBoard, type Redis } from './redis.js';
+import { readBoard, type Redis } from '../core/redis.js';
 
 /** 상위 페이징 기본·최대 크기 */
 const TOP_SIZE_DEFAULT = 20;

@@ -703,7 +703,7 @@
 
 ### D-46. 상태·구분값은 ENUM 대신 TINYINT 코드 + const — 확정
 
-**결정:** 상태·구분값 컬럼은 `TINYINT UNSIGNED`로 저장한다. 값의 의미는 `src/codes.ts`의 const에서만 관리하고, 컬럼 COMMENT에 코드→의미 매핑과 const 이름(`[codes.SeasonStatus]` 등)을 적는다. SP는 같은 숫자를 리터럴로 쓴다. D-35의 "ENUM은 설계를 따름"을 대체한다.
+**결정:** 상태·구분값 컬럼은 `TINYINT UNSIGNED`로 저장한다. 값의 의미는 `src/core/codes.ts`의 const에서만 관리하고, 컬럼 COMMENT에 코드→의미 매핑과 const 이름(`[codes.SeasonStatus]` 등)을 적는다. SP는 같은 숫자를 리터럴로 쓴다. D-35의 "ENUM은 설계를 따름"을 대체한다.
 
 **대상:** `ranking_def`(status, update_rule, sort_order, time_unit, cycle_type), `ranking_reward_tier.range_type`, `ranking_season.status`, `ranking_entry.reward_status`(D-49 이전 `ranking_result`). 이미 숫자였던 `log_ddl_audit.status`, `instance_heartbeat.process_type`과 관리 SP의 파티션 대상 코드도 같은 파일에서 관리한다.
 

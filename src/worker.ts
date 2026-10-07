@@ -1,6 +1,6 @@
-import { bootstrap } from './bootstrap.js';
-import { ProcessType } from './codes.js';
-import { logger } from './logger.js';
+import { bootstrap } from './core/bootstrap.js';
+import { ProcessType } from './core/codes.js';
+import { logger } from './core/logger.js';
 
 const { onShutdown } = await bootstrap('worker', ProcessType.WORKER);
 

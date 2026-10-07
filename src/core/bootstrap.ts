@@ -2,7 +2,7 @@ import type { Pool } from 'mysql2/promise';
 import { createPool } from './db.js';
 import { startHeartbeat } from './heartbeat.js';
 import { logger, shutdownLogger } from './logger.js';
-import { verifySchema } from './migrate.js';
+import { verifySchema } from './migration.js';
 
 /**
  * API·워커 공통 기동 절차: 하트비트 시작 → 스키마 확인(migrate 락 안) → 종료 시그널 등록.

@@ -1,14 +1,14 @@
-import { startCredentialRefresh } from './auth.js';
-import { bootstrap } from './bootstrap.js';
-import { ProcessType } from './codes.js';
-import { config } from './config.js';
-import { createPool } from './db.js';
-import { logger } from './logger.js';
-import { startRankingRefresh } from './rankings.js';
-import { registerRankRoutes } from './ranks.js';
-import { closeRedis, createRedis } from './redis.js';
-import { buildServer } from './server.js';
-import { drainSubmitLogs, registerSubmitRoute } from './submit.js';
+import { startCredentialRefresh } from './api/auth.js';
+import { bootstrap } from './core/bootstrap.js';
+import { ProcessType } from './core/codes.js';
+import { config } from './core/config.js';
+import { createPool } from './core/db.js';
+import { logger } from './core/logger.js';
+import { startRankingRefresh } from './api/rankings.js';
+import { registerRankRoutes } from './api/ranks.js';
+import { closeRedis, createRedis } from './core/redis.js';
+import { buildServer } from './core/server.js';
+import { drainSubmitLogs, registerSubmitRoute } from './api/submit.js';
 
 const { pool, onShutdown } = await bootstrap('api', ProcessType.API);
 // 제출 이력은 로그 DB 전용 풀로 쓴다 — 메인 커넥션을 차지하거나 메인 트랜잭션에 묶이지 않게 한다 (개발 컨벤션 7장).
