@@ -34,7 +34,9 @@ function scopeText(scopes: number): string {
 async function create(pool: Pool, name: string, scopeArg: string): Promise<boolean> {
     let scopes = 0;
     for (const s of scopeArg.split(',')) {
-        const bit = SCOPE_NAMES[s.trim().toLowerCase()];
+        const scopeName = s.trim().toLowerCase();
+        // hasOwn: 'constructor' 같은 프로토타입 키가 권한 이름으로 통과하지 않게 한다.
+        const bit = Object.hasOwn(SCOPE_NAMES, scopeName) ? SCOPE_NAMES[scopeName] : undefined;
         if (!bit) {
             logger.error(`알 수 없는 권한: ${s}\n${USAGE}`);
             return false;

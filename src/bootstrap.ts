@@ -16,6 +16,7 @@ import { verifySchema } from './migrate.js';
  * @author trisakion
  * @modified 2026-10-01 trisakion 하트비트 기록 후 migrate 락 안에서 스키마 확인, 실패 시 하트비트 삭제
  * @modified 2026-10-06 trisakion 종료 훅 등록 시 종료 함수 반환
+ * @modified 2026-10-07 trisakion 종료 절차를 한 번만 실행하고, 처리 중단이 실패해도 하트비트·풀·로거 정리는 진행
  */
 export async function bootstrap(name: string, processType: number): Promise<{ pool: Pool; onShutdown: (beforeClose: () => Promise<void>) => (reason: string) => Promise<void> }> {
     const pool = createPool('APP');
@@ -32,12 +33,23 @@ export async function bootstrap(name: string, processType: number): Promise<{ po
     }
 
     const onShutdown = (beforeClose: () => Promise<void>): ((reason: string) => Promise<void>) => {
-        const shutdown = async (reason: string): Promise<void> => {
-            logger.info(`${name} shutting down (${reason})`);
-            await beforeClose();
-            await stopHeartbeat();
-            await pool.end();
-            await shutdownLogger();
+        // SIGINT 뒤 SIGTERM처럼 신호가 겹쳐도 절차는 한 번만 돈다 — 두 번째 pool.end()가 거부되면 처리되지 않은
+        // rejection으로 프로세스가 죽어 하트비트 삭제와 로그 flush가 빠진다.
+        let running: Promise<void> | undefined;
+        const shutdown = (reason: string): Promise<void> => {
+            running ??= (async () => {
+                logger.info(`${name} shutting down (${reason})`);
+                try {
+                    await beforeClose();
+                } catch (err) {
+                    // 처리 중단이 실패해도 하트비트를 지워야 migrate가 이 인스턴스를 살아 있는 것으로 보지 않는다.
+                    logger.error(`${name} shutdown step failed, continuing cleanup`, err);
+                }
+                await stopHeartbeat();
+                await pool.end();
+                await shutdownLogger();
+            })();
+            return running;
         };
         process.once('SIGINT', shutdown);
         process.once('SIGTERM', shutdown);

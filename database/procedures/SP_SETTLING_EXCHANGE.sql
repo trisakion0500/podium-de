@@ -8,6 +8,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_SETTLING_EXCHANGE
     -- 작성 : 2026.10.04 trisakion
+    -- 수정 : 2026.10.07 trisakion 정렬 인덱스의 동점 키를 time_unit 시간 슬롯으로 변경 (Redis 순서와 일치)
     -- 내용 : SETTLING의 DDL 단계(01_DESIGN 7.3의 1·2·4·5단계)를 실제 상태를 보고 다음 단계만 실행한다 (8.6, D-49).
     --        가순위 UPDATE(3단계)는 데이터 경로 SP가 하며, 이 SP는 그 앞뒤를 맡는다. 잡은 결과 상태를 보고
     --        1(OUT)이면 가순위 UPDATE를 이어서 하고 다시 호출, 2(RETURNED)면 다음 단계(Redis 키 삭제, REVIEW)로 간다.
@@ -27,6 +28,10 @@ BEGIN
     --        - 되돌리기 전에 entry 파티션이 비어 있는지 확인한다. 꺼낸 뒤 늦은 쓰기가 들어갔다면(시각 검사 결함 등)
     --          교환이 그 행들을 settling으로 보내 섞이므로, 교환하지 않고 1008로 멈춰 알린다.
     --        - 정렬 인덱스는 랭킹의 정렬 방향(Redis 순서, 7.3)과 같게 만든다. 앞에 (ranking_id, season_no)를 둔다.
+    --          동점 키는 achieved_at이 아니라 Redis composite와 같은 시간 슬롯 FLOOR((achieved_at - 시즌 시작) / time_unit)이다.
+    --          ms 그대로 비교하면 SEC 이상 랭킹에서 같은 슬롯의 동점자 순서가 Redis(member_id 순)와 달라진다.
+    --          시즌 시작 시각을 상수로 넣은 함수 키라 시즌마다 식이 다르며, 가순위 UPDATE의 ORDER BY는 이 식과 똑같아야
+    --          인덱스를 탄다. 함수 키의 숨은 컬럼은 인덱스 제거 때 함께 사라지므로 EXCHANGE 구조 일치에 영향이 없다.
     --          가순위 UPDATE는 시즌 조건을 걸므로, 접두가 없으면 옵티마이저가 PK 범위 + filesort를 고를 수 있다.
     --        - 정렬 인덱스는 운영 테이블에 두지 않는다. 되돌리기 전에 제거해야 EXCHANGE의 구조 일치 조건을 만족한다.
     --        - 모든 DDL은 SP_EXEC_DDL을 거친다. 고정 문자열이라 PREPARE가 필요 없는 인덱스 DDL도 감사 로그와
@@ -35,6 +40,10 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     DECLARE v_status           TINYINT UNSIGNED;
     DECLARE v_sort_order       TINYINT UNSIGNED;
+    DECLARE v_time_unit        TINYINT UNSIGNED;
+    DECLARE v_season_start     DATETIME(3);
+    DECLARE v_unit_us          BIGINT UNSIGNED;
+    DECLARE v_slot             VARCHAR(200);
     DECLARE v_partition        VARCHAR(64);
     DECLARE v_first_rid        INT UNSIGNED;
     DECLARE v_first_sno        INT UNSIGNED;
@@ -57,8 +66,8 @@ BEGIN
             LEAVE proc_block;
         END IF;
 
-        SELECT s.status, d.sort_order
-          INTO v_status, v_sort_order
+        SELECT s.status, d.sort_order, d.time_unit, s.start_at
+          INTO v_status, v_sort_order, v_time_unit, v_season_start
           FROM ranking_season s
           JOIN ranking_definition d ON d.ranking_id = s.ranking_id
          WHERE s.ranking_id = i_ranking_id AND s.season_no = i_season_no;
@@ -110,11 +119,23 @@ BEGIN
                     WHERE ranking_id = i_ranking_id AND season_no = i_season_no AND final_rank IS NULL) THEN
             IF NOT EXISTS (SELECT 1 FROM information_schema.STATISTICS
                             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ranking_entry_settling' AND INDEX_NAME = 'ix_settle_order') THEN
+                -- time_unit 1:MS, 2:SEC, 3:MIN, 4:DAY [codes.TimeUnit] → 마이크로초. 시간 슬롯 식은 rankings.ts composite와 같다.
+                SET v_unit_us = CASE v_time_unit
+                                    WHEN 1 THEN 1000
+                                    WHEN 2 THEN 1000000
+                                    WHEN 3 THEN 60000000
+                                    WHEN 4 THEN 86400000000
+                                END;
+                IF v_unit_us IS NULL THEN
+                    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'SP_SETTLING_EXCHANGE: unsupported time_unit';
+                END IF;
+                SET v_slot = CONCAT('(FLOOR(TIMESTAMPDIFF(MICROSECOND, TIMESTAMP''', DATE_FORMAT(v_season_start, '%Y-%m-%d %H:%i:%s.%f'),
+                                    ''', `achieved_at`) / ', v_unit_us, '))');
                 -- 정렬 방향 2:ASC [codes.SortOrder]. 그 외는 DESC (Redis 순서와 같게, 7.3)
                 IF v_sort_order = 2 THEN
-                    CALL SP_EXEC_DDL('ALTER TABLE `ranking_entry_settling` ADD INDEX `ix_settle_order` (`ranking_id`, `season_no`, `score` ASC, `achieved_at` ASC, `member_id` ASC)');
+                    CALL SP_EXEC_DDL(CONCAT('ALTER TABLE `ranking_entry_settling` ADD INDEX `ix_settle_order` (`ranking_id`, `season_no`, `score` ASC, ', v_slot, ' ASC, `member_id` ASC)'));
                 ELSE
-                    CALL SP_EXEC_DDL('ALTER TABLE `ranking_entry_settling` ADD INDEX `ix_settle_order` (`ranking_id`, `season_no`, `score` DESC, `achieved_at` ASC, `member_id` DESC)');
+                    CALL SP_EXEC_DDL(CONCAT('ALTER TABLE `ranking_entry_settling` ADD INDEX `ix_settle_order` (`ranking_id`, `season_no`, `score` DESC, ', v_slot, ' ASC, `member_id` DESC)'));
                 END IF;
             END IF;
             SELECT 0 AS RESULT;

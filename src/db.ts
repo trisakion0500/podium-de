@@ -65,6 +65,7 @@ export interface SpResult {
  * @author trisakion
  * @modified 2026-10-01 trisakion SP 없음(1305)을 migrate 안내 오류로 변환
  * @modified 2026-10-06 trisakion RESULT=50001을 BusinessException(DATABASE_ERROR)으로 던짐
+ * @modified 2026-10-07 trisakion 데이터 결과셋 자리에 온 50001(RESULT 0 이후 SELECT 실패)도 DB 오류로 던짐
  */
 export async function callSp(db: Pool | PoolConnection, name: string, params: unknown[]): Promise<SpResult> {
     if (!/^SP_[A-Z0-9_]+$/.test(name))
@@ -81,12 +82,16 @@ export async function callSp(db: Pool | PoolConnection, name: string, params: un
     const head = sets[0]?.[0];
     if (!head || typeof head.RESULT !== 'number')
         throw new Error(`${name}: RESULT 결과셋이 없습니다.`);
-    if (head.RESULT === ApiResult.DATABASE_ERROR)
-        throw new BusinessException(ApiResult.DATABASE_ERROR, `${name}: DB 오류 ${head.ERROR_NO} (${head.SQL_STATE}) ${head.ERROR_MESSAGE}`, {
-            sqlState: head.SQL_STATE,
-            errorNo: head.ERROR_NO,
+    const rows = Array.isArray(sets[1]) ? sets[1] : [];
+    // RESULT 0을 보낸 뒤 데이터 SELECT가 실패하면 핸들러의 50001이 두 번째 결과셋으로 온다. 데이터 결과셋에는
+    // RESULT 컬럼이 없으므로(개발 컨벤션 4.4) 이것도 DB 오류로 본다 — 오류 행을 데이터로 돌려주면 조용히 틀린다.
+    const failed = head.RESULT === ApiResult.DATABASE_ERROR ? head : rows[0]?.RESULT === ApiResult.DATABASE_ERROR ? rows[0] : undefined;
+    if (failed)
+        throw new BusinessException(ApiResult.DATABASE_ERROR, `${name}: DB 오류 ${failed.ERROR_NO} (${failed.SQL_STATE}) ${failed.ERROR_MESSAGE}`, {
+            sqlState: failed.SQL_STATE,
+            errorNo: failed.ERROR_NO,
         });
-    return { result: head.RESULT, rows: Array.isArray(sets[1]) ? sets[1] : [] };
+    return { result: head.RESULT, rows };
 }
 
 /**
