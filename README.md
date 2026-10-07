@@ -148,6 +148,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 | [02_DECISIONS.md](docs/02_DECISIONS.md) | 결정 기록 — 배경, 검토한 대안, 이유 |
 | [03_DEV_SETUP.md](docs/03_DEV_SETUP.md) | 로컬 개발 환경 설정(스키마·계정 생성) |
 | [04_SCHEMA.md](docs/04_SCHEMA.md) | 테이블 목록, ERD, 시즌 데이터 흐름 |
+| [05_TROUBLESHOOTING.md](docs/05_TROUBLESHOOTING.md) | 운영 장애 대응, 개발 중 겪은 문제와 해결 |
 
 ---
 
@@ -164,6 +165,11 @@ podiumDE/
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
 │   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
 │   ├── server.ts        # Fastify 공통 처리(요청 로그·마스킹, 시간 초과, 오류 변환, Swagger, /health)
+│   ├── submit.ts        # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
+│   ├── auth.ts          # API 키 인증 가드(활성 키 메모리 목록, 권한 비트)
+│   ├── rankings.ts      # 랭킹 정의 메모리 캐시, composite 계산
+│   ├── redis.ts         # node-redis 클라이언트, 반영·빈도 Lua, 명령 제한 시간, 재시도
+│   ├── refresh.ts       # 메모리 목록 주기 재조회(키·랭킹 정의 공용)
 │   ├── errors.ts        # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
 │   ├── db.ts            # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001은 BusinessException), GET_LOCK 헬퍼
 │   ├── logger.ts        # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
@@ -339,7 +345,7 @@ migrate가 하트비트로 거부되면
   - ✅ API 키 테이블·SP, 발급·폐기 CLI(`npm run credential`)
   - ✅ Fastify 서버 기반 — 결과 코드 체계, 오류 변환, 요청 로그·마스킹, 시간 초과, Swagger
   - ✅ 인증 가드 (활성 키 메모리 목록, 권한 비트)
-  - ⬜ 스코어 제출 API + Redis 반영
+  - ✅ 스코어 제출 API + Redis 반영 (빈도 검사, 멱등 재전송, 제출 이력)
   - ⬜ 순위 조회 API (상위, 내 순위, 현재 시즌)
   - ⬜ 부하 테스트
 - ⬜ 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
