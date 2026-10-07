@@ -20,7 +20,8 @@
         "@fastify/swagger-ui": "6.1.1",
         "fastify": "5.12.5",
         "log4js": "6.9.1",
-        "mysql2": "3.24.5"
+        "mysql2": "3.24.5",
+        "redis": "5.12.1"
     },
     "devDependencies": {
         "@types/node": "22.20.4",

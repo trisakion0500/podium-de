@@ -5,12 +5,10 @@ import { ApiResult, SpResult } from './codes.js';
 import { callSp } from './db.js';
 import { BusinessException } from './errors.js';
 import { logger } from './logger.js';
+import { startPeriodicLoad } from './refresh.js';
 
 /** 활성 키 목록 재조회 주기 (01_DESIGN 10.1) */
 const REFRESH_INTERVAL_MS = 30_000;
-
-/** 재조회가 이 횟수만큼 연속 실패하면 error로 알린다 — 폐기한 키가 계속 통과하는 상태이기 때문이다 */
-const REFRESH_ALERT_AFTER = 3;
 
 /**
  * 메모리에 둔 활성 키 하나
@@ -58,29 +56,13 @@ async function load(pool: Pool): Promise<number> {
  * @param intervalMs 재조회 주기 (테스트용, 기본 30초)
  * @returns 재조회 정지 함수. 정상 종료 때 DB 풀보다 먼저 불러야 한다 (개발 컨벤션 5.2)
  * @author trisakion
+ * @modified 2026-10-07 trisakion 주기 재조회를 refresh.startPeriodicLoad로 분리 (랭킹 정의 캐시와 공용)
  */
 export async function startCredentialRefresh(pool: Pool, intervalMs = REFRESH_INTERVAL_MS): Promise<() => void> {
-    const count = await load(pool);
-    logger.info(`api credentials loaded: ${count}`);
+    const { count, stop } = await startPeriodicLoad('api credentials', () => load(pool), intervalMs, 'revocations are not applied');
     if (count === 0)
         logger.warn('no active api credential — all requests will be rejected (npm run credential -- create)');
-
-    let failures = 0;
-    const timer = setInterval(async () => {
-        try {
-            await load(pool);
-            if (failures >= REFRESH_ALERT_AFTER)
-                logger.info(`api credential refresh recovered after ${failures} failures`);
-            failures = 0;
-        } catch (err) {
-            failures++;
-            if (failures >= REFRESH_ALERT_AFTER)
-                logger.error(`api credential refresh failed ${failures} times in a row — revocations are not applied, keeping ${credentials.size} keys`, err);
-            else
-                logger.warn(`api credential refresh failed, keeping ${credentials.size} keys`, err);
-        }
-    }, intervalMs);
-    return () => clearInterval(timer);
+    return stop;
 }
 
 /**

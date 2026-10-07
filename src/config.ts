@@ -72,6 +72,7 @@ const mainDb = {
  * @modified 2026-10-01 trisakion DB 계정을 APP/MIGRATE로 분리 (dbCredential)
  * @modified 2026-10-02 trisakion 로그 DB 접속 설정 추가 (D-48)
  * @modified 2026-10-06 trisakion API 수신 주소, 처리 제한 시간, Swagger UI 설정 추가
+ * @modified 2026-10-07 trisakion Redis 접속 설정 추가
  */
 export const config = {
     db: mainDb,
@@ -98,6 +99,15 @@ export const config = {
     apiTimeoutMs: int('API_TIMEOUT_MS', 30000),
     /** 1이면 Swagger UI(/docs)를 연다. 설치본 운영 환경에 API 구조를 기본으로 드러내지 않도록 기본은 끈다 */
     apiDocs: int('API_DOCS', 0) === 1,
+    /** Redis 실시간 순위표 (01_DESIGN 5장). 원장은 MySQL이라 Redis 장애는 기동을 막지 않는다 */
+    redis: {
+        url: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
+        password: process.env.REDIS_PASSWORD || undefined,
+        /** 모든 키 앞에 붙는 접두어. 한 Redis를 여러 서비스가 함께 쓸 때 키 충돌을 막는다 (예: ped:) */
+        keyPrefix: process.env.REDIS_KEY_PREFIX ?? '',
+        /** 명령 하나의 제한 시간(ms). 넘으면 실패로 보고 응답을 진행한다 (D-53) */
+        timeoutMs: int('REDIS_TIMEOUT_MS', 500),
+    },
     /** npm run upgrade 설정. 명령이 없으면 upgrade가 1단계 전에 중단한다 */
     upgrade: {
         stopCmd: process.env.UPGRADE_STOP_CMD ?? '',

@@ -45,11 +45,12 @@ export function maskSensitive(value: unknown): unknown {
 }
 
 /**
- * 로그에 남길 바디 문자열. 마스킹 후 직렬화하고 길면 자른다.
+ * 로그에 남길 바디 문자열. 마스킹 후 직렬화하고 길면 자른다. 요청 바디를 담는 다른 로그 줄(제출 이력 적재 실패 등)도 이 함수를 거친다.
  * @param body 요청 바디 또는 응답 페이로드(JSON 문자열)
  * @returns 로그용 문자열
+ * @author trisakion
  */
-function bodyForLog(body: unknown): string {
+export function bodyForLog(body: unknown): string {
     let value = body;
     if (typeof body === 'string') {
         try {

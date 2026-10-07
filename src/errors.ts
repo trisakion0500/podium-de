@@ -1,4 +1,4 @@
-import { ApiResult } from './codes.js';
+import { ApiResult, SpResult } from './codes.js';
 
 /**
  * 결과 코드 하나의 응답 메시지와 HTTP 상태.
@@ -13,16 +13,26 @@ export interface ErrorEntry {
 
 /**
  * API로 나가는 실패 결과 코드의 메시지와 HTTP 상태 (개발 컨벤션 9). 코드·메시지·상태는 이 표에서만 관리한다.
- * HTTP 상태는 대역 규칙을 따른다: 형식 400, 인증 401, 권한 403, 없음 404, 시간 초과 503, 시스템 500.
+ * HTTP 상태는 대역 규칙을 따른다: 형식·검증 거부 400, 인증 401, 권한 403, 없음 404, 상태 충돌 409, 빈도 429, 시간 초과 503, 시스템 500.
  * SP 코드(SpResult)는 그 SP를 쓰는 API를 만들 때 여기에 추가한다 — 표에 없는 코드는 BusinessException으로 던질 수 없다.
  * @author trisakion
+ * @modified 2026-10-07 trisakion 제출 SP 코드(1001, 1101~1107)와 빈도 초과(2006) 추가
  */
 export const ERROR_MAP = {
+    [SpResult.INVALID_PARAM]: { message: '요청 값이 허용 범위를 벗어났습니다.', httpStatus: 400 },
+    [SpResult.RANKING_NOT_FOUND]: { message: '존재하지 않는 랭킹입니다.', httpStatus: 404 },
+    [SpResult.RANKING_INACTIVE]: { message: '운영 중인 랭킹이 아닙니다.', httpStatus: 409 },
+    [SpResult.SEASON_MISMATCH]: { message: '현재 진행 중인 시즌이 아닙니다. 현재 시즌을 다시 조회하세요.', httpStatus: 409 },
+    [SpResult.IDEMPOTENCY_CONFLICT]: { message: '같은 requestId로 다른 내용이 이미 제출되었습니다.', httpStatus: 409 },
+    [SpResult.SCORE_OUT_OF_RANGE]: { message: '스코어가 허용 범위를 벗어났습니다.', httpStatus: 400 },
+    [SpResult.DELTA_EXCEEDED]: { message: '1회 증분이 허용 한도를 넘었습니다.', httpStatus: 400 },
+    [SpResult.SCORE_MAX_EXCEEDED]: { message: '누적 스코어가 상한을 넘습니다.', httpStatus: 400 },
     [ApiResult.VALIDATION_FAILED]: { message: '요청 형식이 올바르지 않습니다.', httpStatus: 400 },
     [ApiResult.UNAUTHORIZED]: { message: 'API 키가 없거나 유효하지 않습니다.', httpStatus: 401 },
     [ApiResult.FORBIDDEN]: { message: '이 API를 호출할 권한이 없습니다.', httpStatus: 403 },
     [ApiResult.NOT_FOUND]: { message: '존재하지 않는 경로입니다.', httpStatus: 404 },
     [ApiResult.TIMEOUT]: { message: '처리 시간이 초과되었습니다. 쓰기 요청은 반영되었을 수 있습니다.', httpStatus: 503 },
+    [ApiResult.TOO_MANY_REQUESTS]: { message: '제출 빈도 한도를 넘었습니다. 잠시 후 같은 requestId로 다시 시도하세요.', httpStatus: 429 },
     [ApiResult.INTERNAL_ERROR]: { message: '서버 내부 오류입니다.', httpStatus: 500 },
     [ApiResult.DATABASE_ERROR]: { message: '데이터베이스 오류입니다.', httpStatus: 500 },
 } satisfies Record<number, ErrorEntry>;

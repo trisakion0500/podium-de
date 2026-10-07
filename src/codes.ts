@@ -231,6 +231,7 @@ export const SpResult = {
  * log_ranking_submit.result_code로 그대로 나가므로, 대역만 보고 발생 위치를 안다(10xx~12xx SP, 20xx API 계층,
  * 5000 앱 미분류, 50001 DB 시스템 오류). 메시지와 HTTP 상태는 errors.ts의 ERROR_MAP에서만 관리한다.
  * @author trisakion
+ * @modified 2026-10-07 trisakion 제출 빈도 초과(2006) 추가
  */
 export const ApiResult = {
     /** 요청 형식 오류 (스키마 검증 실패, JSON 파싱 실패 등) */
@@ -243,6 +244,8 @@ export const ApiResult = {
     NOT_FOUND: 2004,
     /** 처리 시간 초과. 작업은 서버에서 계속되어 반영될 수 있다 (개발 컨벤션 7.2) */
     TIMEOUT: 2005,
+    /** 제출 빈도 초과 (max_submit_per_min, Redis 카운터). SP를 거치지 않아 멱등 키가 없으므로 같은 requestId로 재시도한다 */
+    TOO_MANY_REQUESTS: 2006,
     /** 분류되지 않은 앱 예외 */
     INTERNAL_ERROR: 5000,
     /** SP 내부 시스템 오류 (SP RESULT 50001, db.ts callSp가 던짐) */
