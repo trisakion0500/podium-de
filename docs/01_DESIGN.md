@@ -97,7 +97,7 @@ CREATE TABLE `ranking_definition` (
 
 | 규칙 | 게임 서버 입력 | 계산 | Redis 반영 | 비고 |
 | --- | --- | --- | --- | --- |
-| BEST | 이번 기록 | `GREATEST(score, 입력)` | `ZADD GT` | 최고 기록 |
+| BEST | 이번 기록 | `GREATEST(score, 입력)` | `ZADD GT` (ASC는 `LT`) | 최고 기록 |
 | SUM | 부호 있는 증분 | `GREATEST(score + 입력, 0)` | version Lua | 멱등 키 필수 |
 | LATEST | 현재 값 + 소스 시퀀스 | 시퀀스가 클 때만 덮어씀 | version Lua | 2차 범위 |
 
@@ -134,6 +134,17 @@ time_bits = bits(최대 시즌 길이 / time_unit)
 | MS | 1개월 | 32 | 약 209만 |
 | MIN | 약 63년 | 25 | 약 2.68억 |
 | DAY | 약 89년 | 15 | 약 2,750억 |
+
+시즌 주기별 `score_max` 상한 (DAILY 1일, WEEKLY 7일, MONTHLY 31일 기준):
+
+| time_unit | DAILY | WEEKLY | MONTHLY |
+| --- | --- | --- | --- |
+| MS | 약 6,710만 | 약 838만 | 약 209만 |
+| SEC | 약 687억 | 약 85.9억 | 약 21억 |
+| MIN | 약 4.4조 | 약 5,497억 | 약 1,374억 |
+
+- 시간 단위가 거칠수록 점수 범위가 넓어지는 대신, 같은 단위 안의 동점은 멤버 사전순이 된다(5.2).
+- 1억 점까지 받아야 하면 대부분 SEC로 충분하다(시즌 약 2년까지).
 
 스코어는 정수만 받는다. 소수 값은 게임 서버가 스케일을 곱해 정수로 보낸다.
 
@@ -258,7 +269,7 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
 
 ```text
 게임 서버 ──x-api-key──▶ API  (memberId, value, seasonNo, requestId, meta?)
-  1. 제출 빈도 검사 (Redis)
+  1. 제출 빈도 검사 (Redis, 초과 시 2006 — Redis 장애 시 통과)
   2. SP_SUBMIT_SCORE
        랭킹 상태 검사 (ACTIVE)
        시즌 검사: seasonNo = 현재 OPEN 시즌 (시각 기준)
@@ -268,10 +279,12 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
        멱등 키 기록 (같은 트랜잭션)
        결과 반환 (RESULT, season_no, season_start_at, score, achieved_at, version, replayed)
   3. composite 계산 → Redis 반영 (실패해도 응답은 성공, version = 0이면 생략)
-  4. 제출 이력 기록 → 로그 DB (모든 결과, 실패해도 응답에 영향 없음, 4.5)
+  4. 제출 이력 기록 → 로그 DB (인증·형식 검사를 통과한 요청의 모든 결과, 실패해도 응답에 영향 없음, 4.5)
 ```
 
 **시즌 번호는 필수다.** 게임 서버는 플레이 시작 시점의 시즌 번호를 기억해 제출 시 함께 보낸다.
+
+API는 랭킹 정의(순위 규칙, `max_submit_per_min`)를 메모리에 두고 30초마다 다시 읽는다(D-56). 빈도 검사가 SP보다 먼저이고, composite 계산과 순위 조회에도 순위 규칙이 필요하기 때문이다. 캐시에 없는 랭킹은 SP를 부르지 않고 1101로 거부한다. 새 랭킹은 최대 30초 뒤부터 제출을 받는다.
 
 - 전달받은 시즌이 현재 OPEN 시즌과 다르면 `SEASON_MISMATCH`로 거부한다.
 - `wait_period = 0`이면 시즌 N 종료 직후 N+1이 바로 열린다. 시즌 번호가 없으면 시즌 N에서 시작한 플레이가 N+1에 반영된다. 시즌 번호 검사로 이를 막는다.
@@ -286,7 +299,7 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
 | `IDEMPOTENCY_CONFLICT` | 같은 `requestId`, 다른 내용 |
 | 하드 검증 거부 | 범위 초과, `max_delta` 초과, SUM 결과 `score_max` 초과 |
 
-멱등 키는 반영 성공과 하드 검증 거부만 기록한다. 하드 검증 거부는 `rejected`와 함께 기록하며, 같은 키로 재전송되면 같은 거부를 반환한다. 시즌 밖 제출, `SEASON_MISMATCH` 등은 멱등 키 없이 결과 코드만 반환한다. 제출 이력(로그 DB)에는 결과와 무관하게 모두 남긴다.
+멱등 키는 반영 성공과 하드 검증 거부만 기록한다. 하드 검증 거부는 `rejected`와 함께 기록하며, 같은 키로 재전송되면 같은 거부를 반환한다. 시즌 밖 제출, `SEASON_MISMATCH` 등은 멱등 키 없이 결과 코드만 반환한다. 제출 이력(로그 DB)에는 인증과 요청 형식 검사를 통과한 제출을 결과와 무관하게 모두 남긴다. 인증 실패(2002, 2003)와 형식 오류(2001)는 앱 로그의 요청·응답 줄로만 남는다.
 
 - "같은 내용"은 `member_id`와 `input_value`가 같다는 뜻이다. `meta`는 맥락 정보라 비교하지 않는다.
 
@@ -371,7 +384,7 @@ PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
 
 ### 4.5 log_ranking_submit (로그 DB)
 
-모든 제출 요청의 처리 결과 이력이다. 감사, 어뷰징 조사, 장애 조사에 쓴다. 로그 DB `podium_de_log`에 둔다.
+인증과 요청 형식 검사를 통과한 모든 제출 요청의 처리 결과 이력이다. 감사, 어뷰징 조사, 장애 조사에 쓴다. 로그 DB `podium_de_log`에 둔다.
 
 ```sql
 CREATE TABLE `log_ranking_submit` (
@@ -397,7 +410,10 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 );
 ```
 
-- 앱이 응답을 만든 뒤 로그 DB 전용 커넥션 풀로 `SP_INSERT_LOG_RANKING_SUBMIT`을 호출해 기록한다. 메인 트랜잭션과 묶지 않으며, 실패해도 응답과 재시도에 영향이 없다 (개발 컨벤션 7장). 실패하면 앱 로그 파일에 같은 내용을 한 줄 남긴다.
+- 앱이 응답을 만든 뒤 로그 DB 전용 커넥션 풀로 `SP_INSERT_LOG_RANKING_SUBMIT`을 호출해 기록한다. 메인 트랜잭션과 묶지 않으며, 실패해도 응답과 재시도에 영향이 없다 (개발 컨벤션 7장). 실패하면 앱 로그 파일에 같은 내용을 한 줄 남긴다. `meta`는 게임 서버가 보낸 임의 값이라 요청 로그와 같은 민감 키 마스킹과 5000자 자르기를 거친다.
+- 정상 종료 시 진행 중인 적재가 끝나기를 기다린 뒤 로그 DB 풀을 닫는다. 응답은 나갔지만 아직 커넥션을 받지 못한 적재가 풀 종료로 유실되지 않게 한다.
+- 인증 실패와 형식 오류는 남기지 않는다. 형식 오류는 NOT NULL 컬럼(`member_id`, `request_id` 등)을 채울 수 없는 경우가 있고, 인증 실패는 아직 제출로 볼 수 없다. 둘 다 앱 로그의 요청·응답 줄에 남는다.
+- 제출 바디는 16KB로 제한한다. `meta`가 해석 없이 그대로 쌓이므로 기본값(1MiB)보다 작게 둔다.
 - 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 매일 다음 며칠의 일 파티션을 `p_max`에서 떼어 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 DROP한다(`SP_LOG_PARTITION_DROP`). 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다.
 - `p_max`는 안전망이다. 정리 잡이 멈춰도 INSERT가 실패하지 않는다. `p_max`에 행이 쌓이면 정리 잡 이상으로 보고 알린다 (11.4).
 - 조사 목적의 임의 조회는 이 테이블에서 한다. 메인 DB 운영 테이블에는 하지 않는다.
@@ -418,6 +434,8 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 
 `{rankingId}` 해시태그로 한 랭킹의 키를 같은 클러스터 슬롯에 둔다.
 
+모든 키 앞에 `REDIS_KEY_PREFIX`(예: `ped:`)를 붙인다. Redis를 다른 서비스와 함께 쓸 때 키 충돌을 막는다. 예: `ped:rk:{1}:s:5`.
+
 ### 5.2 composite
 
 ```text
@@ -434,6 +452,8 @@ ASC:  score = floor(c / B),  t = c mod B
 
 - 같은 점수면 먼저 달성한 쪽이 위에 온다.
 - 순위는 모두 고유하다. 같은 시간 단위 안에서 같은 점수가 나오면 Redis가 member 사전순(DESC 조회 시 역순)으로 정렬한다.
+- 정산의 최종 순위도 같은 시간 슬롯과 member 순서로 정렬한다 (7.3, D-57).
+- 계산 결과가 2^53 이상이면 앱은 예외로 처리하고 Redis에 쓰지 않는다. 정밀도를 잃은 값은 동점 순서를 소리 없이 틀리게 하기 때문이다. 제출 응답은 성공(원장 반영)이며 리컨실러가 따라잡는다. 정상이라면 등록 시 비트 예산 검증(2.4)이 이 상황을 막는다.
 
 ### 5.3 반영 경로
 
@@ -441,10 +461,10 @@ ASC:  score = floor(c / B),  t = c mod B
 
 | 규칙 | 반영 |
 | --- | --- |
-| BEST | 센티넬 확인 → `ZADD key GT CH composite member` |
+| BEST | 센티넬 확인 → `ZADD key GT CH composite member` (ASC는 `LT`) |
 | SUM, LATEST | 센티넬 확인 → version 비교 → `ZADD` |
 
-BEST는 composite가 단조 증가하므로 `GT`가 늦게 도착한 이전 값을 거부한다. 같은 점수를 나중에 다시 달성하면 composite가 작아져 원래 달성 시각이 유지된다.
+BEST는 더 좋은 기록일수록 composite가 DESC면 커지고 ASC면 작아지므로, `GT`(ASC는 `LT`)가 늦게 도착한 이전 값을 거부한다. 같은 점수를 나중에 다시 달성하면 composite가 나빠지는 쪽으로 바뀌어 원래 달성 시각이 유지된다.
 
 ```lua
 -- version Lua
@@ -492,7 +512,12 @@ SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한�
 
 ### 6.1 L1 즉시 재시도
 
-Redis 반영 실패 시 짧은 백오프로 2~3회 재시도한다.
+Redis 반영 실패 시 짧은 백오프로 재시도한다.
+
+- 첫 시도는 응답 전에 한다. 제출 직후 순위 조회에 새 값이 보이게 하기 위해서다.
+- 실패하면 응답을 막지 않고 백그라운드에서 2회(100ms, 400ms 후) 다시 시도한다. 끝내 실패하면 L2가 따라잡는다.
+- 명령마다 제한 시간(`REDIS_TIMEOUT_MS`, 기본 500ms)을 건다 (D-53).
+- Redis 연결이 끊긴 동안은 시도하지 않는다. 요청마다 실패 로그를 남기는 대신 연결 상태가 바뀔 때만 남긴다.
 
 ### 6.2 L2 워터마크 차분 리컨실러
 
@@ -571,6 +596,9 @@ AND 리컨실러 워터마크 > end_at + 안전마진
 - 1·2단계와 4·5단계는 `SP_SETTLING_EXCHANGE` 하나가 맡는다. 호출마다 실제 상태를 보고(8.6) 다음 단계만 실행하고, 단계를 반환한다(1: OUT 가순위 진행 중, 2: RETURNED 되돌림 완료). 잡은 OUT이면 3단계를 이어서 한 뒤 다시 호출하고, RETURNED면 6단계로 간다.
 - 정렬 인덱스는 운영 테이블에 두지 않는다. 스코어 제출마다 쓰기 비용이 늘기 때문이다. EXCHANGE는 인덱스까지 같아야 하므로 되돌리기 전에 제거한다.
 - 정렬 인덱스는 `(ranking_id, season_no)` 뒤에 정렬 키를 둔다. 접두가 없으면 시즌 조건 때문에 옵티마이저가 PK 범위 조회 + filesort를 고를 수 있다.
+- 동점 키는 `achieved_at`이 아니라 Redis composite(5.2)와 같은 시간 슬롯이다 (D-57). ms 그대로 비교하면 SEC 이상 랭킹에서 같은 슬롯 안의 동점자 순서가 Redis(`member_id` 순)와 달라져, 보이던 순위와 보상 순위가 어긋난다.
+  `slot = FLOOR(TIMESTAMPDIFF(MICROSECOND, <시즌 start_at>, achieved_at) / <time_unit의 µs>)`
+  시즌 시작 시각을 상수로 넣은 함수 키 인덱스라 시즌마다 식이 다르다. 가순위 UPDATE의 ORDER BY는 이 식과 글자까지 같아야 인덱스를 탄다.
 - 3단계는 커서 기반 청크로 짧은 트랜잭션을 반복한다. 단일 대형 UPDATE는 언두 증가, 복제 지연, 버퍼 풀 오염을 일으킨다.
 - 5단계: 기본 EXCHANGE는 일반 테이블의 모든 행이 파티션 값에 맞는지 읽어서 확인한다. 수백만 행을 읽는 동안 운영 테이블 DDL이 길어지므로, PK 범위 조회 두 번(`(ranking_id, season_no)`보다 앞·뒤 행 존재 여부)으로 다른 시즌 행이 없음을 먼저 확인하고 `WITHOUT VALIDATION`으로 교환한다.
 - 5단계가 끝나면 settling은 비어 있으므로 다시 만들 필요가 없다.
@@ -579,11 +607,11 @@ AND 리컨실러 워터마크 > end_at + 안전마진
 ```sql
 UPDATE ranking_entry_settling s
   JOIN (SELECT ranking_id, season_no, member_id,
-               :base_rank + ROW_NUMBER() OVER (ORDER BY score DESC, achieved_at ASC, member_id DESC) AS rn
-          FROM (SELECT ranking_id, season_no, member_id, score, achieved_at
+               :base_rank + ROW_NUMBER() OVER (ORDER BY score DESC, slot ASC, member_id DESC) AS rn
+          FROM (SELECT ranking_id, season_no, member_id, score, <slot 식> AS slot
                   FROM ranking_entry_settling
                  WHERE <커서 이후>
-                 ORDER BY score DESC, achieved_at ASC, member_id DESC
+                 ORDER BY score DESC, <slot 식> ASC, member_id DESC
                  LIMIT 5000) c) t USING (ranking_id, season_no, member_id)
    SET s.final_rank = t.rn;
 ```
@@ -592,8 +620,8 @@ UPDATE ranking_entry_settling s
 - 중단 후 재개 시 커서는 `MAX(final_rank)`인 행의 정렬 키, `:base_rank`는 그 값이다.
 
 - 정렬 기준은 Redis 순서와 일치시킨다.
-  - DESC: `score DESC, achieved_at ASC, member_id DESC`
-  - ASC: `score ASC, achieved_at ASC, member_id ASC`
+  - DESC: `score DESC, slot ASC, member_id DESC`
+  - ASC: `score ASC, slot ASC, member_id ASC`
 - 커서 조건은 정렬 방향이 섞여 있어 튜플 비교 대신 OR 조건으로 풀어 쓴다.
 
 ### 7.4 결과 컬럼
@@ -800,10 +828,13 @@ settling에 다른 시즌 행                                    → 멈춤, 알
 | --- | --- |
 | 범위 | `score_max` |
 | 1회 최대 증분 | `max_delta` (SUM) |
-| 제출 빈도 | `max_submit_per_min` (Redis 카운터) |
+| 제출 빈도 | `max_submit_per_min` (Redis 카운터, 1분 고정 창, 초과 시 2006) |
 | 시즌 구간 | `[start_at, end_at)` |
 
 거부 사유는 `ranking_submit_key.rejected`와 제출 이력(4.5)에 기록하고, 강한 의심 신호로 취급한다.
+
+- 제출 빈도 초과는 SP 전에 거부하므로 멱등 키가 없고 제출 이력에만 `RATE_LIMIT`으로 남는다. 같은 `requestId`로 재시도하면 정상 처리된다.
+- Redis 장애 시 빈도 검사는 통과시킨다. 원장 적재를 빈도 검사 때문에 막지 않는다.
 
 ### 9.2 소프트 탐지 (받되 표시)
 
@@ -845,7 +876,7 @@ CREATE TABLE `ranking_suspicion` (
 - 권한 분리: `write`(제출), `read`(조회), `reward`(보상 수신). 관리 API는 GM 도구 인증으로 분리한다.
 - 복수 키 동시 활성 (무중단 교체). DB에는 해시만 저장한다.
 - 키는 32바이트 난수(base64url 43자)이며 발급 시 한 번만 보여준다. 저장은 SHA-256 해시다. 엔트로피가 충분한 난수라 느린 해시(bcrypt 등)가 필요 없고, 요청마다 드는 비용을 피한다.
-- API는 기동 시 활성 키 목록을 메모리에 올리고 30초마다 다시 읽는다. 요청마다 DB를 조회하지 않는다. 기동 시 읽기에 실패하면 기동을 거부하고, 재조회 실패 시 기존 목록을 유지하고 경고한다.
+- API는 기동 시 활성 키 목록을 메모리에 올리고 30초마다 다시 읽는다. 요청마다 DB를 조회하지 않는다. 기동 시 읽기에 실패하면 기동을 거부하고, 재조회 실패 시 기존 목록을 유지하고 경고한다. 이전 재조회가 끝나지 않았으면(DB 정지 등) 이번 차례는 건너뛴다. 쿼리 타임아웃이 없어 겹쳐 쌓이면 풀 커넥션을 잡기 때문이다. 랭킹 정의 캐시(D-56)도 같다.
 - 새 키는 발급 후 30초가 지나야 모든 인스턴스에서 통과한다. 교체는 발급 → 30초 대기 → 게임 서버 설정 변경 → 옛 키 폐기 순으로 한다.
 - 유출 대응처럼 폐기를 즉시 반영해야 하면 폐기 후 API를 재시작한다. 재조회가 연속으로 실패하면(DB 장애 등) 폐기가 반영되지 않으므로 알린다.
 - 발급과 폐기는 CLI(`npm run credential`)로 한다. 관리 API가 생기면 같은 SP를 쓴다.
@@ -868,7 +899,7 @@ CREATE TABLE `api_credential` (
 
 | 메서드 | 경로 | 권한 | 설명 |
 | --- | --- | --- | --- |
-| POST | `/v1/rankings/{id}/scores` | write | 스코어 제출 (`memberId`, `value`, `seasonNo`, `requestId`, `sourceSeq?`, `meta?`) |
+| POST | `/v1/rankings/{id}/scores` | write | 스코어 제출 (`memberId`, `value`, `seasonNo`, `requestId`, `meta?`. `sourceSeq`는 LATEST 전용으로 2차 범위) |
 | GET | `/v1/rankings/{id}/top?offset&size` | read | 현재 시즌 상위 페이징 |
 | GET | `/v1/rankings/{id}/members/{memberId}` | read | 현재 시즌 내 순위 |
 | GET | `/v1/rankings/{id}/seasons/current` | read | 현재 시즌 정보 |
@@ -893,7 +924,7 @@ CREATE TABLE `api_credential` (
 | 10xx | SP: 관리·공통 | 400 등 |
 | 11xx | SP: 제출 | 400·404·409 등 (코드별) |
 | 12xx | SP: API 키 | (CLI 전용) |
-| 20xx | API 계층: 2001 요청 형식, 2002 인증, 2003 권한, 2004 경로 없음, 2005 시간 초과 | 400, 401, 403, 404, 503 |
+| 20xx | API 계층: 2001 요청 형식, 2002 인증, 2003 권한, 2004 경로 없음, 2005 시간 초과, 2006 제출 빈도 초과 | 400, 401, 403, 404, 503, 429 |
 | 5000 | 앱 미분류 예외 | 500 |
 | 50001 | DB 시스템 오류 (SP EXIT HANDLER) | 500 |
 
@@ -948,6 +979,8 @@ CREATE TABLE `api_credential` (
 
 헬퍼가 RESULT를 SELECT하면 호출한 SP에서 결과셋이 이중으로 나가므로, 헬퍼는 예외로만 실패를 알린다. DDL은 암묵적으로 커밋되므로 감사 로그는 실행 전에 먼저 기록한다.
 
+`RESULT 0`을 보낸 뒤 데이터 SELECT가 실패하면 EXIT HANDLER의 50001이 두 번째 결과셋으로 나간다. 데이터 결과셋에는 `RESULT` 컬럼이 없으므로, 앱(`callSp`)은 두 번째 결과셋 첫 행의 `RESULT = 50001`도 DB 오류로 처리한다. 오류 행을 데이터로 쓰면 조용히 틀리기 때문이다.
+
 ### 11.3 잡 실행
 
 - 모든 잡은 실제 상태를 관측해 다음 단계를 판단하고 멱등하게 실행한다.
@@ -968,6 +1001,10 @@ CREATE TABLE `api_credential` (
 | `instance_heartbeat` | 실행 중인 API·워커 인스턴스 (`instance_id`, `process_type`, `app_version`, `last_seen_at`) |
 
 - 인스턴스는 기동 후 주기적으로(예: 10초) 하트비트를 갱신하고(`SP_UPSERT_INSTANCE_HEARTBEAT`), 정상 종료 시 자기 행을 삭제한다(`SP_DELETE_INSTANCE_HEARTBEAT`). 최근 30초 안의 하트비트를 살아 있는 인스턴스로 본다.
+  30초는 주기의 3배다. 한두 번의 누락(네트워크 지연 등)은 살아 있는 것으로 본다.
+- `last_seen_at`은 SP가 DB 시각(`NOW(3)`)으로 기록하고 migrate도 DB 시각으로 비교한다. 호스트마다 시계가 달라도 판정이 틀어지지 않는다.
+- 첫 하트비트 기록이 실패하면 기동하지 않는다. 하트비트 없이 뜬 인스턴스는 migrate 검사에 보이지 않아, 중지 없이 migrate가 실행될 수 있기 때문이다.
+- 정상 종료 순서는 처리 중단(요청 수신 중지, 진행 중 요청 마무리, 재조회 정지, Redis 연결 종료, 진행 중 제출 이력 적재 대기 후 로그 DB 풀 종료) → 하트비트 삭제 → 메인 DB 풀 → 로거다. 처리가 멈춘 뒤에 지워야 migrate가 아직 일하는 인스턴스를 놓치지 않는다. 종료 신호가 겹치거나 처리 중단이 실패해도 하트비트 삭제는 반드시 실행한다.
 - `instance_id`는 프로세스 기동마다 생성하는 UUID다. PID는 재사용되어 다른 인스턴스의 행을 덮어쓸 수 있다.
 - 비정상 종료로 남은 행은 하트비트 루프가 `last_seen_at`이 1시간 넘게 지난 행을 함께 삭제해 정리한다.
 

@@ -95,6 +95,8 @@ API·워커만 실행하는 호스트의 `.env`에는 `DB_MIGRATE_*`를 두지 �
 로그 DB는 별도 DB라 접속 정보(`DB_LOG_HOST`, `DB_LOG_PORT`, `DB_LOG_NAME`)와 계정
 (`DB_LOG_APP_*`, `DB_LOG_MIGRATE_*`)을 따로 채운다. 비어 있으면 기동하지 않는다. 로컬은 같은 MySQL과
 3.1의 같은 계정을 그대로 적으면 된다. API·워커만 실행하는 호스트에는 `DB_LOG_MIGRATE_*`도 두지 않는다.
+Redis 접속은 `REDIS_URL`, `REDIS_PASSWORD`에 채운다. 다른 서비스와 같은 Redis를 쓰면 `REDIS_KEY_PREFIX`(예: `ped:`)를
+지정한다. Redis가 없어도 API는 기동하며 제출은 MySQL에만 반영된다.
 
 ## 4.2 빌드, 마이그레이션, 실행
 

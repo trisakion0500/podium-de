@@ -40,7 +40,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 쓰는 주체 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- |
-| `log_ranking_submit` | 모든 제출 요청의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 일 파티션 DROP | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
+| `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 일 파티션 DROP | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
 | `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db), [11.4](01_DESIGN.md#114-운영-테이블) |
 | `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
 
@@ -295,7 +295,7 @@ flowchart LR
 | 단계 | 3절 구간 | 데이터 이동 |
 | --- | --- | --- |
 | ① | 등록 | 관리자 입력 → `ranking_definition`, `ranking_reward_tier`. 정의로부터 `ranking_season` 행과 시즌 파티션 생성 |
-| ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 모든 제출 결과는 로그 DB `log_ranking_submit`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 근거를 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
+| ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 인증·형식 검사를 통과한 제출의 결과는 모두 로그 DB `log_ranking_submit`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 근거를 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
 | ③ | 마감과 정산 | `ranking_entry` 파티션을 `ranking_entry_settling`으로 꺼내(EXCHANGE) `final_rank` 가순위를 매기고 같은 파티션으로 되돌린다(EXCHANGE). 행 복사 없음. Redis 시즌 키 삭제 |
 | ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트로 보류, 상위 N → `ranking_hall` |
 | ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED |
@@ -311,8 +311,10 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    IN["게임 서버 제출<br/>memberId, value, seasonNo, requestId, meta"] --> RATE{"제출 빈도<br/>max_submit_per_min<br/>(Redis 카운터)"}
-    RATE -- "초과" --> X0["거부"]
+    IN["게임 서버 제출 (인증·형식 검사 통과)<br/>memberId, value, seasonNo, requestId, meta"] --> DEF{"랭킹 정의 캐시에 있음?<br/>(30초 재조회, D-56)"}
+    DEF -- "없음" --> XN["RANKING_NOT_FOUND 1101"]
+    DEF -- "있음" --> RATE{"제출 빈도<br/>max_submit_per_min<br/>(Redis 카운터, 장애 시 통과)"}
+    RATE -- "초과" --> X0["2006 거부<br/>(멱등 키 없음)"]
     RATE -- "통과" --> ACT
 
     subgraph SP["SP_SUBMIT_SCORE (MySQL, 한 트랜잭션)"]
@@ -339,10 +341,10 @@ flowchart TD
         KEYW["ranking_submit_key INSERT<br/>member_id, input_value"] --> RET["COMMIT<br/>score, achieved_at, version, replayed = 0 반환"]
     end
 
-    RET --> RED["composite 계산 → Redis Lua (5.3)<br/>version = 0이면 생략, 센티넬 없으면 버림<br/>BEST: ZADD GT, SUM: version 비교 후 ZADD<br/>(바뀌지 않은 값은 GT·version 비교로 무시됨)"]
+    RET --> RED["composite 계산 → Redis Lua (5.3)<br/>version = 0이면 생략, 센티넬 없으면 버림<br/>BEST: ZADD GT(ASC는 LT), SUM: version 비교 후 ZADD<br/>(바뀌지 않은 값은 GT·version 비교로 무시됨)"]
     RP --> RED
     RED -- "실패 시 L1 재시도 (6.1)<br/>그래도 실패하면 리컨실러가 맞춤 (6.2)" --> OK["성공 응답"]
-    OK & X0 & X1 & X2 & X3 & X4 -.-> HIST["제출 이력 기록 (로그 DB, 4.5)<br/>모든 결과, result_code 포함<br/>실패해도 응답에 영향 없음"]
+    OK & XN & X0 & X1 & X2 & X3 & X4 -.-> HIST["제출 이력 기록 (로그 DB, 4.5)<br/>모든 결과, result_code 포함<br/>실패해도 응답에 영향 없음"]
 ```
 
 - **시각:** `achieved_at`, `updated_at`은 MySQL `NOW(3)`이며 세션 `time_zone`은 `+00:00`이다. 게임 서버나 Redis 시각을 쓰지 않는다 (4.1).
@@ -350,4 +352,4 @@ flowchart TD
 - **ASC 정렬:** BEST의 "더 좋은 기록"은 더 작은 값이다 (4.3).
 - **Redis 반영 실패:** 응답은 성공으로 나간다. MySQL이 원장이고, 리컨실러가 `ranking_entry.updated_at` 변경분으로 Redis를 다시 맞춘다.
 - **재전송:** 재전송 응답도 현재 entry 상태를 돌려주므로 Redis 반영을 다시 시도할 수 있다. version 비교로 오래된 값은 무시된다 (D-43).
-- **제출 이력:** 결과와 무관하게 모든 제출이 로그 DB에 남는다. 메인 트랜잭션과 묶지 않으며, 기록에 실패하면 앱 로그 파일에 남기고 넘어간다 (4.5, D-48).
+- **제출 이력:** 인증·형식 검사를 통과한 제출은 결과와 무관하게 모두 로그 DB에 남는다. 메인 트랜잭션과 묶지 않으며, 기록에 실패하면 앱 로그 파일에 남기고 넘어간다 (4.5, D-48).
