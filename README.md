@@ -166,9 +166,10 @@ podiumDE/
 │   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
 │   ├── server.ts        # Fastify 공통 처리(요청 로그·마스킹, 시간 초과, 오류 변환, Swagger, /health)
 │   ├── submit.ts        # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
+│   ├── ranks.ts         # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
 │   ├── auth.ts          # API 키 인증 가드(활성 키 메모리 목록, 권한 비트)
-│   ├── rankings.ts      # 랭킹 정의 메모리 캐시, composite 계산
-│   ├── redis.ts         # node-redis 클라이언트, 반영·빈도 Lua, 명령 제한 시간, 재시도
+│   ├── rankings.ts      # 랭킹 정의·현재 시즌 메모리 캐시, composite 계산·디코드
+│   ├── redis.ts         # node-redis 클라이언트, 반영·빈도·조회 Lua, 명령 제한 시간, 재시도
 │   ├── refresh.ts       # 메모리 목록 주기 재조회(키·랭킹 정의 공용)
 │   ├── errors.ts        # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
 │   ├── db.ts            # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001은 BusinessException), GET_LOCK 헬퍼
@@ -346,7 +347,7 @@ migrate가 하트비트로 거부되면
   - ✅ Fastify 서버 기반 — 결과 코드 체계, 오류 변환, 요청 로그·마스킹, 시간 초과, Swagger
   - ✅ 인증 가드 (활성 키 메모리 목록, 권한 비트)
   - ✅ 스코어 제출 API + Redis 반영 (빈도 검사, 멱등 재전송, 제출 이력)
-  - ⬜ 순위 조회 API (상위, 내 순위, 현재 시즌)
+  - ✅ 순위 조회 API (상위, 내 순위, 현재 시즌)
   - ⬜ 부하 테스트
 - ⬜ 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
 - ⬜ 4단계: 시즌 스케줄러(생성, 상태 전이, 정산, 전달)

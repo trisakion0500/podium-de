@@ -23,7 +23,7 @@
 | `no active api credential — all requests will be rejected` | 활성 API 키가 없다 | `npm run credential -- create <이름> <권한>` |
 | upgrade `[2/5 wait stop] ... 멈추지 않았습니다` | 중지 명령 후에도 하트비트가 남았다 | 남은 인스턴스를 확인해 중지. 비정상 종료면 30초 뒤 재실행 |
 
-## 1.2 제출 API 응답
+## 1.2 API 응답
 
 | result / HTTP | 의미 | 게임 서버 조치 |
 |---|---|---|
@@ -35,6 +35,8 @@
 | 2006 / 429 | 분당 제출 한도 초과 | 잠시 후 같은 `requestId`로 재시도 |
 | 2005 / 503 | 처리 시간 초과. 서버에서는 반영됐을 수 있다 | 같은 `requestId`로 재시도 (반영됐으면 `replayed: true`) |
 | 50001 / 500 | DB 시스템 오류 | 같은 `requestId`로 재시도. 서버 로그의 `DB 오류 <errno> (<sqlstate>)`로 원인 확인 |
+| 1301 / 404 | 지금 시각에 해당하는 시즌이 없다 (시즌 사이 공백, 종료된 랭킹) | `seasons/current`로 확인. 시즌이 생성됐는지(스케줄러) 확인 |
+| 2007 / 503 | 순위표를 쓸 수 없다: 센티넬 없음(OPEN 전, 재구축 중) 또는 Redis 장애 | 잠시 후 재조회. 오래 계속되면 Redis 연결 로그와 재구축 상태 확인 |
 
 ## 1.3 Redis
 
@@ -43,7 +45,7 @@
 | `redis unavailable — scores are saved to MySQL only until it recovers` | Redis 접속 불가 | 제출은 성공한다(원장 MySQL). 빈도 검사는 통과로 동작한다. 복구되면 `redis ready`가 남고 리컨실러가 따라잡는다 |
 | `redis apply gave up ... reconciler will catch up` | 첫 시도와 재시도 2회 모두 실패 | 리컨실러가 맞춘다. 잦으면 Redis 지연·`REDIS_TIMEOUT_MS` 확인 |
 | `redis rate limit check failed, allowing` | 빈도 검사 시간 초과 | 그 요청은 통과된다. 잦으면 Redis 지연 확인 |
-| 순위표에 반영이 안 됨, 오류 로그 없음 | 시즌 센티넬(`...:ready`)이 없다 — 정산 중이거나 재구축 전 | 의도된 동작이다(5.3). 재구축(L3) 후 반영된다 |
+| 순위표에 반영이 안 됨, 오류 로그 없음 | 시즌 센티넬(`...:ready`)이 없다 — 정산 중이거나 재구축 전 | 의도된 동작이다(5.3). 조회는 2007을 받는다. 재구축(L3) 후 반영된다 |
 
 ## 1.4 DB·잡
 

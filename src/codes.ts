@@ -181,11 +181,12 @@ export const PartitionTarget = {
 /**
  * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
  * SP는 같은 숫자를 리터럴로 쓴다. API 응답 result로 그대로 나가며, API 계층 코드(ApiResult 20xx)와 겹치지 않게
- * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키). 도메인당 99개, 넘치면 예비 대역을 준다.
+ * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회). 도메인당 99개, 넘치면 예비 대역을 준다.
  * @author trisakion
  * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
  * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
  * @modified 2026-10-06 trisakion API 계층 코드와 한 번호 공간으로 정리
+ * @modified 2026-10-07 trisakion 조회 SP 코드(1301) 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -224,6 +225,8 @@ export const SpResult = {
     CREDENTIAL_NOT_FOUND: 1201,
     /** API 키: 이미 폐기된 키 */
     CREDENTIAL_ALREADY_REVOKED: 1202,
+    /** 조회: 지금 시각이 [start_at, end_at)에 드는 시즌 행이 없음 (시즌 사이 공백, 종료된 랭킹) */
+    CURRENT_SEASON_NOT_FOUND: 1301,
 } as const;
 
 /**
@@ -232,6 +235,7 @@ export const SpResult = {
  * 5000 앱 미분류, 50001 DB 시스템 오류). 메시지와 HTTP 상태는 errors.ts의 ERROR_MAP에서만 관리한다.
  * @author trisakion
  * @modified 2026-10-07 trisakion 제출 빈도 초과(2006) 추가
+ * @modified 2026-10-07 trisakion 순위 집계 중(2007) 추가
  */
 export const ApiResult = {
     /** 요청 형식 오류 (스키마 검증 실패, JSON 파싱 실패 등) */
@@ -246,6 +250,8 @@ export const ApiResult = {
     TIMEOUT: 2005,
     /** 제출 빈도 초과 (max_submit_per_min, Redis 카운터). SP를 거치지 않아 멱등 키가 없으므로 같은 requestId로 재시도한다 */
     TOO_MANY_REQUESTS: 2006,
+    /** 순위 조회 불가: 센티넬 없음(OPEN 전, 재구축 중, 01_DESIGN 6.3) 또는 Redis 연결 끊김·시간 초과. 잠시 후 재시도한다 */
+    RANKING_UNAVAILABLE: 2007,
     /** 분류되지 않은 앱 예외 */
     INTERNAL_ERROR: 5000,
     /** SP 내부 시스템 오류 (SP RESULT 50001, db.ts callSp가 던짐) */

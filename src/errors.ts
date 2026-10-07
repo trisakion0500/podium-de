@@ -17,6 +17,7 @@ export interface ErrorEntry {
  * SP 코드(SpResult)는 그 SP를 쓰는 API를 만들 때 여기에 추가한다 — 표에 없는 코드는 BusinessException으로 던질 수 없다.
  * @author trisakion
  * @modified 2026-10-07 trisakion 제출 SP 코드(1001, 1101~1107)와 빈도 초과(2006) 추가
+ * @modified 2026-10-07 trisakion 현재 시즌 없음(1301)과 순위 집계 중(2007) 추가
  */
 export const ERROR_MAP = {
     [SpResult.INVALID_PARAM]: { message: '요청 값이 허용 범위를 벗어났습니다.', httpStatus: 400 },
@@ -27,12 +28,14 @@ export const ERROR_MAP = {
     [SpResult.SCORE_OUT_OF_RANGE]: { message: '스코어가 허용 범위를 벗어났습니다.', httpStatus: 400 },
     [SpResult.DELTA_EXCEEDED]: { message: '1회 증분이 허용 한도를 넘었습니다.', httpStatus: 400 },
     [SpResult.SCORE_MAX_EXCEEDED]: { message: '누적 스코어가 상한을 넘습니다.', httpStatus: 400 },
+    [SpResult.CURRENT_SEASON_NOT_FOUND]: { message: '진행 중인 시즌이 없습니다.', httpStatus: 404 },
     [ApiResult.VALIDATION_FAILED]: { message: '요청 형식이 올바르지 않습니다.', httpStatus: 400 },
     [ApiResult.UNAUTHORIZED]: { message: 'API 키가 없거나 유효하지 않습니다.', httpStatus: 401 },
     [ApiResult.FORBIDDEN]: { message: '이 API를 호출할 권한이 없습니다.', httpStatus: 403 },
     [ApiResult.NOT_FOUND]: { message: '존재하지 않는 경로입니다.', httpStatus: 404 },
     [ApiResult.TIMEOUT]: { message: '처리 시간이 초과되었습니다. 쓰기 요청은 반영되었을 수 있습니다.', httpStatus: 503 },
     [ApiResult.TOO_MANY_REQUESTS]: { message: '제출 빈도 한도를 넘었습니다. 잠시 후 같은 requestId로 다시 시도하세요.', httpStatus: 429 },
+    [ApiResult.RANKING_UNAVAILABLE]: { message: '순위를 집계 중입니다. 잠시 후 다시 시도하세요.', httpStatus: 503 },
     [ApiResult.INTERNAL_ERROR]: { message: '서버 내부 오류입니다.', httpStatus: 500 },
     [ApiResult.DATABASE_ERROR]: { message: '데이터베이스 오류입니다.', httpStatus: 500 },
 } satisfies Record<number, ErrorEntry>;

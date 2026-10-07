@@ -81,7 +81,7 @@ function errorBody(result: ErrorCode, detail?: string): { result: number; messag
 function resultCodeTable(): string {
     const rows = Object.entries(ERROR_MAP).map(([code, e]) => `| ${code} | ${e.httpStatus} | ${e.message} |`);
     return [
-        '성공은 `{ result: 0, data }`, 실패는 `{ result, message }`이다. 대역: 10xx~12xx SP, 20xx API 계층, 5000 앱 미분류, 50001 DB.',
+        '성공은 `{ result: 0, data }`, 실패는 `{ result, message }`이다. 대역: 10xx~13xx SP, 20xx API 계층, 5000 앱 미분류, 50001 DB.',
         '',
         '| result | HTTP | 의미 |',
         '| --- | --- | --- |',
@@ -96,6 +96,7 @@ function resultCodeTable(): string {
  * @returns 라우트 등록 전 Fastify 인스턴스
  * @author trisakion
  * @modified 2026-10-06 trisakion 인증 키 ID(credentialId)를 요청에 선언하고 응답 로그에 추가
+ * @modified 2026-10-07 trisakion 순위 집계 중(2007)은 오류 로그에서 제외
  */
 export async function buildServer(): Promise<FastifyInstance> {
     // Fastify 요청 처리 순서(아래 훅·핸들러가 끼어드는 위치):
@@ -167,7 +168,8 @@ export async function buildServer(): Promise<FastifyInstance> {
     // 여기서 { result, message } 형식으로 통일하고 내부 정보는 로그에만 남긴다.
     app.setErrorHandler((err, req, reply) => {
         if (err instanceof BusinessException) {
-            if (err.httpStatus >= 500)
+            // 2007(집계 중)은 재구축·Redis 장애 동안 조회마다 나오는 예상된 상태다. 원인은 Redis 연결·읽기 로그에 이미 남는다.
+            if (err.httpStatus >= 500 && err.result !== ApiResult.RANKING_UNAVAILABLE)
                 logger.error(`[${req.id}] ${err.message}`);
             return reply.code(err.httpStatus).send({ result: err.result, message: err.publicMessage });
         }

@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { createPool } from './db.js';
 import { logger } from './logger.js';
 import { startRankingRefresh } from './rankings.js';
+import { registerRankRoutes } from './ranks.js';
 import { closeRedis, createRedis } from './redis.js';
 import { buildServer } from './server.js';
 import { drainSubmitLogs, registerSubmitRoute } from './submit.js';
@@ -16,6 +17,7 @@ const redis = createRedis();
 
 const app = await buildServer();
 registerSubmitRoute(app, { pool, logPool, redis });
+registerRankRoutes(app, { pool, redis });
 const stops: (() => void)[] = [];
 // 새 요청 수신을 멈추고 진행 중 요청이 끝날 때까지 기다린 뒤, DB 풀이 닫히기 전에 재조회를 멈춘다.
 const shutdown = onShutdown(async () => {

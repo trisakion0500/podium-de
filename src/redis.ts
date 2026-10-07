@@ -1,6 +1,8 @@
 import { createClient, defineScript } from 'redis';
 import type { CommandParser } from 'redis';
+import { ApiResult } from './codes.js';
 import { config } from './config.js';
+import { BusinessException } from './errors.js';
 import { logger } from './logger.js';
 
 /** Redis 반영 실패 시 백그라운드 재시도 간격 (01_DESIGN 6.1 L1). 첫 시도는 응답 전에 한다 */
@@ -43,6 +45,35 @@ return 1`,
             parser.push(member, String(composite), String(version));
         },
         transformReply: (reply: unknown) => Number(reply),
+    }),
+    /**
+     * 순위 조회 (01_DESIGN 5.4). 상위 페이지와 한 멤버의 순위를 한 번에 읽는다. 센티넬이 없으면 -1 — 재구축 중이거나 OPEN 전이라
+     * 일부만 찬 순위표를 내보내지 않는다. 결과는 [상위(member, score 교대), 내 순위 0부터(-1: 없음), 내 score]
+     */
+    readBoard: defineScript({
+        NUMBER_OF_KEYS: 2,
+        SCRIPT: `if redis.call('EXISTS', KEYS[2]) == 0 then return -1 end
+local off = tonumber(ARGV[2])
+local top = {}
+if tonumber(ARGV[3]) > 0 then
+    if ARGV[1] == 'REV' then
+        top = redis.call('ZRANGE', KEYS[1], off, off + ARGV[3] - 1, 'REV', 'WITHSCORES')
+    else
+        top = redis.call('ZRANGE', KEYS[1], off, off + ARGV[3] - 1, 'WITHSCORES')
+    end
+end
+local rank = false
+if ARGV[4] ~= '' then
+    rank = redis.call(ARGV[1] == 'REV' and 'ZREVRANK' or 'ZRANK', KEYS[1], ARGV[4])
+end
+if not rank then return {top, -1, ''} end
+return {top, rank, redis.call('ZSCORE', KEYS[1], ARGV[4])}`,
+        parseCommand(parser: CommandParser, board: string, ready: string, dir: 'REV' | 'FWD', offset: number, size: number, member: string) {
+            parser.pushKey(board);
+            parser.pushKey(ready);
+            parser.push(dir, String(offset), String(size), member);
+        },
+        transformReply: (reply: unknown) => reply as -1 | [string[], number, string],
     }),
     /** 제출 빈도 카운터. 첫 증가 때만 만료를 건다 — INCR과 EXPIRE를 따로 보내면 사이에 끊겼을 때 만료 없는 키가 남아 영구 차단된다 */
     hitRateLimit: defineScript({
@@ -157,6 +188,48 @@ export async function allowSubmit(client: Redis, rankingId: number, memberId: st
         logger.warn(`redis rate limit check failed, allowing ranking=${rankingId}`, err);
         return true;
     }
+}
+
+/**
+ * 순위표 조회 결과. score는 composite 그대로다 (rankings.decodeScore로 꺼낸다)
+ * @author trisakion
+ */
+export interface BoardRead {
+    /** 상위 페이지 (순위 순) */
+    top: { memberId: string; composite: number }[];
+    /** 요청한 멤버 (멤버를 지정하지 않았거나 순위표에 없으면 null) */
+    me: { rank: number; composite: number } | null;
+}
+
+/**
+ * 현재 시즌 순위표를 읽는다 (01_DESIGN 5.4). 상위 페이지와 내 순위를 스크립트 한 번으로 읽는다.
+ * 센티넬이 없거나(재구축 중, OPEN 전) Redis를 쓸 수 없으면 2007로 거부한다 — 현재 시즌 순위의 출처는 Redis뿐이다(8.5).
+ * @param client Redis 클라이언트
+ * @param q 순위표, 정렬 방향(DESC는 REV), 페이지, 멤버('' 이면 생략)
+ * @returns 상위 페이지와 내 순위 (순위는 1부터)
+ * @author trisakion
+ */
+export async function readBoard(client: Redis, q: {
+    rankingId: number; seasonNo: number; rev: boolean; offset: number; size: number; memberId: string;
+}): Promise<BoardRead> {
+    if (!client.isReady)
+        throw new BusinessException(ApiResult.RANKING_UNAVAILABLE, 'redis not ready');
+    const keys = seasonKeys(q.rankingId, q.seasonNo);
+    let reply: -1 | [string[], number, string];
+    try {
+        // node-redis 반환 타입이 튜플을 배열로 넓혀서 다시 좁힌다.
+        reply = await withTimeout(client.readBoard(keys.board, keys.ready, q.rev ? 'REV' : 'FWD', q.offset, q.size, q.memberId)) as typeof reply;
+    } catch (err) {
+        logger.warn(`redis read failed ${keys.board}`, err);
+        throw new BusinessException(ApiResult.RANKING_UNAVAILABLE, 'redis read failed');
+    }
+    if (reply === -1)
+        throw new BusinessException(ApiResult.RANKING_UNAVAILABLE, `no sentinel ${keys.ready}`);
+    const [flat, rank, score] = reply;
+    const top: BoardRead['top'] = [];
+    for (let i = 0; i < flat.length; i += 2)
+        top.push({ memberId: flat[i], composite: Number(flat[i + 1]) });
+    return { top, me: rank < 0 ? null : { rank: rank + 1, composite: Number(score) } };
 }
 
 /**

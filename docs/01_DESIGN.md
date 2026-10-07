@@ -493,9 +493,13 @@ SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한�
 | 상위 페이징 | `ZRANGE key off off+size-1 REV WITHSCORES` | `ZRANGE key off off+size-1 WITHSCORES` |
 | 내 순위 | `ZREVRANK key member WITHSCORE` | `ZRANK key member WITHSCORE` |
 
-- 페이징과 내 순위를 파이프라인 하나로 처리한다.
 - 순위 = 인덱스 + 1.
 - 표시용 정보(닉네임 등)는 저장하지 않는다. 게임 서버가 조합한다.
+- 상위 페이징과 내 순위는 Lua 스크립트 하나로 읽는다(`top?memberId=`). 센티넬 확인과 두 조회가 같은 시점 값이다.
+- 센티넬이 없거나(OPEN 전, 재구축 중) Redis를 쓸 수 없으면 2007(503)으로 응답한다. 일부만 찬 순위표를 내보내지 않는다.
+- 조회할 시즌은 API가 랭킹별로 `SP_GET_CURRENT_SEASON`으로 읽어 `end_at`까지 메모리에 둔다(D-58). 현재 시즌은 제출과 같이 시각으로 정한다.
+- 응답 행은 순위, `memberId`, 스코어다. 달성 시각은 composite에 time_unit 단위로 내림되어 있어 내보내지 않는다.
+- 순위표에 없는 멤버는 오류가 아니라 `rank: null`이다.
 
 ### 5.5 영속화
 
@@ -553,7 +557,7 @@ Redis 유실(퍼시스턴스 없는 재시작, 페일오버 데이터 손실) �
 
 - 재구축 중 쓰기는 MySQL에 정상 적재되며 2단계와 이후 L2에서 반영된다.
 - 정산이 끝나 키를 삭제한 시즌(SETTLING 이후)은 재구축 대상이 아니다.
-- 재구축 중 조회는 "집계 중" 상태를 반환한다.
+- 재구축 중 조회는 "집계 중"(2007)을 반환한다.
 
 ### 6.4 보조 점검
 
@@ -900,7 +904,7 @@ CREATE TABLE `api_credential` (
 | 메서드 | 경로 | 권한 | 설명 |
 | --- | --- | --- | --- |
 | POST | `/v1/rankings/{id}/scores` | write | 스코어 제출 (`memberId`, `value`, `seasonNo`, `requestId`, `meta?`. `sourceSeq`는 LATEST 전용으로 2차 범위) |
-| GET | `/v1/rankings/{id}/top?offset&size` | read | 현재 시즌 상위 페이징 |
+| GET | `/v1/rankings/{id}/top?offset&size&memberId` | read | 현재 시즌 상위 페이징 (`size` 기본 20·최대 100, `memberId`를 주면 내 순위 함께) |
 | GET | `/v1/rankings/{id}/members/{memberId}` | read | 현재 시즌 내 순위 |
 | GET | `/v1/rankings/{id}/seasons/current` | read | 현재 시즌 정보 |
 | GET | `/v1/rankings/{id}/seasons/{n}/results?offset&size` | read | 직전 시즌 결과 |
@@ -924,7 +928,8 @@ CREATE TABLE `api_credential` (
 | 10xx | SP: 관리·공통 | 400 등 |
 | 11xx | SP: 제출 | 400·404·409 등 (코드별) |
 | 12xx | SP: API 키 | (CLI 전용) |
-| 20xx | API 계층: 2001 요청 형식, 2002 인증, 2003 권한, 2004 경로 없음, 2005 시간 초과, 2006 제출 빈도 초과 | 400, 401, 403, 404, 503, 429 |
+| 13xx | SP: 조회 (1301 현재 시즌 없음) | 404 |
+| 20xx | API 계층: 2001 요청 형식, 2002 인증, 2003 권한, 2004 경로 없음, 2005 시간 초과, 2006 제출 빈도 초과, 2007 순위 집계 중 | 400, 401, 403, 404, 503, 429, 503 |
 | 5000 | 앱 미분류 예외 | 500 |
 | 50001 | DB 시스템 오류 (SP EXIT HANDLER) | 500 |
 
@@ -965,7 +970,7 @@ CREATE TABLE `api_credential` (
 | `SP_LOG_PARTITION_DROP(day)` | 로그 DB. `day` 이전 일 파티션 삭제 (호출당 최대 31개) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
-- SP의 RESULT 코드는 `src/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1008, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
+- SP의 RESULT 코드는 `src/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1008, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
 - 관리 SP는 상태를 관측해 다음 단계만 실행하므로 같은 인자로 다시 호출해도 안전하다.
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.
