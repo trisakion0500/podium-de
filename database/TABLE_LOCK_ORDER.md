@@ -13,7 +13,7 @@ SP를 새로 만들거나 기존 SP에 테이블 쓰기를 추가할 때 먼저 
 | 6 | `ranking_submit_key` | 제출: 멱등 키를 entry보다 먼저 기록해 같은 requestId 동시 요청을 키 충돌로 직렬화한다 |
 | 7 | `ranking_entry` | 스코어와 정산 결과 |
 | 8 | `ranking_entry_settling` | 정산 작업 테이블. 가순위 UPDATE만 쓴다 |
-| 9 | `ranking_hall` | FINALIZING 적재, 지급 후 제재 표시 |
+| 9 | `ranking_season_top` | FINALIZING 적재, 지급 후 제재 표시 |
 | 10 | `job_state` | 잡 워터마크 |
 | 11 | `instance_heartbeat` | 하트비트 (단독 자동 커밋) |
 | 12 | `api_credential` | API 키 발급·폐기 (단독 자동 커밋) |

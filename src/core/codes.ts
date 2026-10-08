@@ -93,6 +93,7 @@ export const RangeType = {
  * 시즌 상태 (ranking_season.status, 01_DESIGN 3.5). 진행 순서대로 번호를 매겨 크기 비교로 단계를 판단할 수 있다
  * @author trisakion
  * @modified 2026-10-03 trisakion SETTLING 설명을 결과 통합에 맞춤 (D-49)
+ * @modified 2026-10-08 trisakion FINALIZING 설명의 hall을 ranking_season_top으로 (D-59)
  */
 export const SeasonStatus = {
     /** 시작 전 */
@@ -105,7 +106,7 @@ export const SeasonStatus = {
     SETTLING: 4,
     /** 검수. 제재 반영 가능, 지급 없음 */
     REVIEW: 5,
-    /** 제재 제외, 순위 재부여, 보상 판정, hall 적재 */
+    /** 제재 제외, 순위 재부여, 보상 판정, 시즌 Top N 적재 (ranking_season_top) */
     FINALIZING: 6,
     /** 게임 서버가 보상 목록 수신 및 ack */
     DELIVERING: 7,

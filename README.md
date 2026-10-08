@@ -13,12 +13,13 @@
 
 - **핵심 기술**: Node.js 22 + TypeScript · MySQL 8.4(모든 DB 로직은 Stored Procedure,
   LIST COLUMNS 파티션) · Redis 7.4(실시간 순위표, MySQL의 투영)
-- **정량 현황**: 1단계(스키마·파티션 관리 SP·스코어 적재 SP) 진행 중
+- **정량 현황**: 2단계(제출·조회 API) 완료. 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
 - **기술적 강조점**: 시즌 단위 파티션 EXCHANGE 아카이브 · composite score 동점 처리 ·
-  워터마크 차분 리컨실러 기반 자가 복구 · 동적 SQL을 `sp_exec_ddl` 하나로 격리
+  워터마크 차분 리컨실러 기반 자가 복구 · 동적 SQL을 `SP_EXEC_DDL` 하나로 격리
 
 설계의 단일 기준은 [`docs/01_DESIGN.md`](docs/01_DESIGN.md)(현재 설계)와
 [`docs/02_DECISIONS.md`](docs/02_DECISIONS.md)(결정과 이유)다. 이 README는 요약과 링크만 둔다.
+처음 보는 용어(원장, 센티넬, 리컨실러, `D-xx` 등)는 [01_DESIGN 1.6 용어](docs/01_DESIGN.md#16-용어)에 있다.
 
 ---
 
@@ -134,7 +135,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 - **실시간 순위** — 상위 페이징, 내 순위 조회
 - **정산** — 가순위 생성 → 검수 → 확정 → 일괄 보상 전달(게임 서버 pull + ack)
 - **제재·Anti-cheat** — 제재 제외 후 순위 재부여, 소프트 탐지, 어뷰징 포인트
-- **아카이브** — 시즌별 백업 테이블, 시즌별 Top N 영구 보관(hall)
+- **아카이브** — 시즌별 백업 테이블, 시즌별 Top N 영구 보관(ranking_season_top)
 
 범위와 구현 순서: [01_DESIGN 12](docs/01_DESIGN.md#12-구현-범위와-순서)
 
@@ -150,6 +151,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 | [04_SCHEMA.md](docs/04_SCHEMA.md) | 테이블 목록, ERD, 시즌 데이터 흐름 |
 | [05_TROUBLESHOOTING.md](docs/05_TROUBLESHOOTING.md) | 운영 장애 대응, 개발 중 겪은 문제와 해결 |
 | [06_LOAD_TEST.md](docs/06_LOAD_TEST.md) | 부하 테스트 결과 보고서 (처리량, 지연, 병목, 재현 방법) |
+| [07_K6_LOAD_TEST.md](docs/07_K6_LOAD_TEST.md) | k6 부하 테스트 결과와 따라 하기 (설치, 실행, 결과 해석, 정리) |
 
 ---
 
@@ -159,7 +161,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 podiumDE/
 ├── src/
 │   ├── api.ts           # API 프로세스 엔트리
-│   ├── worker.ts        # 워커(스케줄러) 프로세스 엔트리
+│   ├── worker.ts        # 워커 프로세스 엔트리(스케줄러·리컨실러는 3~4단계에서 추가 예정)
 │   ├── migrate.ts       # 마이그레이션 적용 CLI(npm run migrate)
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
 │   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
@@ -190,6 +192,7 @@ podiumDE/
 │   └── TABLE_LOCK_ORDER.md
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
 ├── loadtest/load.mjs    # 부하 테스트 스크립트(로컬 전용, docs/06_LOAD_TEST.md)
+├── loadtest/k6-submit.js # k6 제출 부하 스크립트(로컬 전용, docs/07_K6_LOAD_TEST.md)
 └── docs/                # 설계 문서(위 목록)
 ```
 
@@ -345,7 +348,7 @@ migrate가 하트비트로 거부되면
 
 - ✅ 1단계: 프로젝트 골격, 마이그레이션 러너, 스키마, 파티션 관리 SP, 스코어 적재 SP
   - ✅ 마이그레이션 러너(버전·반복 마이그레이션, 체크섬, 기동 시 스키마 확인), 하트비트, 중단 패치(`npm run upgrade`)
-  - ✅ 테이블 DDL — 메인 DB 14개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리)
+  - ✅ 테이블 DDL — 메인 DB 13개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리)
   - ✅ 파티션·정산 관리 SP (`SP_PARTITION_*`, `SP_SETTLING_EXCHANGE`, 로그 DB 일 파티션)
   - ✅ 스코어 적재 SP `SP_SUBMIT_SCORE` (BEST/SUM, 멱등 키, 하드 검증)
 - ✅ 2단계: API 인증, 제출 API, Redis 반영, 순위 조회 → 부하 테스트
@@ -355,6 +358,7 @@ migrate가 하트비트로 거부되면
   - ✅ 스코어 제출 API + Redis 반영 (빈도 검사, 멱등 재전송, 제출 이력)
   - ✅ 순위 조회 API (상위, 내 순위, 현재 시즌)
   - ✅ 부하 테스트 — API 2개로 피크 제출 2,300건/초, p99 130ms 이하 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
+  - ✅ k6 대조 측정 — 표준 도구로 API 1대 안정 범위(제출 1,500건/초, p99 95.8ms) 재확인, 따라 하기 절차 포함 ([07_K6_LOAD_TEST](docs/07_K6_LOAD_TEST.md))
 - ⬜ 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
 - ⬜ 4단계: 시즌 스케줄러(생성, 상태 전이, 정산, 전달)
 - ⬜ 5단계: 아카이브 로테이션

@@ -13,7 +13,7 @@ MySQL을 어떤 조건으로 준비해야 하는지에 대한 설명이다.
 |---|---|
 | Node.js | 22 이상 — `process.loadEnvFile`(네이티브 `.env` 로딩)을 쓴다 |
 | MySQL | 8.4 |
-| Redis | 7.4 — 2단계(Redis 반영)부터 필요하다. 1단계는 MySQL만 쓴다 |
+| Redis | 7.4 — 순위 반영과 조회에 필요하다. 없어도 API는 뜨고 제출은 MySQL에 저장된다 |
 | Git | 최신 버전 |
 
 ---
@@ -138,5 +138,5 @@ API·워커는 기동 시 DB 스키마가 패키지와 같은지 확인만 하�
 |---|---|
 | DB 연결·스키마 | 기동 로그에 `heartbeat started: <ID> ...`가 남고 프로세스가 종료되지 않는다 |
 | 미적용 DB | `<SP 이름>이(가) DB에 없습니다. npm run migrate가 필요합니다.`로 기동이 거부된다 |
-| 로그 DB | 접속되면 메인과 같이 확인된다. 접속할 수 없으면 `log DB(podium_de_log) unreachable ...` 경고만 남고 기동은 계속된다 |
+| 로그 DB | 접속되면 메인과 같이 확인된다. 접속할 수 없으면 `log DB(podium_de_log) unreachable ...` 경고만 남고 기동은 계속된다. 계정·DB 이름이 틀리면 `로그 DB(...) 접속 설정이 잘못되었습니다`로 기동이 거부된다 |
 | API 헬스체크 | `curl http://localhost:3000/health` → `{"result":0}` |

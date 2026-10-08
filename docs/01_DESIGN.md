@@ -43,6 +43,44 @@
 4. **자동으로 해결되지 않으면 알린다.** 재시도로 풀리지 않는 상태는 멈추고 알림을 보낸다. 파괴적 작업은 검증 실패 시 실행하지 않는다.
 5. **운영 테이블에서 무거운 작업을 하지 않는다.** 운영 테이블의 DDL은 메타데이터 수준으로 제한하고, 대량 읽기·쓰기는 분리된 테이블에서 수행한다.
 
+### 1.6 용어
+
+이 저장소의 문서 전체에서 쓰는 용어다. 오른쪽 열은 이 문서의 상세 절이다.
+
+| 용어 | 뜻 | 상세 |
+| --- | --- | --- |
+| D-xx | `02_DECISIONS.md`의 결정 번호. 왜 그렇게 정했는지가 거기 있다 | — |
+| 원장 | 기록의 최종 기준. 이 시스템에서는 MySQL이다. 다른 곳과 값이 다르면 MySQL이 맞다 | 1.5 |
+| 투영 | 원장에서 계산해 만든 복사본. Redis 순위표는 MySQL 행으로 언제든 다시 만들 수 있다 | 1.5 |
+| 싱글테넌트 (DE) | 게임 프로젝트 하나에 서버·DB를 따로 설치하는 방식. 여러 게임이 한 DB를 나눠 쓰지 않는다. 그 하나를 "설치본"이라 부른다 | 1.2 |
+| 운영 테이블 | 서비스 중 계속 읽고 쓰는 테이블(`ranking_entry`, `ranking_submit_key`). 여러 랭킹이 함께 쓰므로 무거운 작업을 하지 않는다 | 1.5 |
+| 시즌 파티션 | 운영 테이블을 (랭킹, 시즌) 단위로 나눈 물리 조각. 시즌 데이터를 통째로 옮기는 단위다 | 4.2 |
+| EXCHANGE | `ALTER TABLE ... EXCHANGE PARTITION`. 파티션 하나와 일반 테이블의 데이터 파일을 행 복사 없이 맞바꾼다 | 8.1 |
+| 백업 테이블 | EXCHANGE로 떼어 낸 시즌 데이터를 담은 일반 테이블 `{원본}_r{id}_s{n}` | 8.2 |
+| MDL | Metadata Lock. DDL(테이블 구조 변경)이 잡는 MySQL 잠금. DDL이 MDL을 기다리는 동안 그 테이블의 다른 쿼리도 뒤에서 막힌다 | 11.1 |
+| INSTANT | `ALGORITHM=INSTANT`. 데이터를 다시 쓰지 않고 테이블 정의만 바꾸는 DDL 방식이라 즉시 끝난다 | 11.1 |
+| backfill | 컬럼 추가 등의 뒤에 기존 행 값을 한꺼번에 채우는 대량 UPDATE | 11.1 |
+| ODKU | `INSERT ... ON DUPLICATE KEY UPDATE`. 행이 없으면 넣고 있으면 갱신하는 MySQL 구문(upsert) | 4.3 |
+| 멱등 키 (`requestId`) | 게임 서버가 제출마다 새로 만드는 고유 ID. 같은 ID로 다시 보내면(재전송) 두 번 반영하지 않는다. 같은 ID에 다른 내용이면 거부한다(1104) | 4.4 |
+| 하드 검증 / 소프트 탐지 | 하드: 받지 않고 거부한다(점수 범위 등). 소프트: 받되 의심 근거만 쌓는다(급등 등) | 9.1, 9.2 |
+| 어뷰징 포인트 | 소프트 탐지 근거의 가중치 합. 임계치를 넘으면 보상을 보류한다 | 9.3 |
+| composite score | 점수와 달성 시각을 정수 하나로 합친 값. Redis 정렬만으로 "같은 점수면 먼저 달성한 쪽이 위"가 된다 | 5.2 |
+| 비트 예산 | composite가 정확하려면 53비트(double의 정수 정밀도) 안에 들어가야 한다. 점수 비트 + 시간 비트 ≤ 53을 등록 시 검사한다 | 2.4 |
+| 시간 슬롯 | 달성 시각을 `time_unit`(초, 분 등)으로 내림한 값. 같은 점수·같은 슬롯이면 `member_id` 순이다 | 5.2 |
+| 센티넬 (`:ready`) | Redis에 "이 시즌 순위표에 써도 된다"고 표시하는 키. 없으면 반영은 버리고 조회는 2007로 응답한다 | 5.3 |
+| 자가 복구 L1·L2·L3 | Redis가 MySQL과 어긋났을 때 맞추는 3단계. L1 즉시 재시도, L2 리컨실러, L3 전체 재구축 | 6장 |
+| 리컨실러 | 워커가 N초마다 MySQL에서 최근 바뀐 행을 읽어 Redis와 다르면 다시 반영하는 잡(L2) | 6.2 |
+| 워터마크 (checkpoint) | 리컨실러가 "이 시각까지 확인했다"고 남기는 `updated_at` 기준 시각. `job_state`에 저장한다 | 6.2 |
+| 재구축 | Redis 순위표를 MySQL에서 처음부터 다시 만드는 것(L3) | 6.3 |
+| 가순위 | 시즌 마감 후 제재를 반영하기 전에 매기는 임시 순위. 검수 뒤 확정한다 | 7.3 |
+| 검수 | 순위 확정 전에 GM이 어뷰징을 확인하는 기간(`review_period`) | 7.5 |
+| GM | Game Master, 게임 운영자. 제재 등록, 검수 보류 같은 사람의 조작을 한다 | 7.5 |
+| ack | 게임 서버가 "이 보상을 지급했다"고 알리는 호출. 받은 행은 DELIVERED가 된다 | 7.7 |
+| 하트비트 | API·워커가 10초마다 "살아 있다"고 DB에 남기는 행. migrate는 이것이 있으면 실행을 거부한다 | 11.4 |
+| 중단 패치 / 롤링 | 중단 패치: 전체 중지 → migrate → 기동(DB 변경이 있을 때). 롤링: 서버를 하나씩 교체(DB 변경이 없을 때) | 11.6 |
+| p50·p95·p99 | 응답 시간을 빠른 순으로 줄 세웠을 때 50%·95%·99% 지점의 값. p99 100ms는 "100건 중 99건이 100ms 안에 끝났다"는 뜻 | — |
+| N+1 (서버 대수) | 필요한 대수 N에 장애·배포 대비 1대를 더 두는 것. ORM의 "N+1 쿼리 문제"와 무관하다 | — |
+
 ---
 
 ## 2. 랭킹 정의
@@ -70,7 +108,7 @@ CREATE TABLE `ranking_definition` (
     `settle_delay`          INT             UNSIGNED               NOT NULL                    COMMENT '시즌 종료 → 정산 시작 유예 (초)',
     `wait_period`           INT             UNSIGNED               NOT NULL    DEFAULT 0       COMMENT '시즌 종료 → 다음 시즌 시작 대기 (초)',
     `review_period`         INT             UNSIGNED               NOT NULL                    COMMENT '검수 기간 (초)',
-    `hall_size`             SMALLINT        UNSIGNED               NOT NULL    DEFAULT 100     COMMENT 'ranking_hall에 영구 보관할 시즌별 상위 인원',
+    `top_size`              SMALLINT        UNSIGNED               NOT NULL    DEFAULT 100     COMMENT 'ranking_season_top에 영구 보관할 시즌별 상위 인원',
     `history_retention`     INT             UNSIGNED               NOT NULL                    COMMENT '시즌별 백업 테이블 보관 기간 (일)',
     `max_delta`             BIGINT          UNSIGNED                           DEFAULT NULL    COMMENT 'SUM 1회 최대 증분 (NULL:제한 없음)',
     `max_submit_per_min`    INT             UNSIGNED                           DEFAULT NULL    COMMENT '멤버별 분당 최대 제출 수 (NULL:제한 없음)',
@@ -255,7 +293,7 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
 | CLOSED | 적재 차단 (시각 검사로 보장) |
 | SETTLING | entry 파티션을 작업 테이블로 꺼내 가순위 생성 후 되돌림 |
 | REVIEW | 검수. 제재 반영 가능, 지급 없음 |
-| FINALIZING | 제재 제외, 순위 재부여, 보상 판정, hall 적재 |
+| FINALIZING | 제재 제외, 순위 재부여, 보상 판정, 시즌 Top N 적재 |
 | DELIVERING | 게임 서버가 보상 목록 수신 및 ack |
 | SETTLED | 완료 |
 
@@ -410,7 +448,7 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 );
 ```
 
-- 앱이 응답을 만든 뒤 로그 DB 전용 커넥션 풀로 `SP_INSERT_LOG_RANKING_SUBMIT`을 호출해 기록한다. 메인 트랜잭션과 묶지 않으며, 실패해도 응답과 재시도에 영향이 없다 (개발 컨벤션 7장). 실패하면 앱 로그 파일에 같은 내용을 한 줄 남긴다. `meta`는 게임 서버가 보낸 임의 값이라 요청 로그와 같은 민감 키 마스킹과 5000자 자르기를 거친다.
+- 앱이 응답을 만든 뒤 로그 DB 전용 커넥션 풀로 `SP_INSERT_LOG_RANKING_SUBMIT`을 호출해 기록한다. 메인 트랜잭션과 묶지 않으며, 실패해도 응답과 재시도에 영향이 없다 (개발 컨벤션 7장). 실패하면 앱 로그 파일에 같은 내용을 한 줄 남긴다. 이 로그 줄은 요청 로그와 같은 민감 키 마스킹과 5000자 자르기를 거친다(`meta`가 게임 서버가 보낸 임의 값이라서다). DB에는 `meta`를 원본 그대로 저장한다.
 - 정상 종료 시 진행 중인 적재가 끝나기를 기다린 뒤 로그 DB 풀을 닫는다. 응답은 나갔지만 아직 커넥션을 받지 못한 적재가 풀 종료로 유실되지 않게 한다.
 - 인증 실패와 형식 오류는 남기지 않는다. 형식 오류는 NOT NULL 컬럼(`member_id`, `request_id` 등)을 채울 수 없는 경우가 있고, 인증 실패는 아직 제출로 볼 수 없다. 둘 다 앱 로그의 요청·응답 줄에 남는다.
 - 제출 바디는 16KB로 제한한다. `meta`가 해석 없이 그대로 쌓이므로 기본값(1MiB)보다 작게 둔다.
@@ -491,7 +529,7 @@ SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한�
 | 패턴 | DESC | ASC |
 | --- | --- | --- |
 | 상위 페이징 | `ZRANGE key off off+size-1 REV WITHSCORES` | `ZRANGE key off off+size-1 WITHSCORES` |
-| 내 순위 | `ZREVRANK key member WITHSCORE` | `ZRANK key member WITHSCORE` |
+| 내 순위 | `ZREVRANK key member` + `ZSCORE key member` | `ZRANK key member` + `ZSCORE key member` |
 
 - 순위 = 인덱스 + 1.
 - 표시용 정보(닉네임 등)는 저장하지 않는다. 게임 서버가 조합한다.
@@ -666,7 +704,7 @@ UPDATE ranking_entry_settling s
 3. participant_count 기록, tier_snapshot 고정
 4. reward_code 판정, reward_status 설정 (NONE / PENDING / REJECTED)
 5. 보류 임계치 초과 유저 reward_held = 1
-6. ranking_hall 적재 (상위 hall_size)
+6. ranking_season_top 적재 (상위 top_size)
 7. DELIVERING 전이
 ```
 
@@ -754,7 +792,7 @@ CREATE TABLE `ranking_exclusion` (
 | --- | --- | --- | --- |
 | `ranking_entry` | 진행 중 시즌, 확정 결과, 지난 시즌 조회 | 자기 시즌과 다음 시즌 모두 SETTLED (마지막 시즌은 자기 시즌 SETTLED) | EXCHANGE → 백업 |
 | `ranking_submit_key` | 진행 + 정산 중 시즌 | SETTLED | EXCHANGE → 백업 |
-| `ranking_hall` | 시즌별 Top N | 분리 없음 (영구) | — |
+| `ranking_season_top` | 시즌별 Top N | 분리 없음 (영구) | — |
 
 - 제출 이력(로그 DB `log_ranking_submit`)은 이 표의 대상이 아니다. 로그 DB에서 날짜 기준으로 따로 정리한다 (4.5).
 - `ranking_entry`는 자기 시즌이 SETTLED가 아니면 분리하지 않는다. 보상 API는 운영 테이블만 읽으므로, 전달이 끝나지 않은 시즌을 분리하면 남은 PENDING을 조회할 수 없다 (7.7).
@@ -781,10 +819,10 @@ EXCHANGE 절차 (entry, submit_key)
 - 테이블 수는 `history_retention`으로 상한을 두고, 설치 시 `table_open_cache`, `table_definition_cache`, `open_files_limit`를 그에 맞춰 설정한다.
 - 보관 기간 경과 시 `DROP TABLE` 또는 덤프 후 삭제. 필요하면 별도 스키마로 `RENAME`.
 
-### 8.4 ranking_hall
+### 8.4 ranking_season_top
 
 ```sql
-CREATE TABLE `ranking_hall` (
+CREATE TABLE `ranking_season_top` (
     `ranking_id`    INT            UNSIGNED               NOT NULL                 COMMENT '랭킹 ID (ranking_definition, FK 없음)',
     `season_no`     INT            UNSIGNED               NOT NULL                 COMMENT '시즌 번호',
     `final_rank`    INT            UNSIGNED               NOT NULL                 COMMENT '최종 순위',
@@ -795,7 +833,7 @@ CREATE TABLE `ranking_hall` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='시즌별 상위 순위 영구 보관';
 ```
 
-- FINALIZING에서 제재 반영 후 상위 `hall_size`를 적재한다.
+- FINALIZING에서 제재 반영 후 상위 `top_size`를 적재한다.
 - 지급 후 제재 시 `sanctioned`를 함께 갱신한다.
 
 ### 8.5 조회 데이터 원천
@@ -804,7 +842,7 @@ CREATE TABLE `ranking_hall` (
 | --- | --- |
 | 현재 시즌 순위 | Redis |
 | 직전 시즌 전체 순위, 내 순위 | `ranking_entry` (`final_rank`) |
-| 모든 시즌 Top N | `ranking_hall` |
+| 모든 시즌 Top N | `ranking_season_top` |
 | 그 외 과거 기록 | 백업 테이블 (운영 조회 대상 아님) |
 
 ### 8.6 자가 복구 판단
@@ -901,18 +939,18 @@ CREATE TABLE `api_credential` (
 
 ### 10.2 엔드포인트
 
-| 메서드 | 경로 | 권한 | 설명 |
-| --- | --- | --- | --- |
-| POST | `/v1/rankings/{id}/scores` | write | 스코어 제출 (`memberId`, `value`, `seasonNo`, `requestId`, `meta?`. `sourceSeq`는 LATEST 전용으로 2차 범위) |
-| GET | `/v1/rankings/{id}/top?offset&size&memberId` | read | 현재 시즌 상위 페이징 (`size` 기본 20·최대 100, `memberId`를 주면 내 순위 함께) |
-| GET | `/v1/rankings/{id}/members/{memberId}` | read | 현재 시즌 내 순위 |
-| GET | `/v1/rankings/{id}/seasons/current` | read | 현재 시즌 정보 |
-| GET | `/v1/rankings/{id}/seasons/{n}/results?offset&size` | read | 직전 시즌 결과 |
-| GET | `/v1/rankings/{id}/seasons/{n}/results/{memberId}` | read | 직전 시즌 내 결과 |
-| GET | `/v1/rankings/{id}/hall?season` | read | 시즌별 Top N |
-| GET | `/v1/rankings/{id}/seasons/{n}/rewards?cursor` | reward | 전달 대상 목록 |
-| POST | `/v1/rankings/{id}/seasons/{n}/rewards/ack` | reward | 전달 완료 (멱등, 7.7) |
-| GET | `/v1/rewards/pending` | reward | 전달 대기 시즌 목록과 남은 건수 (웹훅 유실 대비 주기 확인) |
+| 메서드 | 경로 | 권한 | 설명 | 구현 |
+| --- | --- | --- | --- | --- |
+| POST | `/v1/rankings/{id}/scores` | write | 스코어 제출 (`memberId`, `value`, `seasonNo`, `requestId`, `meta?`. `sourceSeq`는 LATEST 전용으로 2차 범위) | ✅ |
+| GET | `/v1/rankings/{id}/top?offset&size&memberId` | read | 현재 시즌 상위 페이징 (`size` 기본 20·최대 100, `memberId`를 주면 내 순위 함께) | ✅ |
+| GET | `/v1/rankings/{id}/members/{memberId}` | read | 현재 시즌 내 순위 | ✅ |
+| GET | `/v1/rankings/{id}/seasons/current` | read | 현재 시즌 정보 | ✅ |
+| GET | `/v1/rankings/{id}/seasons/{n}/results?offset&size` | read | 직전 시즌 결과 | 4단계 예정 |
+| GET | `/v1/rankings/{id}/seasons/{n}/results/{memberId}` | read | 직전 시즌 내 결과 | 4단계 예정 |
+| GET | `/v1/rankings/{id}/seasons/{n}/top?offset&size` | read | 시즌별 Top N (`top_size`까지 영구) | 4단계 예정 |
+| GET | `/v1/rankings/{id}/seasons/{n}/rewards?cursor` | reward | 전달 대상 목록 | 4단계 예정 |
+| POST | `/v1/rankings/{id}/seasons/{n}/rewards/ack` | reward | 전달 완료 (멱등, 7.7) | 4단계 예정 |
+| GET | `/v1/rewards/pending` | reward | 전달 대기 시즌 목록과 남은 건수 (웹훅 유실 대비 주기 확인) | 4단계 예정 |
 
 `sanctioned` 행은 플래그와 함께 반환한다. 표시 방식은 게임 서버가 정한다.
 
@@ -1080,7 +1118,7 @@ CREATE TABLE `instance_heartbeat` (
 - **적용은 `npm run migrate`로만 한다.** API와 워커는 기동 시 적용하지 않고 확인만 한다.
 - **DB별 디렉터리:** 메인은 `database/{tables,procedures}`, 로그 DB는 `database_log/{tables,procedures}`. 각 DB에 자기 `schema_migration`을 둔다.
 - `npm run migrate`는 `podium:migrate` 락(메인 DB) 하나 안에서 메인 → 로그 DB 순으로 적용한다. 하트비트 검사는 메인 DB에서 한 번, 역행 검사는 DB마다 한다.
-- 기동 시 확인: 메인 불일치는 기동 거부. 로그 DB는 접속되면 확인해 불일치 시 기동 거부, 접속 불가면 경고 후 기동(로그는 유실 허용).
+- 기동 시 확인: 메인 불일치는 기동 거부. 로그 DB는 접속되면 확인해 불일치 시 기동 거부, 네트워크 문제로 접속 불가면 경고 후 기동(로그는 유실 허용). 계정·DB 이름 오류(1044, 1045, 1049)는 설정 실수라 기동 거부.
 - 로그 DB 접속 정보와 계정은 메인과 별도이며 필수다. 비었을 때 메인 값으로 대체하지 않는다 (D-48).
 - `SP_EXEC_DDL`은 DB마다 하나다. 로그 DB의 파티션 이름은 `DATE` 파라미터로만 조립한다.
 - 컨벤션과 설계가 충돌하면 컬럼·키 구조는 설계를, 표기 규칙(COMMENT, 헤더 주석, charset/collation, 인덱스 이름)과 SP 이름은 컨벤션을 따른다.
@@ -1165,7 +1203,7 @@ GET_LOCK('podium:migrate') → 하트비트 검사 → 역행 검사 → 적용 
 
 - 갱신 규칙: BEST, SUM
 - 랭킹 유형: 시즌, 이벤트, 영구
-- 정산 전 과정, 보상 일괄 전달, 제재 처리, hall
+- 정산 전 과정, 보상 일괄 전달, 제재 처리, 시즌 Top N 조회
 - 하드 검증, 소프트 탐지(속도, 순위 급등), 어뷰징 포인트
 - 자가 복구 L1~L3
 
