@@ -52,6 +52,7 @@
 | 순위표에 반영이 안 됨, 오류 로그 없음 | 시즌 센티넬(`...:ready`)이 없다 — 정산 중이거나 재구축 전 | 의도된 동작이다(01_DESIGN 5.3). 조회는 2007을 받는다. 워커가 떠 있으면 다음 주기에 재구축되어 센티넬이 생긴다. 계속 없으면 워커 기동 여부와 `recovery cycle failed` 로그 확인 |
 | `rebuilt ranking=… season=… members=N in Xms` | 센티넬이 없어 재구축함(새 시즌, Redis 유실) | 정상. 100만 명 기준 BEST 약 6초, SUM 약 11초가 기준이다. 새 시즌이 아닌데 자주 나오면 Redis 재시작·메모리 축출 확인 |
 | 순위표가 비었거나 일부 멤버가 빠짐, 조회는 정상 응답(2007 아님), 오류 로그 없음 | Redis 축출 정책(`maxmemory-policy`가 `noeviction`이 아님)이 순위표 키를 지웠다. 센티넬이 남아 있어 빈 순위표를 정상으로 내보낸다 | `CONFIG GET maxmemory-policy`와 `INFO stats`의 `evicted_keys`를 확인한다. `noeviction`으로 바꾸고(01_DESIGN 1.7) 해당 시즌 센티넬(`…:ready`)을 지우면 다음 주기에 재구축된다. 그냥 두면 1시간 1회 점검이 전체 스캔으로 채울 때까지 틀린 순위가 나간다 |
+| 순위 값이 MySQL과 다름, 조회는 정상(2007 아님), 오류 로그 없음 | 시스템 밖에서 Redis 값이 바뀌었다(직접 쓰기, 코드 결함) — 자동 복구 창 밖이라 남는다(01_DESIGN 6.5) | Redis를 직접 건드렸는지 확인한다. 해당 시즌 센티넬(`…:ready`)을 지우면 다음 주기에 재구축된다(그동안 그 시즌 조회는 2007) |
 | `recovery audit mismatch … redis=A mysql=B — full reconcile` | 1시간 1회 점검에서 Redis 멤버 수가 MySQL보다 적음 | 같은 주기에 시즌 전체를 L2로 다시 훑어 채운다(조회 중단 없음). 매번 반복되면 composite 계산 실패 행(`recovery skipped member`) 확인 |
 | `OOM command not allowed when used memory > 'maxmemory'` (반영 실패, `recovery cycle failed`) | Redis 메모리 한도 도달 (`noeviction`) | 원장은 안전하다. `maxmemory`를 늘리거나 끝난 시즌 키가 남았는지 확인한다. 늘리면 다음 주기에 재구축·반영이 따라잡는다 |
 | `recovery cycle failed` | 복구 주기 중 DB·Redis 오류 | 다음 주기에 다시 시도한다. 연속되면 DB·Redis 연결 확인 |
