@@ -196,6 +196,7 @@ podiumDE/
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
 ├── loadtest/load.mjs    # 부하 테스트 스크립트(로컬 전용, docs/06_LOAD_TEST.md)
 ├── loadtest/k6-submit.js # k6 제출 부하 스크립트(로컬 전용, docs/07_K6_LOAD_TEST.md)
+├── tests/recovery.mjs   # 자가 복구 회귀 테스트(로컬 전용, 강제 이격 → 복구 확인. npm run build 후 실행)
 └── docs/                # 설계 문서(위 목록)
 ```
 

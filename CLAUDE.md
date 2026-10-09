@@ -11,8 +11,9 @@
 - 여러 테이블을 잠그는 SP는 `database*/TABLE_LOCK_ORDER.md`의 순서를 따른다.
 
 ## 코드
-- 로그는 log4js만 쓴다. `console.log`는 쓰지 않는다(CLI가 키 원문을 stdout으로 내보내는 경우만 예외).
+- 로그는 log4js만 쓴다. `console.log`는 쓰지 않는다. 예외: CLI가 키 원문을 stdout으로 내보낼 때, 테스트·부하 스크립트(`tests/`, `loadtest/`)가 결과를 출력할 때.
 - `src/core`는 루트 파일(엔트리·CLI)을 import하지 않는다.
+- 회귀 테스트는 `tests/recovery.mjs`를 갱신한다(컨벤션 3장의 `api_test.ps1` 대신).
 
 ## 보안
 - `.env`, 비밀번호, API 키 원문은 저장소·로그·명령줄에 남기지 않는다.

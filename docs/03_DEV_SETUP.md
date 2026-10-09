@@ -130,6 +130,15 @@ API·워커는 기동 시 DB 스키마가 패키지와 같은지 확인만 하�
    시즌을 만드는 스케줄러는 4단계 구현 예정이라, 그전에는 `node loadtest/load.mjs setup`으로 테스트 랭킹 931(BEST)·932(SUM)를 만들어 쓰고,
    끝나면 `node loadtest/load.mjs clean`으로 지운다.
 
+## 4.4 회귀 테스트
+
+```powershell
+npm run build
+node tests/recovery.mjs      # 기본 3회 반복, 약 3분
+```
+
+로컬 DB·Redis에서 워커·API를 직접 띄워 Redis를 강제로 어긋나게 만들고 복구되는지 확인한다. 테스트 랭킹 941~945를 쓰고 끝나면 지운다. 끝난 뒤 30초 동안은 migrate가 거부된다(강제 종료로 남은 하트비트).
+
 ---
 
 # 5. 실행 확인
