@@ -73,6 +73,7 @@ const mainDb = {
  * @modified 2026-10-02 trisakion 로그 DB 접속 설정 추가 (D-48)
  * @modified 2026-10-06 trisakion API 수신 주소, 처리 제한 시간, Swagger UI 설정 추가
  * @modified 2026-10-07 trisakion Redis 접속 설정 추가
+ * @modified 2026-10-09 trisakion 복구 잡 설정 추가
  */
 export const config = {
     db: mainDb,
@@ -107,6 +108,15 @@ export const config = {
         keyPrefix: process.env.REDIS_KEY_PREFIX ?? '',
         /** 명령 하나의 제한 시간(ms). 넘으면 실패로 보고 응답을 진행한다 (D-53) */
         timeoutMs: int('REDIS_TIMEOUT_MS', 500),
+    },
+    /** 워커 복구 잡 (01_DESIGN 6.2~6.4) */
+    recovery: {
+        /** 주기(ms). 새 시즌이 열린 뒤 센티넬이 생기기까지, 놓친 반영이 따라잡히기까지의 최대 지연이다 */
+        intervalMs: int('RECOVERY_INTERVAL_MS', 5000),
+        /** 동기화 시각 안전마진(초). 최대 트랜잭션 시간보다 길어야 커밋이 늦은 행을 놓치지 않는다 */
+        marginSec: int('RECOVERY_MARGIN_SEC', 60),
+        /** MySQL에서 한 번에 읽는 행 수 (1~10000) */
+        chunk: int('RECOVERY_CHUNK', 1000),
     },
     /** npm run upgrade 설정. 명령이 없으면 upgrade가 1단계 전에 중단한다 */
     upgrade: {

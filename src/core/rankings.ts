@@ -1,10 +1,9 @@
 import type { Pool } from 'mysql2/promise';
-import { SortOrder, SpResult, TimeUnit } from '../core/codes.js';
-import { callSp } from '../core/db.js';
-import { BusinessException } from '../core/errors.js';
-import { startPeriodicLoad } from '../core/refresh.js';
+import { SortOrder, SpResult, TimeUnit, UpdateRule } from './codes.js';
+import { callSp } from './db.js';
+import { startPeriodicLoad } from './refresh.js';
 
-/** 랭킹 정의 재조회 주기. 순위 규칙은 불변이라 늦게 반영되는 것은 제출 빈도 한도뿐이다 */
+/** 랭킹 정의 재조회 주기. 순위 규칙은 불변이라 늦게 반영되는 것은 제출 빈도 한도와 새 랭킹뿐이다 */
 const REFRESH_INTERVAL_MS = 30_000;
 
 /** time_unit 코드 → 밀리초 (codes.TimeUnit) */
@@ -16,9 +15,10 @@ const TIME_UNIT_MS: Record<number, number> = {
 };
 
 /**
- * API가 메모리에 두는 랭킹 정의. 제출 빈도 검사, composite 계산, 순위 조회에 쓴다.
+ * 메모리에 두는 랭킹 정의. API(제출 빈도 검사, composite 계산, 순위 조회)와 워커(복구)가 함께 쓴다 (D-60).
  * 제출 허용 여부(status)는 SP_SUBMIT_SCORE가 원장 기준으로 판정하므로 여기 값으로 거부하지 않는다.
  * @author trisakion
+ * @modified 2026-10-09 trisakion api/에서 core/로 이동 — 워커와 같은 계산을 쓰기 위해 (D-60)
  */
 export interface RankingRule {
     /** 갱신 규칙 (codes.UpdateRule) — BEST는 ZADD GT/LT, 그 외는 version 비교로 Redis에 반영한다 */
@@ -35,21 +35,6 @@ export interface RankingRule {
 
 /** ranking_id → 정의. 재조회 때 통째로 바꿔 끼운다 */
 let rankings = new Map<number, RankingRule>();
-
-/**
- * 현재 시즌 (SP_GET_CURRENT_SEASON)
- * @author trisakion
- */
-export interface CurrentSeason {
-    seasonNo: number;
-    /** 시즌 시작 시각 (포함). composite 디코드 기준 */
-    startAt: Date;
-    /** 시즌 종료 시각 (미포함). 이 시각이 지나면 캐시를 버리고 다시 읽는다 */
-    endAt: Date;
-}
-
-/** ranking_id → 현재 시즌 조회. 진행 중인 조회도 넣어 경계 시각에 몰린 요청이 SP를 한 번만 부르게 한다 */
-const currentSeasons = new Map<number, Promise<CurrentSeason>>();
 
 /**
  * 랭킹 정의를 DB에서 읽어 메모리 목록을 바꾼다.
@@ -93,6 +78,16 @@ export function getRanking(rankingId: number): RankingRule | undefined {
 }
 
 /**
+ * Redis 반영 방식. BEST는 ZADD GT(ASC는 LT), 그 외는 version 비교다 (01_DESIGN 5.3).
+ * @param rule 랭킹 정의
+ * @returns BEST 여부와 비교 방향
+ * @author trisakion
+ */
+export function applyMode(rule: RankingRule): { best: boolean; cmp: 'GT' | 'LT' } {
+    return { best: rule.updateRule === UpdateRule.BEST, cmp: rule.sortOrder === SortOrder.ASC ? 'LT' : 'GT' };
+}
+
+/**
  * Redis ZSET score로 쓰는 composite를 계산한다 (01_DESIGN 5.2). 같은 점수면 먼저 달성한 쪽이 위에 오도록
  * 시즌 시작부터의 경과 시간을 하위 비트에 넣는다. 정산 정렬 인덱스(SP_SETTLING_EXCHANGE)의 시간 슬롯과 같은 식이다.
  * 2^53을 넘으면 double이 하위 비트를 잃어 동점 순서가 소리 없이 틀어지므로 예외로 막는다 — 등록 시 비트 예산(2.4) 검사 전까지는 이 검사가 유일한 방어선이다.
@@ -123,42 +118,4 @@ export function composite(rule: RankingRule, score: number, achievedAt: Date, se
  */
 export function decodeScore(rule: RankingRule, value: number): number {
     return Math.floor(value / 2 ** rule.timeBits);
-}
-
-/**
- * 랭킹의 현재 시즌을 돌려준다. 처음 한 번 SP로 읽고 end_at까지 메모리에서 쓴다 — 시즌당 랭킹마다 DB 조회 1회다.
- * 현재 시즌이 없으면(1301) 캐시하지 않는다. 종료된 랭킹을 계속 조회하면 요청마다 SP를 부른다.
- * 앱 시계가 DB보다 빠르면 경계 직후 잠시 SP가 지난 시즌을 돌려주고 매 요청 다시 읽는다. DB 시계를 따라잡으면 멈춘다.
- * @param pool 메인 DB 풀
- * @param rankingId 랭킹 ID
- * @returns 현재 시즌. 없으면 BusinessException(1301)
- * @author trisakion
- */
-export async function getCurrentSeason(pool: Pool, rankingId: number): Promise<CurrentSeason> {
-    const cached = currentSeasons.get(rankingId);
-    if (cached) {
-        // 진행 중인 조회가 실패하면 기다리던 요청도 같은 오류를 받는다.
-        const season = await cached;
-        if (season.endAt.getTime() > Date.now())
-            return season;
-        // 만료를 본 다른 요청이 이미 새 조회를 넣었으면 그것을 따른다.
-        if (currentSeasons.get(rankingId) !== cached)
-            return getCurrentSeason(pool, rankingId);
-    }
-    const load = callSp(pool, 'SP_GET_CURRENT_SEASON', [rankingId]).then(({ result, rows }) => {
-        if (result === SpResult.CURRENT_SEASON_NOT_FOUND)
-            throw new BusinessException(SpResult.CURRENT_SEASON_NOT_FOUND);
-        if (result !== SpResult.OK)
-            throw new Error(`SP_GET_CURRENT_SEASON result ${result}`);
-        const row = rows[0];
-        return { seasonNo: row.season_no as number, startAt: row.start_at as Date, endAt: row.end_at as Date };
-    });
-    currentSeasons.set(rankingId, load);
-    try {
-        return await load;
-    } catch (err) {
-        if (currentSeasons.get(rankingId) === load)
-            currentSeasons.delete(rankingId);
-        throw err;
-    }
 }

@@ -60,6 +60,8 @@ async function clean(d) {
     }
     await q('DELETE FROM ranking_season WHERE ranking_id IN (?)', [IDS]);
     await q('DELETE FROM ranking_definition WHERE ranking_id IN (?)', [IDS]);
+    // 워커 복구 잡이 남긴 동기화 시각·점검 시각도 픽스처의 일부다.
+    await q('DELETE FROM job_state WHERE ranking_id IN (?)', [IDS]);
     await q("DELETE FROM api_credential WHERE key_name LIKE 'load-%'");
     await LM.query('DELETE FROM log_ranking_submit WHERE ranking_id IN (?)', [IDS]);
     for (const id of IDS)

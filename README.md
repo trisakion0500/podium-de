@@ -15,7 +15,7 @@
   LIST COLUMNS 파티션) · Redis 7.4(실시간 순위표, MySQL의 투영)
 - **정량 현황**: 2단계(제출·조회 API) 완료. 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
 - **기술적 강조점**: 시즌 단위 파티션 EXCHANGE 아카이브 · composite score 동점 처리 ·
-  워터마크 차분 리컨실러 기반 자가 복구 · 동적 SQL을 `SP_EXEC_DDL` 하나로 격리
+  동기화 시각 차분 리컨실러 기반 자가 복구 · 동적 SQL을 `SP_EXEC_DDL` 하나로 격리
 
 설계의 단일 기준은 [`docs/01_DESIGN.md`](docs/01_DESIGN.md)(현재 설계)와
 [`docs/02_DECISIONS.md`](docs/02_DECISIONS.md)(결정과 이유)다. 이 README는 요약과 링크만 둔다.
@@ -83,7 +83,7 @@ Redis를 언제든 재구축 가능한 투영으로 다루는 구조를 직접 �
 ### 3. MySQL 커밋 후 Redis 반영 유실
 
 - **문제**: 프로세스가 MySQL 커밋 직후 종료되면 Redis 반영 실패 기록조차 남지 않는다.
-- **해결**: 즉시 재시도(L1) + `updated_at` 워터마크 차분 리컨실러(L2) + 센티넬 기반 전체
+- **해결**: 즉시 재시도(L1) + `updated_at` 동기화 시각 차분 리컨실러(L2) + 센티넬 기반 전체
   재구축(L3)의 3단 자가 복구. 상세: [01_DESIGN 6](docs/01_DESIGN.md#6-정합성과-자가-복구)
 
 ---
@@ -161,7 +161,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 podiumDE/
 ├── src/
 │   ├── api.ts           # API 프로세스 엔트리
-│   ├── worker.ts        # 워커 프로세스 엔트리(스케줄러·리컨실러는 3~4단계에서 추가 예정)
+│   ├── worker.ts        # 워커 프로세스 엔트리(복구 잡 등록, 시즌 스케줄러는 4단계 구현 예정)
 │   ├── migrate.ts       # 마이그레이션 적용 CLI(npm run migrate)
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
 │   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
@@ -170,18 +170,21 @@ podiumDE/
 │   │   ├── migration.ts # 마이그레이션 적용·기동 시 스키마 확인
 │   │   ├── heartbeat.ts # 인스턴스 하트비트
 │   │   ├── server.ts    # Fastify 공통 처리(요청 로그·마스킹, 시간 초과, 오류 변환, Swagger, /health)
-│   │   ├── redis.ts     # node-redis 클라이언트, 반영·빈도·조회 Lua, 명령 제한 시간, 재시도
+│   │   ├── redis.ts     # node-redis 클라이언트, 반영·빈도·조회·재구축 교체 Lua, 센티넬, 명령 제한 시간, 재시도
+│   │   ├── rankings.ts  # 랭킹 정의 메모리 캐시, composite 계산·디코드(API·워커 공용)
 │   │   ├── refresh.ts   # 메모리 목록 주기 재조회(키·랭킹 정의 공용)
 │   │   ├── errors.ts    # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
 │   │   ├── codes.ts     # 상태·구분값 코드와 결과 코드(SpResult·ApiResult)
 │   │   ├── db.ts        # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001은 BusinessException), GET_LOCK 헬퍼
 │   │   ├── logger.ts    # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
 │   │   └── config.ts    # 환경변수 로딩
-│   └── api/             # API 도메인
-│       ├── auth.ts      # API 키 인증 가드(활성 키 메모리 목록, 권한 비트)
-│       ├── submit.ts    # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
-│       ├── ranks.ts     # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
-│       └── rankings.ts  # 랭킹 정의·현재 시즌 메모리 캐시, composite 계산·디코드
+│   ├── api/             # API 도메인
+│   │   ├── auth.ts      # API 키 인증 가드(활성 키 메모리 목록, 권한 비트)
+│   │   ├── submit.ts    # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
+│   │   ├── ranks.ts     # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
+│   │   └── seasons.ts   # 현재 시즌 메모리 캐시(end_at까지)
+│   └── worker/          # 워커 잡
+│       └── recovery.ts  # 자가 복구 잡(L2 리컨실러, L3 재구축, 보조 점검)
 ├── database/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)
@@ -359,7 +362,8 @@ migrate가 하트비트로 거부되면
   - ✅ 순위 조회 API (상위, 내 순위, 현재 시즌)
   - ✅ 부하 테스트 — API 2개로 피크 제출 2,300건/초, p99 130ms 이하 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
   - ✅ k6 대조 측정 — 표준 도구로 API 1대 안정 범위(제출 1,500건/초, p99 95.8ms) 재확인, 따라 하기 절차 포함 ([07_K6_LOAD_TEST](docs/07_K6_LOAD_TEST.md))
-- ⬜ 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
+- ✅ 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
+  - ✅ 워커 복구 잡 — 시즌마다 센티넬이 없으면 재구축, 있으면 동기화 시각 차분 반영, 시작 60초 전 미리 준비, 1시간 1회 건수 점검 (D-60)
 - ⬜ 4단계: 시즌 스케줄러(생성, 상태 전이, 정산, 전달)
 - ⬜ 5단계: 아카이브 로테이션
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징

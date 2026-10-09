@@ -4,7 +4,7 @@ import { ProcessType } from './core/codes.js';
 import { config } from './core/config.js';
 import { createPool } from './core/db.js';
 import { logger } from './core/logger.js';
-import { startRankingRefresh } from './api/rankings.js';
+import { startRankingRefresh } from './core/rankings.js';
 import { registerRankRoutes } from './api/ranks.js';
 import { closeRedis, createRedis } from './core/redis.js';
 import { buildServer } from './core/server.js';

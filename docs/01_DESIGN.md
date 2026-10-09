@@ -67,10 +67,10 @@
 | composite score | 점수와 달성 시각을 정수 하나로 합친 값. Redis 정렬만으로 "같은 점수면 먼저 달성한 쪽이 위"가 된다 | 5.2 |
 | 비트 예산 | composite가 정확하려면 53비트(double의 정수 정밀도) 안에 들어가야 한다. 점수 비트 + 시간 비트 ≤ 53을 등록 시 검사한다 | 2.4 |
 | 시간 슬롯 | 달성 시각을 `time_unit`(초, 분 등)으로 내림한 값. 같은 점수·같은 슬롯이면 `member_id` 순이다 | 5.2 |
-| 센티넬 (`:ready`) | Redis에 "이 시즌 순위표에 써도 된다"고 표시하는 키. 없으면 반영은 버리고 조회는 2007로 응답한다 | 5.3 |
+| 센티넬 (`:ready`) | Redis에 "이 시즌 순위표에 써도 된다"고 표시하는 키. 없으면 반영은 버리고 조회는 2007로 응답한다. 값은 Redis가 따라잡은 DB 시각 T(ms)다 | 5.3, 6.2 |
 | 자가 복구 L1·L2·L3 | Redis가 MySQL과 어긋났을 때 맞추는 3단계. L1 즉시 재시도, L2 리컨실러, L3 전체 재구축 | 6장 |
 | 리컨실러 | 워커가 N초마다 MySQL에서 최근 바뀐 행을 읽어 Redis와 다르면 다시 반영하는 잡(L2) | 6.2 |
-| 워터마크 (checkpoint) | 리컨실러가 "이 시각까지 확인했다"고 남기는 `updated_at` 기준 시각. `job_state`에 저장한다 | 6.2 |
+| 동기화 시각 (`synced_at`) | 리컨실러가 "이 시각까지 바뀐 행은 Redis에 맞췄다"고 남기는 `updated_at` 기준 시각. MySQL `job_state.synced_at`과 Redis 센티넬 값에 함께 둔다 | 6.2 |
 | 재구축 | Redis 순위표를 MySQL에서 처음부터 다시 만드는 것(L3) | 6.3 |
 | 가순위 | 시즌 마감 후 제재를 반영하기 전에 매기는 임시 순위. 검수 뒤 확정한다 | 7.3 |
 | 검수 | 순위 확정 전에 GM이 어뷰징을 확인하는 기간(`review_period`) | 7.5 |
@@ -80,6 +80,33 @@
 | 중단 패치 / 롤링 | 중단 패치: 전체 중지 → migrate → 기동(DB 변경이 있을 때). 롤링: 서버를 하나씩 교체(DB 변경이 없을 때) | 11.6 |
 | p50·p95·p99 | 응답 시간을 빠른 순으로 줄 세웠을 때 50%·95%·99% 지점의 값. p99 100ms는 "100건 중 99건이 100ms 안에 끝났다"는 뜻 | — |
 | N+1 (서버 대수) | 필요한 대수 N에 장애·배포 대비 1대를 더 두는 것. ORM의 "N+1 쿼리 문제"와 무관하다 | — |
+| MAU / DAU | 월간·일간 활성 이용자 수. 규모 목표의 기준이다 | 1.7 |
+
+### 1.7 규모 목표
+
+**설치본 하나당 MAU 100만을 목표로 한다 (D-61).** 이를 넘는 대형 게임은 이 구조를 그대로 늘리지 않고 별도로 구축한다.
+
+| 항목 | 목표 | 산정 |
+| --- | --- | --- |
+| MAU | 100만 | — |
+| DAU | 20만 | MAU의 20% |
+| 제출 평균 | 약 46건/초 | DAU × 1인 하루 20회 ÷ 86,400 |
+| 제출 피크 | 약 460건/초 | 평균의 10배 (D-02와 같은 배수, 이벤트 시작 직후 몰림 포함) |
+| 시즌 참가자 | 최대 100만 | 랭킹 하나에 MAU 전원이 참가하는 경우 |
+| Redis 메모리 | 랭킹·시즌 하나에 BEST 약 90MB, SUM 약 140MB. 재구축 중에는 그 시즌만 약 2배 | 100만 명 실측: BEST 약 95바이트/명, SUM 약 148바이트/명 (version HASH 포함) |
+| 재구축 시간 | 시즌 하나에 BEST 약 6초, SUM 약 11초. 그동안 그 시즌 조회는 2007 | 100만 명 로컬 실측 (BEST 약 16만 행/초, SUM 약 8.8만 행/초) |
+
+- **여유:** 부하 테스트에서 API 2대로 2,300건/초(목표 피크의 약 5배)를 처리했다 ([06_LOAD_TEST](06_LOAD_TEST.md)). 운영 권장은 API 2대(1대 안정 한계 1,500건/초, N+1)다.
+- **Redis 운영 조건 (규모와 무관):**
+  - `maxmemory-policy noeviction`. 축출 정책이 있으면 메모리가 모자랄 때 라이브 순위표를 조용히 지운다. 센티넬이 남아 있으면 조회가 2007이 아니라 비거나 일부만 남은 순위를 정상처럼 돌려준다. `noeviction`이면 쓰기가 오류로 실패하고, 반영 실패와 복구 실패가 로그로 드러난다.
+  - `maxmemory`는 진행 중인 모든 시즌 키의 합에, 가장 큰 시즌 하나만큼(재구축 여유)을 더한 값 이상으로 둔다.
+  - 큰 키 삭제는 코드가 `UNLINK`로 한다(재구축 교체·임시 키 정리. 시즌 키 삭제는 4단계 구현 예정). 동기 삭제는 100만 명 키에서 Redis 전체를 약 200ms 멈췄다.
+- **목표를 넘을 때 다시 볼 것 (별도 구축의 출발점):**
+  - MySQL 쓰기 분할 (단일 주 DB의 쓰기 한계)
+  - Redis 복제 필수 (재구축이 길어져 조회 2007 시간이 길어짐)
+  - 재구축 병렬화
+  - 1시간 1회 건수 점검(6.4) 방식
+  - 정산(7장)의 대량 UPDATE 시간
 
 ---
 
@@ -220,7 +247,7 @@ CREATE TABLE `ranking_reward_tier` (
 - 단일 시즌 랭킹: `wait_period`는 의미 없음 (보상은 일괄 전달)
 - `cycle_type = FIXED`이면 `cycle_value` 필수(1 이상), 그 외에는 NULL
 - 시즌 랭킹: `정산 시작 지연 + review_period < 시즌 길이`가 아니면 거부한다. 이전 시즌의 정산 대기와 검수가 다음 시즌 종료 전에 끝나야 정산이 밀리지 않는다. 시즌 길이는 DAILY 1일, WEEKLY 7일, MONTHLY 28일(가장 짧은 달), FIXED `cycle_value`초
-  - 정산 시작 지연 = `max(settle_delay, 리컨실러 안전마진 + 리컨실러 실행 주기)`. 정산은 `settle_at`과 함께 리컨실러 워터마크가 `end_at + 안전마진`을 넘어야 시작하므로(7.1, 6.2), `settle_delay`를 짧게 잡아도 이보다 일찍 시작하지 않는다
+  - 정산 시작 지연 = `max(settle_delay, 리컨실러 안전마진 + 리컨실러 실행 주기)`. 정산은 `settle_at`과 함께 리컨실러 동기화 시각이 `end_at + 안전마진`을 넘어야 시작하므로(7.1, 6.2), `settle_delay`를 짧게 잡아도 이보다 일찍 시작하지 않는다
   - 안전마진과 실행 주기는 설정값이다. 짧은 주기로 테스트할 때는 이 값도 함께 줄인다
 - `wait_period`는 제한하지 않는다. 시즌 사이의 공백이라 정산과 겹치지 않는다 (예: 7일 시즌을 한 달에 한 번)
 - 최소 주기는 두지 않는다. 주기가 짧을수록 시즌마다 운영 테이블 파티션 DDL(11.1)과 정산이 자주 일어난다
@@ -268,7 +295,7 @@ CREATE TABLE `ranking_season` (
 - **등록 시:** `ranking_definition` INSERT와 같은 트랜잭션에서 첫 시즌들을 생성한다.
 - **이후:** 스케줄러가 현재 시점부터 일정 주기 앞까지 시즌 행을 유지한다. `INSERT IGNORE`로 멱등하게 처리한다.
 - **시즌 행 생성 시:** 해당 `(ranking_id, season_no)` 파티션을 `ranking_entry`, `ranking_submit_key`에 추가한다.
-- **OPEN 전이 시:** Redis 센티넬(`:ready`)을 설정한다 (5.3).
+- **OPEN 전이 시:** Redis는 다루지 않는다. 센티넬은 복구 잡이 `start_at` 60초 전부터 미리 설정한다 (5.3, D-60).
 
 ### 3.4 관리자 수정 범위
 
@@ -467,7 +494,7 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 | --- | --- | --- |
 | `rk:{rankingId}:s:{seasonNo}` | ZSET | 순위표 |
 | `rk:{rankingId}:s:{seasonNo}:ver` | HASH | member별 version (SUM, LATEST) |
-| `rk:{rankingId}:s:{seasonNo}:ready` | STRING | 쓰기 허용 센티넬 (5.3) |
+| `rk:{rankingId}:s:{seasonNo}:ready` | STRING | 쓰기 허용 센티넬 (5.3). 값은 따라잡은 DB 시각 T(ms) (6.2) |
 | `rk:{rankingId}:rl:{memberId}` | STRING | 제출 빈도 카운터 (TTL) |
 
 `{rankingId}` 해시태그로 한 랭킹의 키를 같은 클러스터 슬롯에 둔다.
@@ -507,11 +534,11 @@ BEST는 더 좋은 기록일수록 composite가 DESC면 커지고 ASC면 작아�
 ```lua
 -- version Lua
 -- KEYS[1] = rk:{id}:s:{n}, KEYS[2] = rk:{id}:s:{n}:ver, KEYS[3] = rk:{id}:s:{n}:ready
--- ARGV: member, composite, version
+-- ARGV: member, composite, version, allowEqual ('1': 리컨실러, 같은 version도 씀 — 6.2)
 if redis.call('EXISTS', KEYS[3]) == 0 then return -1 end
 local cur = tonumber(redis.call('HGET', KEYS[2], ARGV[1]) or '0')
 local v = tonumber(ARGV[3])
-if v <= cur then return 0 end
+if v < cur or (v == cur and ARGV[4] ~= '1') then return 0 end
 redis.call('HSET', KEYS[2], ARGV[1], v)
 redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
 return 1
@@ -521,7 +548,7 @@ SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한�
 
 **센티넬 조건이 필요한 이유:** 반영 재시도가 정산의 시즌 키 삭제보다 늦게 도착하면 지운 키가 멤버 몇 명으로 되살아나고, 아무도 지우지 않아 메모리에 남는다. API 인스턴스가 많을수록 확률이 커진다. 센티넬이 없으면 반영을 버리며, 정산은 MySQL 기준이므로 손실이 없다.
 
-- 센티넬은 시즌이 OPEN될 때 스케줄러가 설정한다. 설정 전 반영은 버려지고 리컨실러가 따라잡는다.
+- 센티넬은 복구 잡이 설정한다(D-60). `start_at` 60초 전부터 대상이 되며, 센티넬이 없으면 재구축(6.3)한다. 시작 전 시즌은 비어 있어 센티넬 설정만 하므로 시작 시각에 순위표가 열려 있다. 시작 전 제출은 SP가 시각으로 거부한다(1103).
 - 재구축(6.3) 중에도 센티넬이 없으므로 라이브 키 반영은 버려지며, 재구축의 따라잡기 단계가 반영한다.
 
 ### 5.4 조회
@@ -534,7 +561,7 @@ SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한�
 - 순위 = 인덱스 + 1.
 - 표시용 정보(닉네임 등)는 저장하지 않는다. 게임 서버가 조합한다.
 - 상위 페이징과 내 순위는 Lua 스크립트 하나로 읽는다(`top?memberId=`). 센티넬 확인과 두 조회가 같은 시점 값이다.
-- 센티넬이 없거나(OPEN 전, 재구축 중) Redis를 쓸 수 없으면 2007(503)으로 응답한다. 일부만 찬 순위표를 내보내지 않는다.
+- 센티넬이 없거나(준비 전 — 워커 정지·시즌 행 지연, 재구축 중) Redis를 쓸 수 없으면 2007(503)으로 응답한다. 일부만 찬 순위표를 내보내지 않는다.
 - 조회할 시즌은 API가 랭킹별로 `SP_GET_CURRENT_SEASON`으로 읽어 `end_at`까지 메모리에 둔다(D-58). 현재 시즌은 제출과 같이 시각으로 정한다.
 - 응답 행은 순위, `memberId`, 스코어다. 달성 시각은 composite에 time_unit 단위로 내림되어 있어 내보내지 않는다.
 - 순위표에 없는 멤버는 오류가 아니라 `rank: null`이다.
@@ -543,10 +570,13 @@ SUM 랭킹은 증분 부호와 무관하게 항상 version 경로를 사용한�
 
 - 기본값 RDB 스냅샷. 설정으로 끌 수 있다.
 - AOF는 사용하지 않는다. MySQL이 원장이므로 영속화는 재시작 후 재구축 시간 단축 용도뿐이다.
+- RDB 스냅샷으로 복원되면 센티넬도 함께 돌아오므로 재구축하지 않고, 스냅샷 이후 유실분은 L2가 센티넬 값부터 다시 읽어 메운다(6.2).
 
 ### 5.6 시즌 키 삭제
 
-가순위 생성(7.3)이 끝나면 해당 시즌 키를 삭제한다. **센티넬을 먼저 삭제**한 뒤 ZSET과 version HASH를 삭제한다. 지난 시즌 조회는 `ranking_entry`의 `final_rank`로 처리한다.
+가순위 생성(7.3)이 끝나면 해당 시즌 키를 삭제한다. **센티넬을 먼저 삭제**한 뒤 ZSET과 version HASH를 `UNLINK`로 삭제한다(1.7). 지난 시즌 조회는 `ranking_entry`의 `final_rank`로 처리한다.
+키 삭제는 복구 잡과 같은 락(`podium:recovery`)을 잡고 한다. 재구축이 삭제 뒤에 센티넬을 되살리지 않게 하기 위해서다 (D-60).
+같은 락 안에서 시즌 상태를 SETTLING으로 바꾸는 커밋을 키 삭제보다 먼저 한다. 복구 잡은 SETTLING 이후 시즌을 대상에서 빼므로, 삭제 뒤 다음 주기가 그 시즌을 다시 재구축하지 않는다.
 
 ---
 
@@ -561,23 +591,31 @@ Redis 반영 실패 시 짧은 백오프로 재시도한다.
 - 명령마다 제한 시간(`REDIS_TIMEOUT_MS`, 기본 500ms)을 건다 (D-53).
 - Redis 연결이 끊긴 동안은 시도하지 않는다. 요청마다 실패 로그를 남기는 대신 연결 상태가 바뀔 때만 남긴다.
 
-### 6.2 L2 워터마크 차분 리컨실러
+### 6.2 L2 동기화 시각 차분 리컨실러
 
 프로세스가 MySQL 커밋 직후 종료되면 실패 기록이 남지 않는다. 이를 MySQL 쪽 변경분 스캔으로 보완한다.
 
 ```text
-매 N초 (OPEN 시즌 대상):
-  1. updated_at > (checkpoint − 안전마진) 행을 PK 순 청크로 조회 (마스터)
+매 N초 (RECOVERY_INTERVAL_MS, 기본 5초). 대상: start_at ≤ NOW + 60초, 상태 CLOSED 이하인 시즌 (D-60)
+  센티넬 없음 → L3 재구축 (6.3)
+  센티넬 있음 →
+  0. 스캔 시작 시 DB 시각 T를 받는다
+  1. updated_at > (min(동기화 시각, 센티넬 값) − 안전마진) 행을 (updated_at, member_id) 키셋 청크로 조회 (마스터)
   2. ranking_exclusion 대상 제외
   3. ZMSCORE로 Redis 현재 값 일괄 조회
   4. 계산한 composite와 다른 것만 반영 (5.3의 센티넬 확인 Lua)
-  5. checkpoint 전진
+  5. 센티넬 값 = T (센티넬이 있을 때만, SET XX), 동기화 시각 = T
 ```
 
-- 안전마진은 최대 트랜잭션 시간보다 길게 잡는다 (30~60초). 구문 실행 시각과 커밋 시각의 차이를 흡수한다.
+- 센티넬 값은 Redis가 따라잡은 시각이다. RDB 스냅샷 복원이나 레플리카 페일오버로 Redis가 과거로 돌아가면 센티넬 값도 함께 돌아가므로, 동기화 시각보다 이른 그 값부터 다시 읽어 빠진 구간을 메운다.
+- API 반영과 리컨실러가 같은 멤버를 동시에 쓰거나 같은 행을 다시 처리해도 결과가 같다. BEST는 `GT`/`LT`, SUM은 version 비교라 늦게 도착한 이전 값은 거부된다(5.3).
+- 리컨실러는 SUM에서 같은 version도 다시 쓴다. MySQL에서 방금 읽은 현재 행이라 덮어도 맞고, version HASH만 남고 ZSET 멤버가 빠진 경우를 고칠 수 있다. 더 큰 version이 이미 있으면 거부된다.
+
+- 안전마진은 최대 트랜잭션 시간보다 길게 잡는다 (`RECOVERY_MARGIN_SEC`, 기본 60초). 구문 실행 시각과 커밋 시각의 차이를 흡수한다. `SP_SUBMIT_SCORE`는 락 대기를 문장마다 5초로 제한해 최대 트랜잭션 시간을 40초 안으로 묶는다.
+- 동기화 시각은 앱 시각이 아니라 DB 시각 T로 기록한다. `updated_at`도 DB 시각이라 호스트 시계 차이가 끼지 않는다.
 - 반드시 마스터에서 읽는다. 레플리카는 복제 지연으로 안전마진이 깨진다.
-- checkpoint는 `job_state`에 두고, `GET_LOCK`으로 단일 실행을 보장한다.
-- 같은 스캔에서 어뷰징 소프트 탐지(9.2)를 수행한다.
+- 동기화 시각은 `job_state.synced_at`(`job_name = 'reconciler'`)에 두고, `GET_LOCK('podium:recovery')`로 단일 실행을 보장한다.
+- 같은 스캔에서 어뷰징 소프트 탐지(9.2)를 수행한다 (6단계 구현 예정).
 - 리컨실러도 라이브 키에 쓰므로 센티넬 확인 Lua를 사용한다. 그래야 정산의 키 삭제 후 키가 되살아나지 않는다. 예외는 재구축 따라잡기(6.3)로, 센티넬과 무관한 임시 키에 쓴다.
 
 ### 6.3 L3 전체 재구축
@@ -585,21 +623,28 @@ Redis 반영 실패 시 짧은 백오프로 재시도한다.
 Redis 유실(퍼시스턴스 없는 재시작, 페일오버 데이터 손실) 대응.
 
 ```text
-감지: OPEN 시즌인데 rk:{id}:s:{n}:ready 센티넬 없음
+감지: 대상 시즌(6.2)인데 rk:{id}:s:{n}:ready 센티넬 없음 (새로 열린 시즌 포함)
   1. 임시 키 rk:{id}:s:{n}:rebuild(및 :rebuild:ver)에 MySQL 파티션을 PK 청크로 적재 (제외 대상 건너뜀)
-  2. 재구축 시작 시점의 워터마크부터 L2 방식으로 임시 키에 따라잡기
-  3. RENAME으로 라이브 키에 원자적 교체 (ZSET, version HASH)
-  4. 센티넬 설정
-  5. 3~4 사이에 버려진 반영은 다음 L2 주기가 따라잡음
+  2. 재구축 시작 DB 시각 T − 안전마진부터 L2 방식으로 임시 키에 따라잡기
+  3. Lua 하나로 교체: 임시 ZSET이 적재 수보다 작으면 거부 → 라이브 키 UNLINK → 임시 키 RENAME → 센티넬 = T (D-60)
 ```
 
+- 교체 전 적재 수 검사는 재구축 도중 Redis가 재시작·페일오버돼 앞 청크를 잃은 임시 키를 라이브로 올리지 않기 위해서다. 거부되면 이번 주기를 실패로 끝내고, 센티넬이 없으므로 다음 주기에 처음부터 다시 재구축한다.
+
 - 재구축 중 쓰기는 MySQL에 정상 적재되며 2단계와 이후 L2에서 반영된다.
+- 청크마다 락 보유를 확인하고(11.3), 잃었으면 즉시 중단한다. 남은 임시 키는 다음 재구축이 시작할 때 `UNLINK`로 지운다 — 그 위에 쌓으면 그 사이 제외된 멤버가 섞인다.
+- 기존 라이브 키는 `UNLINK`로 뗀다. `RENAME`이 덮어쓰며 지우면 동기 해제라 큰 시즌에서 Redis가 멈춘다(1.7).
 - 정산이 끝나 키를 삭제한 시즌(SETTLING 이후)은 재구축 대상이 아니다.
 - 재구축 중 조회는 "집계 중"(2007)을 반환한다.
 
 ### 6.4 보조 점검
 
-하루 1회 `ZCARD`와 MySQL `COUNT`를 비교한다. 불일치 시 L3를 트리거한다.
+시즌마다 1시간에 1회 `ZCARD`와 MySQL `COUNT`(제외 대상 빼고)를 비교한다. `ZCARD`가 작으면 센티넬을 유지한 채 시즌 전체를 L2로 다시 훑어 채운다. 마지막 점검 시각은 `job_state`(`job_name = 'recovery_audit'`)의 `last_run_at`에 둔다.
+
+- 재구축하지 않는 이유: 재구축 동안 조회가 2007로 막히고, composite를 계산할 수 없는 행이 있으면 재구축해도 다시 빠져 매번 반복된다. 점검 순간 반영 전인 신규 멤버로 생긴 거짓 양성도 조회에 영향이 없다.
+- `ZCARD`가 큰 경우는 보지 않는다. 점검 중 들어온 신규 멤버로 평소에도 조금 크다.
+- 주기가 1시간인 이유: 하루보다 짧은 시즌도 여러 번 점검되게 한다. 점검은 `COUNT` 한 번이라 가볍다. 시즌이 1시간보다 짧은 랭킹이 생기면 시즌 길이에 맞춘다.
+- 재구축이 끝나면 점검 시각도 기록한다. 방금 MySQL 기준으로 만든 순위표라, 새 시즌을 빈 채로 바로 점검하지 않는다.
 
 ---
 
@@ -610,7 +655,7 @@ Redis 유실(퍼시스턴스 없는 재시작, 페일오버 데이터 손실) �
 ```text
 NOW ≥ settle_at (= end_at + settle_delay)
 AND information_schema.INNODB_TRX에 trx_started < end_at 인 트랜잭션 없음
-AND 리컨실러 워터마크 > end_at + 안전마진
+AND 리컨실러 동기화 시각 > end_at + 안전마진
 ```
 
 `settle_delay`는 시각 검사를 통과해 이미 처리 중인 요청의 커밋을 기다리는 안전망이다. 조건 확인은 그 하한 위에서 실제 종료를 검증한다. (`INNODB_TRX` 조회는 `PROCESS` 권한 필요)
@@ -1040,7 +1085,7 @@ CREATE TABLE `api_credential` (
 | 테이블 | 용도 |
 | --- | --- |
 | `log_ddl_audit` | `SP_EXEC_DDL` 실행 SQL, 시작·종료 시각, 오류 정보 |
-| `job_state` | 잡별 워터마크(리컨실러 checkpoint 등), 마지막 실행 시각 |
+| `job_state` | 잡별 동기화 시각(리컨실러 등), 마지막 실행 시각 |
 | `instance_heartbeat` | 실행 중인 API·워커 인스턴스 (`instance_id`, `process_type`, `app_version`, `last_seen_at`) |
 
 - 인스턴스는 기동 후 주기적으로(예: 10초) 하트비트를 갱신하고(`SP_UPSERT_INSTANCE_HEARTBEAT`), 정상 종료 시 자기 행을 삭제한다(`SP_DELETE_INSTANCE_HEARTBEAT`). 최근 30초 안의 하트비트를 살아 있는 인스턴스로 본다.
@@ -1088,14 +1133,14 @@ CREATE TABLE `job_state` (
     `job_name`       VARCHAR(64)                NOT NULL                    COMMENT '잡 이름 (예: reconciler)',
     `ranking_id`     INT            UNSIGNED    NOT NULL                    COMMENT '대상 랭킹 ID (0:랭킹 무관, FK 없음)',
     `season_no`      INT            UNSIGNED    NOT NULL                    COMMENT '대상 시즌 번호 (0:시즌 무관, FK 없음)',
-    `watermark`      DATETIME(3)                            DEFAULT NULL    COMMENT '처리 완료 워터마크 (UTC, 리컨실러는 updated_at checkpoint)',
+    `synced_at`      DATETIME(3)                            DEFAULT NULL    COMMENT '동기화 시각 (UTC, 리컨실러는 이 시각까지 바뀐 행을 Redis에 맞춤)',
     `last_run_at`    DATETIME(3)                            DEFAULT NULL    COMMENT '마지막 실행 시각 (UTC)',
     `updated_at`     DATETIME(3)                NOT NULL                    COMMENT '행 갱신 시각 (UTC)',
     PRIMARY KEY (`job_name`, `ranking_id`, `season_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='워커 잡별 진행 상태';
 ```
 
-- 리컨실러 워터마크는 정산 시작 조건(7.1)에서 시즌별로 비교하므로 키에 `(ranking_id, season_no)`를 둔다. 랭킹과 무관한 잡은 `(0, 0)`을 쓴다.
+- 리컨실러 동기화 시각은 정산 시작 조건(7.1)에서 시즌별로 비교하므로 키에 `(ranking_id, season_no)`를 둔다. 랭킹과 무관한 잡은 `(0, 0)`을 쓴다.
 
 ```sql
 CREATE TABLE `instance_heartbeat` (

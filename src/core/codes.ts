@@ -251,7 +251,7 @@ export const ApiResult = {
     TIMEOUT: 2005,
     /** 제출 빈도 초과 (max_submit_per_min, Redis 카운터). SP를 거치지 않아 멱등 키가 없으므로 같은 requestId로 재시도한다 */
     TOO_MANY_REQUESTS: 2006,
-    /** 순위 조회 불가: 센티넬 없음(OPEN 전, 재구축 중, 01_DESIGN 6.3) 또는 Redis 연결 끊김·시간 초과. 잠시 후 재시도한다 */
+    /** 순위 조회 불가: 센티넬 없음(준비 전 — 워커 정지·시즌 행 지연, 재구축 중, 01_DESIGN 5.3·6.3) 또는 Redis 연결 끊김·시간 초과. 잠시 후 재시도한다 */
     RANKING_UNAVAILABLE: 2007,
     /** 분류되지 않은 앱 예외 */
     INTERNAL_ERROR: 5000,

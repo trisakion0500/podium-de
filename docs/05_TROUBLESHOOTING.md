@@ -20,6 +20,7 @@
 | `이미 적용된 마이그레이션이 변경되었습니다` | 적용된 테이블 파일(`V0xx`)을 고쳤다 | 파일을 원래대로 돌리고 변경은 새 `V` 파일로 추가 |
 | `SP_xxx이(가) DB에 없습니다. npm run migrate가 필요합니다` | 미적용 DB | `npm run migrate` |
 | `로그 DB(...) 접속 설정이 잘못되었습니다` | `DB_LOG_*` 계정·DB 이름 오류(1044/1045/1049) | 환경 변수 확인. 네트워크 수준 실패면 경고만 남기고 기동한다 |
+| `worker startup failed` | 워커가 기동 시 랭킹 정의를 읽지 못했다 | DB 연결과 `SP_LIST_RANKING_DEFINITION` 적용 여부 확인. 워커가 없으면 새 시즌 센티넬이 생기지 않아 조회가 계속 2007이다 |
 | `no active api credential — all requests will be rejected` | 활성 API 키가 없다 | `npm run credential -- create <이름> <권한>` |
 | upgrade `[2/5 wait stop] ... 멈추지 않았습니다` | 중지 명령 후에도 하트비트가 남았다 | 남은 인스턴스를 확인해 중지. 비정상 종료면 30초 뒤 재실행 |
 
@@ -39,21 +40,29 @@
 | 2005 / 503 | 처리 시간 초과. 서버에서는 반영됐을 수 있다 | 같은 `requestId`로 재시도 (반영됐으면 `replayed: true`) |
 | 50001 / 500 | DB 시스템 오류 | 같은 `requestId`로 재시도. 서버 로그의 `DB 오류 <errno> (<sqlstate>)`로 원인 확인 |
 | 1301 / 404 | 지금 시각에 해당하는 시즌이 없다 (시즌 사이 공백, 종료된 랭킹) | `seasons/current`로 확인. 시즌이 생성됐는지(스케줄러) 확인 |
-| 2007 / 503 | 순위표를 쓸 수 없다: 센티넬 없음(OPEN 전, 재구축 중) 또는 Redis 장애 | 잠시 후 재조회. 오래 계속되면 Redis 연결 로그와 재구축 상태 확인 |
+| 2007 / 503 | 순위표를 쓸 수 없다: 센티넬 없음(준비 전 — 워커 정지·시즌 행 지연, 재구축 중) 또는 Redis 장애 | 잠시 후 재조회. 센티넬은 시즌 시작 60초 전에 미리 생기므로 시즌 경계에서는 나지 않는다. 재구축은 100만 명 시즌 기준 BEST 약 6초, SUM 약 11초 걸린다. 그보다 오래 계속되면 Redis 연결 로그와 재구축 상태 확인 |
 
 ## 1.3 Redis
 
 | 증상 (로그) | 원인 | 영향과 조치 |
 |---|---|---|
-| `redis unavailable — scores are saved to MySQL only until it recovers` | Redis 접속 불가 | 제출은 성공한다(원장 MySQL). 빈도 검사는 통과로 동작한다. 복구되면 `redis ready`가 남는다. 장애 동안의 제출은 리컨실러가 순위표에 채운다(3단계 구현 예정) |
-| `redis apply gave up ... reconciler will catch up` | 첫 시도와 재시도 2회 모두 실패 | 리컨실러가 맞춘다(3단계 구현 예정). 잦으면 Redis 지연·`REDIS_TIMEOUT_MS` 확인 |
+| `redis unavailable — scores are saved to MySQL only until it recovers` | Redis 접속 불가 | 제출은 성공한다(원장 MySQL). 빈도 검사는 통과로 동작한다. 복구되면 `redis ready`가 남는다. 장애 동안의 제출은 워커 복구 잡이 순위표에 채운다(복구 후 한 주기 안) |
+| `redis apply gave up ... reconciler will catch up` | 첫 시도와 재시도 2회 모두 실패 | 워커 복구 잡이 다음 주기에 맞춘다. 잦으면 Redis 지연·`REDIS_TIMEOUT_MS` 확인 |
 | `redis rate limit check failed, allowing` | 빈도 검사 시간 초과 | 그 요청은 통과된다. 잦으면 Redis 지연 확인 |
-| 순위표에 반영이 안 됨, 오류 로그 없음 | 시즌 센티넬(`...:ready`)이 없다 — 정산 중이거나 재구축 전 | 의도된 동작이다(01_DESIGN 5.3). 조회는 2007을 받는다. 재구축(L3, 3단계 구현 예정) 후 반영된다 |
+| 순위표에 반영이 안 됨, 오류 로그 없음 | 시즌 센티넬(`...:ready`)이 없다 — 정산 중이거나 재구축 전 | 의도된 동작이다(01_DESIGN 5.3). 조회는 2007을 받는다. 워커가 떠 있으면 다음 주기에 재구축되어 센티넬이 생긴다. 계속 없으면 워커 기동 여부와 `recovery cycle failed` 로그 확인 |
+| `rebuilt ranking=… season=… members=N in Xms` | 센티넬이 없어 재구축함(새 시즌, Redis 유실) | 정상. 100만 명 기준 BEST 약 6초, SUM 약 11초가 기준이다. 새 시즌이 아닌데 자주 나오면 Redis 재시작·메모리 축출 확인 |
+| 순위표가 비었거나 일부 멤버가 빠짐, 조회는 정상 응답(2007 아님), 오류 로그 없음 | Redis 축출 정책(`maxmemory-policy`가 `noeviction`이 아님)이 순위표 키를 지웠다. 센티넬이 남아 있어 빈 순위표를 정상으로 내보낸다 | `CONFIG GET maxmemory-policy`와 `INFO stats`의 `evicted_keys`를 확인한다. `noeviction`으로 바꾸고(01_DESIGN 1.7) 해당 시즌 센티넬(`…:ready`)을 지우면 다음 주기에 재구축된다. 그냥 두면 1시간 1회 점검이 전체 스캔으로 채울 때까지 틀린 순위가 나간다 |
+| `recovery audit mismatch … redis=A mysql=B — full reconcile` | 1시간 1회 점검에서 Redis 멤버 수가 MySQL보다 적음 | 같은 주기에 시즌 전체를 L2로 다시 훑어 채운다(조회 중단 없음). 매번 반복되면 composite 계산 실패 행(`recovery skipped member`) 확인 |
+| `OOM command not allowed when used memory > 'maxmemory'` (반영 실패, `recovery cycle failed`) | Redis 메모리 한도 도달 (`noeviction`) | 원장은 안전하다. `maxmemory`를 늘리거나 끝난 시즌 키가 남았는지 확인한다. 늘리면 다음 주기에 재구축·반영이 따라잡는다 |
+| `recovery cycle failed` | 복구 주기 중 DB·Redis 오류 | 다음 주기에 다시 시도한다. 연속되면 DB·Redis 연결 확인 |
+| `reconcile from redis sentinel … (behind db synced_at — redis restored or failed over?)` | 센티넬 값이 DB 동기화 시각보다 이르다 — Redis가 RDB 스냅샷 복원이나 레플리카 페일오버로 과거로 돌아갔다 | 자동으로 센티넬 값부터 다시 읽어 메운다(01_DESIGN 6.2). 조치 불필요. Redis 재시작·페일오버 원인 확인. 이전 버전이 만든 센티넬(`'1'`)이 남은 시즌은 첫 주기에 한 번 나오고 전체를 훑는다 |
+| `rebuild aborted: temp keys lost members …` (`recovery cycle failed`) | 재구축 도중 Redis가 재시작·페일오버돼 임시 키 일부를 잃었다 | 교체하지 않았으므로 틀린 순위가 나가지 않는다. 다음 주기에 처음부터 다시 재구축한다. 반복되면 Redis 재시작 원인 확인 |
 
 ## 1.4 DB·잡
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
+| 제출이 500(`DATABASE_ERROR`), 서버 로그에 `SP_SUBMIT_SCORE: DB 오류 1205` | 같은 멤버나 같은 requestId의 다른 제출이 행 락을 5초 넘게 잡았다 | 게임 서버가 같은 `requestId`로 재시도하면 처리된다(멱등). 잦으면 긴 트랜잭션이나 같은 멤버로 몰린 동시 제출을 확인한다 |
 | DDL 실패 errno 1205 | 운영 테이블 MDL 대기가 2초를 넘었다 (긴 트랜잭션) | 잡이 다음 주기에 상태를 다시 보고 재시도한다(워커 잡은 4단계 구현 예정). 반복되면 긴 트랜잭션을 찾는다 |
 | `log_ddl_audit`에 `status = 0` 행 | DDL 실행 중 세션이 끊겼다 | 대상 테이블의 실제 상태를 확인. 관리 SP는 상태를 보고 이어서 진행한다 |
 | `SP_SETTLING_EXCHANGE` 1007 | settling 테이블에 다른 시즌 행이 있다 | 사람이 확인할 상황이다. 어느 시즌이 남았는지 보고 처리 |
@@ -86,7 +95,7 @@
 ## 2.4 composite 정밀도 손실
 
 - **원인:** `score × 2^time_bits`가 2^53을 넘으면 double이 하위(시간) 비트를 잃어 동점 순서가 소리 없이 틀어진다. 등록 시 비트 예산 검사(01_DESIGN 2.7)는 아직 없다.
-- **해결:** composite 계산에서 안전 정수가 아니면 예외로 막는다. 응답은 성공으로 두고 리컨실러에 맡긴다(3단계 구현 예정). 근본 대책은 등록 시 비트 예산 검사(01_DESIGN 2.7)다.
+- **해결:** composite 계산에서 안전 정수가 아니면 예외로 막는다. 응답은 성공으로 두고 리컨실러에 맡긴다. 리컨실러도 같은 행에서 같은 이유로 건너뛰며 `recovery skipped member` 로그를 남긴다. 근본 대책은 등록 시 비트 예산 검사(01_DESIGN 2.7)다.
 
 ## 2.5 RESULT 0 뒤 데이터 SELECT 실패가 성공으로 처리됨
 
@@ -107,3 +116,15 @@
 
 - **원인:** SIGINT 뒤 SIGTERM이 오면 종료 절차가 두 번 돌고, 두 번째 `pool.end()`의 거부가 처리되지 않은 rejection으로 프로세스를 죽였다. 처리 중단 단계가 실패해도 같았다.
 - **해결:** 종료 절차를 한 번만 실행하고, 처리 중단이 실패해도 하트비트 삭제·풀 종료·로그 flush는 진행한다.
+
+## 2.9 재구축 교체 때 Redis 전체가 약 200ms 멈춤
+
+- **증상:** 100만 명 시즌을 두 번째로 재구축할 때 Redis PING이 186~215ms 걸렸다. SLOWLOG에 교체 Lua 안의 `RENAME`이 같은 시간으로 남았다.
+- **원인:** `RENAME`이 기존 라이브 키를 덮어쓰면서 100만 개 원소를 메인 스레드에서 동기로 해제했다. 그동안 다른 모든 명령(제출 반영, 조회)이 기다린다.
+- **해결:** 교체 Lua가 기존 라이브 키를 `UNLINK`로 먼저 뗀 뒤 `RENAME`한다. `UNLINK`는 해제를 백그라운드 스레드로 넘기므로 lazyfree 설정과 무관하다. 수정 후에는 교체가 SLOWLOG(10ms 이상)에 나타나지 않았다. 4단계의 시즌 키 삭제도 같은 이유로 `UNLINK`를 쓴다(01_DESIGN 5.6).
+
+## 2.10 Redis 축출 정책이 순위표를 조용히 지움
+
+- **증상:** 위 수정 뒤에도 SUM 재구축에서 PING이 210~240ms 나왔다. 그 시간대 SLOWLOG에는 느린 명령이 없었다.
+- **원인:** LATENCY 모니터에 `eviction-del 216~255ms`가 남았다. 로컬 Redis가 `maxmemory 256MB`, `allkeys-lru`라, 재구축 중 라이브 키와 임시 키가 함께 있는 동안(약 280MB) 한도를 넘겨 키 31개를 축출했다. 축출 정책은 라이브 순위표도 지울 수 있다. 센티넬이 남아 있으면 조회가 2007이 아니라 비거나 일부만 남은 순위를 정상처럼 돌려준다.
+- **해결:** Redis를 `maxmemory-policy noeviction`으로 두고 `maxmemory`를 "진행 중인 시즌 키 합 + 가장 큰 시즌 하나" 이상으로 잡는다(01_DESIGN 1.7). 로컬은 1GB로 바꿨고, 다시 측정했을 때 축출 0개, 최대 PING 11~22ms였다.

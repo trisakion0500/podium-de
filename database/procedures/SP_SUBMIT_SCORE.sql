@@ -40,6 +40,11 @@ BEGIN
     --          행이 없으면 score 0, version 0, achieved_at NULL이다(D-32). 앱은 version 0이면 Redis 반영을 건너뛴다.
     --        - 시즌 파티션이 없으면(시즌 행만 있고 SP_PARTITION_ADD 전) INSERT가 실패해 50001이 된다. 다른 파티션으로
     --          조용히 들어가지 않는다(4.2).
+    --        - 락 대기는 문장마다 5초로 줄인다(innodb_lock_wait_timeout, 기본 50초). updated_at은 SP 시작 시각인데
+    --          커밋이 리컨실러 안전마진(60초)보다 늦으면 변경분 스캔이 그 행을 지나쳐 Redis 반영이 실패했을 때 영영 빠진다.
+    --          잠그는 문장은 많아야 4개, txn 루프 재시도까지 8개라 40초 안에 끝나거나 1205로 실패한다(50001,
+    --          같은 requestId로 재시도). 세션 변수라 풀 커넥션의 다른 SP에 남지 않게 끝에서 되돌린다.
+    -- 수정 : 2026.10.09 trisakion 락 대기 5초 제한 (리컨실러 안전마진 보장)
     -- ------------------------------------------------------------------------------------------------------------ --
     DECLARE v_now              DATETIME(3)        DEFAULT NOW(3);
     DECLARE v_status           TINYINT UNSIGNED;
@@ -66,13 +71,17 @@ BEGIN
     DECLARE sql_state          CHAR(5)            DEFAULT '00000';
     DECLARE error_no           INT                DEFAULT 0;
     DECLARE error_message      VARCHAR(512)       DEFAULT '';
+    DECLARE v_prev_lock_wait   INT UNSIGNED       DEFAULT @@SESSION.innodb_lock_wait_timeout;
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         GET DIAGNOSTICS CONDITION 1
             sql_state = RETURNED_SQLSTATE, error_no = MYSQL_ERRNO, error_message = MESSAGE_TEXT;
         ROLLBACK;
+        SET SESSION innodb_lock_wait_timeout = v_prev_lock_wait;
         SELECT 50001 AS RESULT, sql_state AS SQL_STATE, error_no AS ERROR_NO, error_message AS ERROR_MESSAGE;
     END;
+
+    SET SESSION innodb_lock_wait_timeout = 5;
 
     proc_block: BEGIN
         -- ---------------------------------------------------------------------------------------------- 검증 (트랜잭션 전)
@@ -247,5 +256,8 @@ BEGIN
         SELECT i_season_no AS season_no, v_season_start AS season_start_at, v_score AS score,
                v_achieved_at AS achieved_at, v_version AS version, v_replayed AS replayed;
     END proc_block;
+
+    -- 모든 LEAVE proc_block이 여기로 온다.
+    SET SESSION innodb_lock_wait_timeout = v_prev_lock_wait;
 END$$
 DELIMITER ;

@@ -31,7 +31,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 | `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (지급 후 제재 시 `sanctioned`는 제재 처리가 갱신) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_season_top) |
 | `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#92-소프트-탐지-받되-표시), [9.3](01_DESIGN.md#93-어뷰징-포인트) |
 | `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
-| `job_state` | 워커 잡별 워터마크 (리컨실러 checkpoint 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
+| `job_state` | 워커 잡별 동기화 시각 (리컨실러 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
 | `instance_heartbeat` | 실행 중인 API·워커 인스턴스 | API·워커 하트비트 | — | — | 정상 종료 시 삭제, 1시간 경과 행 정리 | [11.4](01_DESIGN.md#114-운영-테이블) |
 | `schema_migration` | 마이그레이션 적용 이력 | 러너 (테이블도 러너가 직접 생성) | — | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
 
@@ -136,7 +136,7 @@ erDiagram
         varchar job_name PK
         int ranking_id PK "0 = 랭킹 무관"
         int season_no PK "0 = 시즌 무관"
-        datetime watermark
+        datetime synced_at
     }
     instance_heartbeat {
         char instance_id PK "UUID"
@@ -193,21 +193,21 @@ sequenceDiagram
     Note right of API: ranking_definition, ranking_reward_tier INSERT<br/>첫 시즌들 ranking_season (SCHEDULED)<br/>시즌 파티션 추가 (entry, submit_key)
 
     Note over GM,L: 시즌 진행 (3.5, 4장)
+    W->>R: start_at 60초 전, 복구 잡이 센티넬 없음 감지 → 빈 재구축 → 센티넬(:ready) 설정 (D-60)
     W->>W: start_at 도달 → OPEN
-    W->>R: 센티넬(:ready) 설정
     W->>W: 다음 시즌 행·파티션을 미리 생성 (ranking_season)
     GS->>API: 스코어 제출 (seasonNo, requestId)
     Note right of API: ranking_entry, ranking_submit_key<br/>[start_at, end_at) 시각 검사
     API->>R: composite 반영
     API-)L: 제출 이력 (모든 결과, 응답 후)
     W->>R: 리컨실러 차분 반영 (ranking_entry → Redis)
-    Note right of W: job_state checkpoint<br/>ranking_suspicion 소프트 탐지
+    Note right of W: job_state 동기화 시각<br/>ranking_suspicion 소프트 탐지
     GM->>API: 제재 등록 (언제든)
     Note right of API: ranking_exclusion, 실시간 순위에서 ZREM
 
     Note over GM,L: 마감과 정산 (7.1~7.3)
     W->>W: end_at 도달 → CLOSED (제출은 시각 검사로 이미 거부)
-    W->>W: settle_at + 미종료 트랜잭션 없음 + 워터마크 통과 → SETTLING
+    W->>W: settle_at + 미종료 트랜잭션 없음 + 동기화 시각 통과 → SETTLING
     Note right of W: ranking_entry 파티션 → ranking_entry_settling (꺼내기)<br/>→ final_rank 가순위 UPDATE<br/>→ ranking_entry 파티션으로 되돌리기
     W->>R: 시즌 키 삭제 (센티넬 먼저)
     W->>W: REVIEW, review_until 기록

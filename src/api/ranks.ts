@@ -3,7 +3,8 @@ import type { Pool } from 'mysql2/promise';
 import { requireScope } from './auth.js';
 import { ApiScope, SortOrder, SpResult } from '../core/codes.js';
 import { BusinessException } from '../core/errors.js';
-import { decodeScore, getCurrentSeason, getRanking, type RankingRule } from './rankings.js';
+import { decodeScore, getRanking, type RankingRule } from '../core/rankings.js';
+import { getCurrentSeason } from './seasons.js';
 import { readBoard, type Redis } from '../core/redis.js';
 
 /** 상위 페이징 기본·최대 크기 */
@@ -39,7 +40,7 @@ const myRank = {
 /** 조회 공통 실패 응답. 503은 2007(집계 중)과 2005(시간 초과) */
 const readErrors = { 400: errorRef, 401: errorRef, 403: errorRef, 404: errorRef, 500: errorRef, 503: errorRef };
 
-const unavailableNote = '- 현재 시즌 순위표를 쓸 수 없으면(OPEN 전, 재구축 중, Redis 장애) 2007/503이다. 잠시 후 다시 조회한다.';
+const unavailableNote = '- 현재 시즌 순위표를 쓸 수 없으면(Redis 장애·재구축 중, 워커 정지) 2007/503이다. 잠시 후 다시 조회한다.';
 
 /**
  * 랭킹 정의를 찾는다. 없으면 제출과 같은 1101로 거부한다.

@@ -1,11 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'mysql2/promise';
 import { requireScope } from './auth.js';
-import { ApiResult, ApiScope, SortOrder, SpResult, UpdateRule } from '../core/codes.js';
+import { ApiResult, ApiScope, SpResult } from '../core/codes.js';
 import { callSp } from '../core/db.js';
 import { BusinessException, ERROR_MAP, type ErrorCode } from '../core/errors.js';
 import { logger } from '../core/logger.js';
-import { composite, getRanking } from './rankings.js';
+import { applyMode, composite, getRanking } from '../core/rankings.js';
 import { allowSubmit, applyScore, type Redis } from '../core/redis.js';
 import { bodyForLog } from '../core/server.js';
 
@@ -141,6 +141,7 @@ export async function drainSubmitLogs(): Promise<void> {
  * @param app Fastify 인스턴스
  * @param deps 메인 DB 풀, 로그 DB 풀, Redis 클라이언트
  * @author trisakion
+ * @modified 2026-10-09 trisakion 반영 방식을 core/rankings.applyMode로 (워커와 공용, D-60)
  */
 export function registerSubmitRoute(app: FastifyInstance, deps: { pool: Pool; logPool: Pool; redis: Redis }): void {
     app.post<{ Params: { id: number }; Body: SubmitBody }>('/v1/rankings/:id/scores', {
@@ -183,8 +184,7 @@ export function registerSubmitRoute(app: FastifyInstance, deps: { pool: Pool; lo
                     memberId,
                     composite: composite(rule, data.score, data.achievedAt, row.season_start_at),
                     version: data.version,
-                    best: rule.updateRule === UpdateRule.BEST,
-                    cmp: rule.sortOrder === SortOrder.ASC ? 'LT' : 'GT',
+                    ...applyMode(rule),
                 });
             }
             return { result: 0, data };
