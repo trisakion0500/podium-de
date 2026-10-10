@@ -161,7 +161,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
 podiumDE/
 ├── src/
 │   ├── api.ts           # API 프로세스 엔트리
-│   ├── worker.ts        # 워커 프로세스 엔트리(복구 잡 등록, 시즌 스케줄러는 4단계 구현 예정)
+│   ├── worker.ts        # 워커 프로세스 엔트리(복구 잡·시즌 스케줄러 등록)
 │   ├── migrate.ts       # 마이그레이션 적용 CLI(npm run migrate)
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
 │   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
@@ -184,7 +184,10 @@ podiumDE/
 │   │   ├── ranks.ts     # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
 │   │   └── seasons.ts   # 현재 시즌 메모리 캐시(end_at까지)
 │   └── worker/          # 워커 잡
-│       └── recovery.ts  # 자가 복구 잡(L2 리컨실러, L3 재구축, 보조 점검)
+│       ├── loop.ts      # 잡 주기 실행(GET_LOCK 단일 실행, 정상 종료 대기)
+│       ├── recovery.ts  # 자가 복구 잡(L2 리컨실러, L3 재구축, 보조 점검)
+│       ├── settle.ts    # 정산 잡(시작 조건, 가순위, 시즌 키 삭제, REVIEW 전이)
+│       └── scheduler.ts # 시즌 스케줄러(시즌 경계 계산, 선행 생성, 상태 전이)
 ├── database/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)
@@ -196,7 +199,7 @@ podiumDE/
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
 ├── loadtest/load.mjs    # 부하 테스트 스크립트(로컬 전용, docs/06_LOAD_TEST.md)
 ├── loadtest/k6-submit.js # k6 제출 부하 스크립트(로컬 전용, docs/07_K6_LOAD_TEST.md)
-├── tests/recovery.mjs   # 자가 복구 회귀 테스트(로컬 전용, 강제 이격 → 복구 확인. npm run build 후 실행)
+├── tests/recovery.mjs   # 회귀 테스트(로컬 전용, 자가 복구·시즌 스케줄러·정산. npm run build 후 실행)
 └── docs/                # 설계 문서(위 목록)
 ```
 
@@ -366,6 +369,10 @@ migrate가 하트비트로 거부되면
 - ✅ 3단계: 자가 복구(리컨실러, 센티넬, 재구축)
   - ✅ 워커 복구 잡 — 시즌마다 센티넬이 없으면 재구축, 있으면 동기화 시각 차분 반영, 시작 60초 전 미리 준비, 1시간 1회 건수 점검 (D-60)
 - ⬜ 4단계: 시즌 스케줄러(생성, 상태 전이, 정산, 전달)
+  - ✅ 시즌 생성·상태 전이 — timezone 경계 계산, "현재 + 다음 2개" 선행 생성과 파티션, SCHEDULED→OPEN→CLOSED (D-62, D-63)
+  - ✅ 정산 가순위 — 시작 조건(7.1), 작업 테이블 꺼내기·청크 가순위·되돌리기, Redis 시즌 키 삭제, REVIEW 전이 (D-65, D-66)
+  - ⬜ 확정(FINALIZING): 제재 제외, 순위 재부여, 보상 판정, 시즌 Top N
+  - ⬜ 보상 전달·결과 조회 API(DELIVERING)
 - ⬜ 5단계: 아카이브 로테이션
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
 

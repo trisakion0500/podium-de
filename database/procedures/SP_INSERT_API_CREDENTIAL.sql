@@ -9,6 +9,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_INSERT_API_CREDENTIAL
     -- 작성 : 2026.10.06 trisakion
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : 발급 CLI(apikey.ts)가 호출한다 (01_DESIGN 10.1). 키 생성과 해시는 앱이 하고 SP는 해시만 받는다 —
     --        원문이 DB 세션·general log에 남지 않게 하기 위해서다.
     --        - 해시는 정확히 32바이트여야 한다. 파라미터를 BINARY(32)로 받으면 짧은 값이 0x00으로 채워져 길이 검사를
@@ -16,7 +17,7 @@ BEGIN
     --        - 같은 해시(같은 키)는 ux_key_hash 위반으로 50001이 된다. 32바이트 난수라 정상 경로에서는 생기지 않는다.
     --        - 단일 INSERT라 자동 커밋으로 끝낸다. 다른 테이블을 잠그지 않는다 (TABLE_LOCK_ORDER 12).
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)     DEFAULT NOW(3);
+    DECLARE v_now              DATETIME(3)     DEFAULT UTC_TIMESTAMP(3);
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';
     DECLARE error_no           INT             DEFAULT 0;
     DECLARE error_message      VARCHAR(512)    DEFAULT '';

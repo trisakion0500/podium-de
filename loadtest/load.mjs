@@ -83,11 +83,12 @@ if (mode === 'setup' || mode === 'clean' || mode === 'verify') {
             const { hashApiKey } = await import(root + 'api/auth.js');
             const { seasonKeys } = await import(root + 'core/redis.js');
             const { ApiScope } = await import(root + 'core/codes.js');
-            // update_rule 1=BEST 2=SUM, sort 1=DESC. score_max 8000: time_bits 40이면 score × 2^40이 2^53 안에 들어야 한다
+            // update_rule 1=BEST 2=SUM, sort 1=DESC. score_max 8000: time_bits 40이면 score × 2^40이 2^53 안에 들어야 한다.
+            // cycle_type 0(반복 없음), end_at NULL: 영구 랭킹이라 워커 스케줄러가 시즌을 더 만들지 않는다
             for (const [id, rule] of [[931, 1], [932, 2]]) {
                 await q(`INSERT INTO ranking_definition (ranking_id, ranking_code, ranking_name, status, update_rule, sort_order, score_max, time_unit, time_bits,
                           timezone, start_at, end_at, cycle_type, settle_delay, review_period, history_retention, max_delta, max_submit_per_min, created_at, updated_at)
-                         VALUES (?, ?, 'load', 1, ?, 1, 8000, 1, 40, 'UTC', NOW(3), NULL, 1, 60, 60, 30, NULL, NULL, NOW(3), NOW(3))`, [id, `LOAD${id}`, rule]);
+                         VALUES (?, ?, 'load', 1, ?, 1, 8000, 1, 40, 'UTC', NOW(3), NULL, 0, 60, 60, 30, NULL, NULL, NOW(3), NOW(3))`, [id, `LOAD${id}`, rule]);
                 await q(`INSERT INTO ranking_season (ranking_id, season_no, start_at, end_at, settle_at, status)
                          VALUES (?, 1, NOW(3) - INTERVAL 1 HOUR, NOW(3) + INTERVAL 3 HOUR, NOW(3) + INTERVAL 4 HOUR, 2)`, [id]);
                 await callSp(A, 'SP_PARTITION_ADD', [id, 1]);

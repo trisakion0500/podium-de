@@ -7,6 +7,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_EXEC_DDL
     -- 작성 : 2026.10.04 trisakion
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : 메인 DB(podium_de)에서 PREPARE를 쓰는 유일한 SP다 (01_DESIGN 11.2, D-25). 관리 SP만 호출한다.
     --        로그 DB에도 본문이 같은 SP가 있다(DB마다 하나, D-48). 한쪽을 고치면 다른 쪽도 함께 고친다.
     --        - SQL SECURITY INVOKER: 앱 계정은 스키마 단위 EXECUTE를 가지므로 이 SP를 직접 CALL할 수 있다.
@@ -40,7 +41,7 @@ BEGIN
         -- 감사 로그 INSERT 자체가 실패했으면(직접 호출 등) 갱신할 행이 없다.
         IF v_audit_id IS NOT NULL THEN
             UPDATE log_ddl_audit
-               SET status = 2, finished_at = NOW(3), sql_state = v_sql_state, error_no = v_error_no, error_message = v_error_message
+               SET status = 2, finished_at = UTC_TIMESTAMP(3), sql_state = v_sql_state, error_no = v_error_no, error_message = v_error_message
              WHERE log_ddl_audit_id = v_audit_id;
             COMMIT;
         END IF;
@@ -53,7 +54,7 @@ BEGIN
     END IF;
 
     INSERT INTO log_ddl_audit (sql_text, status, started_at)
-    VALUES (i_sql, 0, NOW(3));
+    VALUES (i_sql, 0, UTC_TIMESTAMP(3));
     SET v_audit_id = LAST_INSERT_ID();
     COMMIT;
 
@@ -69,7 +70,7 @@ BEGIN
     SET SESSION lock_wait_timeout = v_lock_wait;
 
     UPDATE log_ddl_audit
-       SET status = 1, finished_at = NOW(3)
+       SET status = 1, finished_at = UTC_TIMESTAMP(3)
      WHERE log_ddl_audit_id = v_audit_id;
     COMMIT;
 END$$

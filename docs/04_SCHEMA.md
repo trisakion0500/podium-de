@@ -218,7 +218,7 @@ sequenceDiagram
     W->>W: review_until 경과 (보류 없음) → FINALIZING
     Note right of W: 제재 제외·순위 재부여 (ranking_entry)<br/>participant_count, tier_snapshot (ranking_season)<br/>reward_code·reward_status 판정<br/>상위 top_size → ranking_season_top
     W->>W: DELIVERING
-    W-->>GS: 정산 완료 웹훅 (신호만)
+    W-->>GS: 정산 완료 웹훅 (신호만, 6단계 구현 예정)
 
     Note over GM,L: 보상 전달 (7.7)
     loop PENDING이 남아 있는 동안
@@ -321,7 +321,7 @@ flowchart TD
     subgraph SP["SP_SUBMIT_SCORE (MySQL, 한 트랜잭션)"]
         ACT{"ranking_definition.status<br/>= ACTIVE?"}
         ACT -- "아니오" --> X1["RANKING_INACTIVE<br/>(멱등 키 없음)"]
-        ACT -- "예" --> SEA{"seasonNo가 현재 시즌?<br/>NOW(3) ∈ [start_at, end_at)"}
+        ACT -- "예" --> SEA{"seasonNo가 현재 시즌?<br/>UTC_TIMESTAMP(3) ∈ [start_at, end_at)"}
         SEA -- "아니오" --> X2["SEASON_MISMATCH / 시즌 밖<br/>(멱등 키 없음)"]
         SEA -- "예" --> IDEM{"ranking_submit_key에<br/>같은 requestId?"}
         IDEM -- "있음, 같은 내용" --> RP["재전송: 반영 안 함<br/>현재 entry 상태 반환, replayed = 1<br/>(이전에 거부였으면 같은 거부)"]
@@ -348,7 +348,7 @@ flowchart TD
     OK & XN & X0 & X1 & X2 & X3 & X4 -.-> HIST["제출 이력 기록 (로그 DB, 4.5)<br/>모든 결과, result_code 포함<br/>실패해도 응답에 영향 없음"]
 ```
 
-- **시각:** `achieved_at`, `updated_at`은 MySQL `NOW(3)`이며 세션 `time_zone`은 `+00:00`이다. 게임 서버나 Redis 시각을 쓰지 않는다 (4.1).
+- **시각:** `achieved_at`, `updated_at`은 MySQL `UTC_TIMESTAMP(3)`이며 세션 시간대와 무관한 UTC다(D-66). 게임 서버나 Redis 시각을 쓰지 않는다 (4.1).
 - **값이 그대로면 아무것도 갱신하지 않는다:** BEST에서 기록이 같거나 나쁠 때, SUM에서 0점에 음수 증분이 들어올 때는 `version`, `achieved_at`, `updated_at`이 바뀌지 않는다 (2.3). 그래서 리컨실러의 `updated_at` 스캔에도 잡히지 않는다.
 - **ASC 정렬:** BEST의 "더 좋은 기록"은 더 작은 값이다 (4.3).
 - **Redis 반영 실패:** 응답은 성공으로 나간다. MySQL이 원장이고, 리컨실러가 `ranking_entry.updated_at` 변경분으로 Redis를 다시 맞춘다.

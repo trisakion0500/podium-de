@@ -6,6 +6,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_LIST_RECOVERY_SEASON
     -- 작성 : 2026.10.09 trisakion
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : 워커 복구 잡(01_DESIGN 6.2~6.4, D-60)이 주기마다 처음 부른다.
     --        - 대상은 상태가 아니라 시각으로 고른다. 제출이 [start_at, end_at) 시각으로 받으므로(3.5) 상태 전이 잡이
     --          늦어도 제출이 들어가는 시즌이 빠지지 않는다. CLOSED까지 포함해 정산 전까지 동기화 시각이 end_at을 넘어
@@ -18,7 +19,7 @@ BEGIN
     --        - synced_at은 리컨실러 동기화 시각(job_name 'reconciler'), audit_at은 보조 점검 마지막 시각('recovery_audit').
     --        - 잠그지 않는 일반 SELECT라 잠금 순서 대상이 아니다.
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)     DEFAULT NOW(3);
+    DECLARE v_now              DATETIME(3)     DEFAULT UTC_TIMESTAMP(3);
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';
     DECLARE error_no           INT             DEFAULT 0;
     DECLARE error_message      VARCHAR(512)    DEFAULT '';

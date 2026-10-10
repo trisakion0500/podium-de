@@ -1,17 +1,22 @@
 {
   "appenders": {
-    "console": { "type": "stdout" },
+    "console": {
+      "type": "stdout",
+      "layout": { "type": "pattern", "pattern": "%[[%d{ISO8601_WITH_TZ_OFFSET}] [%p] %c -%] %m" }
+    },
     "file": {
       "type": "dateFile",
       "filename": "logs/app.log",
       "pattern": "yyyyMMdd",
-      "numBackups": 30
+      "numBackups": 30,
+      "layout": { "type": "pattern", "pattern": "[%d{ISO8601_WITH_TZ_OFFSET}] [%p] %c - %m" }
     },
     "errFile": {
       "type": "dateFile",
       "filename": "logs/err.log",
       "pattern": "yyyyMMdd",
-      "numBackups": 30
+      "numBackups": 30,
+      "layout": { "type": "pattern", "pattern": "[%d{ISO8601_WITH_TZ_OFFSET}] [%p] %c - %m" }
     },
     "errFileFilter": {
       "type": "logLevelFilter",

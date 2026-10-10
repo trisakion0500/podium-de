@@ -7,12 +7,13 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_REVOKE_API_CREDENTIAL
     -- 작성 : 2026.10.06 trisakion
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : 폐기 CLI(apikey.ts)가 호출한다 (01_DESIGN 10.1). API는 다음 재조회(최대 30초) 때 이 키를 목록에서 뺀다.
     --        - 활성 → 폐기 한 방향만 허용한다. 조건부 UPDATE(revoked_at IS NULL)로 처음 폐기한 시각을 덮어쓰지 않는다.
     --        - 갱신 0건이면 없는 키인지 이미 폐기된 키인지 구분해 돌려준다. 운영자가 ID를 잘못 넣었는지 바로 알게 한다.
     --        - 단일 UPDATE라 자동 커밋으로 끝낸다. 다른 테이블을 잠그지 않는다 (TABLE_LOCK_ORDER 12).
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)     DEFAULT NOW(3);
+    DECLARE v_now              DATETIME(3)     DEFAULT UTC_TIMESTAMP(3);
     DECLARE v_revoked_at       DATETIME(3)     DEFAULT NULL;
     DECLARE v_found            TINYINT         DEFAULT 0;
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';

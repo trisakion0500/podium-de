@@ -3,6 +3,11 @@ import path from 'node:path';
 import log4js from 'log4js';
 import type { Configuration } from 'log4js';
 
+// 프로세스 시간대를 UTC로 고정한다. DB·API·Redis의 시각이 모두 UTC라 로그 시각과 날짜별 파일 회전도 같은 UTC로 맞춘다 —
+// VM 시간대 설정에 기대지 않는다(D-66). 로그 설정 전에 둬야 dateFile 회전 기준 날짜가 UTC가 된다. 시즌 경계 계산은
+// 랭킹 timezone을 명시해 Intl로 하므로 이 값과 무관하다.
+process.env.TZ = 'UTC';
+
 /**
  * `config/log4js.json`은 프로젝트 루트(`process.cwd()`) 기준으로 찾는다 — dist에서 실행해도 같은 파일을 가리키게 하기 위함이다.
  */

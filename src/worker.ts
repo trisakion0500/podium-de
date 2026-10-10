@@ -4,15 +4,19 @@ import { logger } from './core/logger.js';
 import { startRankingRefresh } from './core/rankings.js';
 import { closeRedis, createRedis } from './core/redis.js';
 import { startRecovery } from './worker/recovery.js';
+import { startScheduler } from './worker/scheduler.js';
+import { startSettlement } from './worker/settle.js';
 
 const { pool, onShutdown } = await bootstrap('worker', ProcessType.WORKER);
 const redis = createRedis();
 
 let stopRecovery: (() => Promise<void>) | undefined;
+let stopScheduler: (() => Promise<void>) | undefined;
+let stopSettlement: (() => Promise<void>) | undefined;
 let stopRefresh: (() => void) | undefined;
 // 잡을 먼저 멈춘 뒤 정의 재조회, Redis 순으로 닫는다. DB 풀은 bootstrap이 마지막에 닫는다 (개발 컨벤션 5.2).
 const shutdown = onShutdown(async () => {
-    await stopRecovery?.();
+    await Promise.all([stopRecovery?.(), stopScheduler?.(), stopSettlement?.()]);
     stopRefresh?.();
     await closeRedis(redis);
 });
@@ -26,7 +30,9 @@ try {
     process.exit(1);
 }
 stopRecovery = startRecovery(pool, redis);
-// ponytail: 시즌 스케줄러(생성, 상태 전이, 정산, 전달)는 4단계 구현 예정.
+stopScheduler = startScheduler(pool);
+// 확정(FINALIZING)과 보상 전달(DELIVERING)은 4단계 구현 예정 (가순위 생성 후 REVIEW 전이까지 구현).
+stopSettlement = startSettlement(pool, redis);
 logger.info('worker started');
 // pm2 --wait-ready: 기동 확인을 통과한 뒤에만 준비 완료를 알린다.
 process.send?.('ready');

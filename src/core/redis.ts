@@ -458,6 +458,19 @@ export async function finishRebuild(client: Redis, keys: SeasonKeys, syncedAt: D
 }
 
 /**
+ * 정산이 끝난 시즌의 키를 모두 지운다 (01_DESIGN 5.6). 센티넬, 순위표, version HASH, 재구축 임시 키를 UNLINK 한 번으로 지운다 —
+ * 한 명령이라 센티넬만 남거나 순위표만 남는 순간이 없고, 큰 ZSET은 백그라운드 스레드가 해제해 Redis가 멈추지 않는다(1.7).
+ * 센티넬이 사라진 뒤 늦게 도착한 반영은 센티넬 확인 Lua가 버린다(5.3). 호출자는 복구 잡 락을 쥐고 부른다(D-60).
+ * @param client Redis 클라이언트
+ * @param keys 시즌 키
+ * @returns 완료 Promise
+ * @author trisakion
+ */
+export async function deleteSeasonKeys(client: Redis, keys: SeasonKeys): Promise<void> {
+    await withTimeout(client.unlink([keys.ready, keys.board, keys.ver, keys.rebuild, keys.rebuildVer]));
+}
+
+/**
  * 보조 점검(01_DESIGN 6.4)용 순위표 멤버 수.
  * @param client Redis 클라이언트
  * @param keys 시즌 키

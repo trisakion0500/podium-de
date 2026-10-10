@@ -10,6 +10,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_UPSERT_JOB_STATE
     -- 작성 : 2026.10.09 trisakion
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : 복구 잡이 시즌별 리컨실러 동기화 시각과 보조 점검 시각을 남긴다 (01_DESIGN 6.2, 6.4, 11.4).
     --        RESULT: 0 성공, 1001 파라미터 [codes.SpResult]
     --
@@ -18,7 +19,7 @@ BEGIN
     --        - last_run_at, updated_at은 DB 시각이다. 보조 점검 주기 판단을 DB 시각으로 하기 위해서다.
     --        - 단독 자동 커밋 한 문장이다. job_state는 잠금 순서 10번이며 다른 테이블과 같은 트랜잭션에 묶이지 않는다.
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)     DEFAULT NOW(3);
+    DECLARE v_now              DATETIME(3)     DEFAULT UTC_TIMESTAMP(3);
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';
     DECLARE error_no           INT             DEFAULT 0;
     DECLARE error_message      VARCHAR(512)    DEFAULT '';

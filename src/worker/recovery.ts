@@ -1,13 +1,14 @@
-import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
+import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { SpResult } from '../core/codes.js';
 import { config } from '../core/config.js';
-import { assertLockHeld, callSp, LockNotAcquiredError, withLock } from '../core/db.js';
+import { callSp } from '../core/db.js';
 import { logger } from '../core/logger.js';
 import { applyMode, composite, getRanking, type RankingRule } from '../core/rankings.js';
 import {
     clearRebuild, countBoard, finishRebuild, markSynced, readComposites, readSentinel, reconcileScore,
     seasonKeys, writeRebuild, type Redis, type SeasonKeys,
 } from '../core/redis.js';
+import { startJob, type JobContext } from './loop.js';
 
 /** 복구 잡 락. 정산의 시즌 키 삭제도 이 락을 잡는다 — 재구축이 삭제 뒤에 센티넬을 되살리지 않게 한다 (D-60) */
 export const RECOVERY_LOCK = 'podium:recovery';
@@ -28,27 +29,11 @@ interface RecoverySeason {
     dbNow: Date;
 }
 
-/** 정상 종료로 작업을 멈출 때 던진다 */
-class StoppedError extends Error {}
-
 /**
- * 한 주기의 실행 문맥. 락을 쥔 전용 커넥션으로 모든 SP를 부른다 — 마스터에서 읽고(6.2), 청크마다 락 보유를 확인한다(11.3).
+ * 한 주기의 실행 문맥. 락을 쥔 전용 커넥션으로 마스터에서 읽는다(6.2).
  */
-interface Context {
-    conn: PoolConnection;
+interface Context extends JobContext {
     redis: Redis;
-    stopped: () => boolean;
-}
-
-/**
- * 청크 사이마다 부른다. 락을 잃었거나 종료 중이면 예외로 이번 주기를 끝낸다.
- * @param ctx 실행 문맥
- * @returns 완료 Promise
- */
-async function checkpoint(ctx: Context): Promise<void> {
-    if (ctx.stopped())
-        throw new StoppedError();
-    await assertLockHeld(ctx.conn, RECOVERY_LOCK);
 }
 
 /**
@@ -82,7 +67,7 @@ async function* scanChanged(ctx: Context, season: RecoverySeason, since: Date): 
     let afterAt = since;
     let afterMember = '';
     for (;;) {
-        await checkpoint(ctx);
+        await ctx.checkpoint();
         const { result, rows } = await callSp(ctx.conn, 'SP_LIST_RANKING_ENTRY_CHANGED', [season.rankingId, season.seasonNo, afterAt, afterMember, config.recovery.chunk]);
         if (result !== SpResult.OK)
             throw new Error(`SP_LIST_RANKING_ENTRY_CHANGED result ${result}`);
@@ -179,7 +164,7 @@ async function rebuild(ctx: Context, season: RecoverySeason, rule: RankingRule, 
     let loaded = 0;
     let after = '';
     for (;;) {
-        await checkpoint(ctx);
+        await ctx.checkpoint();
         const { result, rows } = await callSp(ctx.conn, 'SP_LIST_RANKING_ENTRY_CHUNK', [season.rankingId, season.seasonNo, after, config.recovery.chunk]);
         if (result !== SpResult.OK)
             throw new Error(`SP_LIST_RANKING_ENTRY_CHUNK result ${result}`);
@@ -196,7 +181,7 @@ async function rebuild(ctx: Context, season: RecoverySeason, rule: RankingRule, 
     for await (const rows of scanChanged(ctx, season, scanFrom(season.dbNow)))
         await writeRebuild(ctx.redis, keys, toItems(rule, season, rows), withVersion);
 
-    await checkpoint(ctx);
+    await ctx.checkpoint();
     if (!await finishRebuild(ctx.redis, keys, season.dbNow, loaded))
         throw new Error(`rebuild aborted: temp keys lost members (redis restarted or failed over?) ranking=${season.rankingId} season=${season.seasonNo} loaded=${loaded}`);
     await saveJobState(ctx, 'reconciler', season, season.dbNow);
@@ -265,7 +250,7 @@ async function runCycle(ctx: Context): Promise<void> {
             continue;
         }
         const keys = seasonKeys(season.rankingId, season.seasonNo);
-        await checkpoint(ctx);
+        await ctx.checkpoint();
         const redisSyncedAt = await readSentinel(ctx.redis, keys);
         if (redisSyncedAt === null) {
             await rebuild(ctx, season, rule, keys);
@@ -279,37 +264,16 @@ async function runCycle(ctx: Context): Promise<void> {
 
 /**
  * 복구 잡을 시작한다 (01_DESIGN 6.2~6.4). 주기마다 GET_LOCK을 시도해 워커 여러 대 중 한 곳에서만 돈다.
- * 이전 주기가 끝난 뒤 다음 주기를 예약해 겹치지 않는다. Redis가 끊긴 동안은 건너뛴다 — 연결 상태 로그는 redis.ts가 남긴다.
+ * Redis가 끊긴 동안은 건너뛴다 — 연결 상태 로그는 redis.ts가 남긴다.
  * @param pool 메인 DB 풀
  * @param redis Redis 클라이언트
  * @returns 정지 함수. 진행 중인 주기가 청크 경계에서 멈출 때까지 기다린다. DB 풀·Redis를 닫기 전에 불러야 한다 (개발 컨벤션 5.2)
  * @author trisakion
+ * @modified 2026-10-10 trisakion 주기 루프를 loop.startJob으로 분리 (스케줄러와 공유)
  */
 export function startRecovery(pool: Pool, redis: Redis): () => Promise<void> {
-    let stopped = false;
-    let timer: NodeJS.Timeout | undefined;
-    let running: Promise<void> = Promise.resolve();
-
-    const tick = async (): Promise<void> => {
-        if (redis.isReady) {
-            try {
-                await withLock(pool, RECOVERY_LOCK, 0, (conn) => runCycle({ conn, redis, stopped: () => stopped }));
-            } catch (err) {
-                if (err instanceof LockNotAcquiredError)
-                    logger.debug('recovery skipped: another worker holds the lock');
-                else if (!(err instanceof StoppedError))
-                    logger.error('recovery cycle failed', err);
-            }
-        }
-        if (!stopped)
-            timer = setTimeout(() => { running = tick(); }, config.recovery.intervalMs);
-    };
-
-    running = tick();
+    const stop = startJob(pool, { name: 'recovery', lock: RECOVERY_LOCK, intervalMs: config.recovery.intervalMs, ready: () => redis.isReady },
+        (ctx) => runCycle({ ...ctx, redis }));
     logger.info(`recovery started (interval ${config.recovery.intervalMs}ms, margin ${config.recovery.marginSec}s)`);
-    return async () => {
-        stopped = true;
-        clearTimeout(timer);
-        await running;
-    };
+    return stop;
 }

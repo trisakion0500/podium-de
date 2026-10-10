@@ -10,6 +10,7 @@ BEGIN
     -- 명칭 : SP_UPSERT_INSTANCE_HEARTBEAT
     -- 작성 : 2026.10.04 trisakion
     -- 수정 : 2026.10.07 trisakion 정리 DELETE에 ORDER BY 추가 (STATEMENT binlog 안전)
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : API·워커가 기동 시와 10초마다 호출한다 (01_DESIGN 11.4, heartbeat.ts).
     --        - last_seen_at은 DB 시각이다. migrate가 같은 DB 시각으로 "최근 30초"를 비교하므로 호스트 시계 차이와 무관하다.
     --        - 같은 instance_id는 같은 프로세스이므로 last_seen_at만 갱신한다.
@@ -18,7 +19,7 @@ BEGIN
     --        - 두 문장은 각자 자동 커밋된다. 기록과 정리를 한 트랜잭션으로 묶을 이유가 없고, 묶으면 다른 인스턴스의
     --          기록과 잠금이 겹치는 시간만 길어진다.
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)     DEFAULT NOW(3);
+    DECLARE v_now              DATETIME(3)     DEFAULT UTC_TIMESTAMP(3);
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';
     DECLARE error_no           INT             DEFAULT 0;
     DECLARE error_message      VARCHAR(512)    DEFAULT '';

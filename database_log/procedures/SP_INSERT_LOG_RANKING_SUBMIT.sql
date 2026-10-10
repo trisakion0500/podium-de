@@ -17,6 +17,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_INSERT_LOG_RANKING_SUBMIT
     -- 작성 : 2026.10.04 trisakion
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : 제출 API가 응답을 만든 뒤 로그 DB 전용 풀로 호출한다 (01_DESIGN 4.5, D-48).
     --        - 메인 트랜잭션과 묶이지 않는다. 실패해도 앱은 앱 로그 파일에 같은 내용을 남기고 응답에 영향을 주지 않는다.
     --        - 순수 적재 SP라 성공 시 두 번째 결과셋을 두지 않는다 (개발 컨벤션 4.4 예외).
@@ -39,7 +40,7 @@ BEGIN
         (created_at, ranking_id, season_no, request_id, member_id, input_value,
          result_code, rejected, replayed, result_score, version, meta)
     VALUES
-        (NOW(3), i_ranking_id, i_season_no, i_request_id, i_member_id, i_input_value,
+        (UTC_TIMESTAMP(3), i_ranking_id, i_season_no, i_request_id, i_member_id, i_input_value,
          i_result_code, i_rejected, IFNULL(i_replayed, 0), i_result_score, i_version, i_meta);
 
     SELECT 0 AS RESULT;

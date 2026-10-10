@@ -25,17 +25,18 @@ export interface AliveInstance extends RowDataPacket {
 }
 
 /**
- * 최근 HEARTBEAT_ALIVE_SEC초 안에 하트비트를 남긴 인스턴스를 조회한다. 비교 기준은 DB 시각이다.
+ * 최근 HEARTBEAT_ALIVE_SEC초 안에 하트비트를 남긴 인스턴스를 조회한다. 비교 기준은 DB 시각(UTC_TIMESTAMP — 세션 time_zone과 무관, D-66)이다.
  * migrate·upgrade가 테이블·SP 생성 전에도 써야 하므로 SP가 아니라 직접 조회하고, 테이블이 없으면(첫 설치) 빈 목록을 돌려준다.
  * @param db 풀 또는 커넥션
  * @returns 살아 있는 인스턴스 목록
  * @author trisakion
+ * @modified 2026-10-10 trisakion NOW(3) → UTC_TIMESTAMP(3)
  */
 export async function listAliveInstances(db: Pool | PoolConnection): Promise<AliveInstance[]> {
     try {
         const [rows] = await db.query<AliveInstance[]>(
             `SELECT instance_id, process_type, app_version, last_seen_at FROM instance_heartbeat
-             WHERE last_seen_at >= NOW(3) - INTERVAL ? SECOND ORDER BY process_type, instance_id`,
+             WHERE last_seen_at >= UTC_TIMESTAMP(3) - INTERVAL ? SECOND ORDER BY process_type, instance_id`,
             [HEARTBEAT_ALIVE_SEC],
         );
         return rows;

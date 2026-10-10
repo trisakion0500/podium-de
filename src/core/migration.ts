@@ -306,7 +306,7 @@ async function applyScripts(conn: PoolConnection, target: DbTarget): Promise<str
             for (const statement of script.statements)
                 await execWithRetry(conn, statement);
             await conn.query(
-                `INSERT INTO schema_migration (script_name, kind, checksum, app_version, applied_at) VALUES (?, ?, ?, ?, NOW(3)) AS n
+                `INSERT INTO schema_migration (script_name, kind, checksum, app_version, applied_at) VALUES (?, ?, ?, ?, UTC_TIMESTAMP(3)) AS n
                  ON DUPLICATE KEY UPDATE checksum = n.checksum, app_version = n.app_version, applied_at = n.applied_at`,
                 [script.name, script.kind, script.checksum, APP_VERSION],
             );

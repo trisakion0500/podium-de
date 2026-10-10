@@ -188,6 +188,7 @@ export const PartitionTarget = {
  * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
  * @modified 2026-10-06 trisakion API 계층 코드와 한 번호 공간으로 정리
  * @modified 2026-10-07 trisakion 조회 SP 코드(1301) 추가
+ * @modified 2026-10-10 trisakion 정산 SP 코드(1009~1013) 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -200,7 +201,7 @@ export const SpResult = {
     SEASON_STATUS_INVALID: 1003,
     /** ranking_entry 분리 조건 미충족: 다음 시즌이 SETTLED가 아님, 또는 마지막 시즌이 아닌데 다음 시즌 행이 없음 (D-52) */
     NEXT_SEASON_NOT_SETTLED: 1004,
-    /** 운영 테이블에 시즌 파티션이 없음 (SETTLING인데 파티션 없음) */
+    /** 운영 테이블에 시즌 파티션이 없음. 현재 이 코드를 내는 SP는 없다 — SP_SETTLING_EXCHANGE는 파티션 없는 시즌을 빈 시즌으로 본다(D-63). 번호는 재사용하지 않는다 */
     PARTITION_NOT_FOUND: 1005,
     /** 삭제하려는 파티션에 행이 있음 (먼저 백업으로 분리해야 함) */
     PARTITION_NOT_EMPTY: 1006,
@@ -208,6 +209,16 @@ export const SpResult = {
     SETTLING_OCCUPIED: 1007,
     /** 되돌리기 직전 entry 시즌 파티션에 행이 있음 (꺼낸 뒤 쓰기 발생) — 사람이 확인해야 함 */
     SETTLING_CONFLICT: 1008,
+    /** 정산 시작: 아직 settle_at 전 (01_DESIGN 7.1) */
+    SETTLE_NOT_DUE: 1009,
+    /** 정산 시작: end_at 전에 시작한 트랜잭션이 아직 남음 — 오래가면 긴 트랜잭션을 찾는다 */
+    SETTLE_WAITING_TRX: 1010,
+    /** 정산 시작: 리컨실러 동기화 시각이 end_at + 안전마진을 넘지 않음 — 오래가면 복구 잡·Redis를 확인한다 */
+    SETTLE_WAITING_SYNC: 1011,
+    /** 가순위: ranking_entry_settling에 이 시즌이 꺼내져 있지 않거나 정렬 컬럼(settle_slot)이 없음 */
+    SETTLING_NOT_OUT: 1012,
+    /** REVIEW 전이: 가순위가 끝나지 않음 (작업 테이블에 남은 행 또는 final_rank NULL 행) */
+    PROVISIONAL_RANK_INCOMPLETE: 1013,
     /** 제출: ranking_definition에 랭킹이 없음 */
     RANKING_NOT_FOUND: 1101,
     /** 제출: 랭킹이 ACTIVE가 아님 (D-34) */

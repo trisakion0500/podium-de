@@ -16,7 +16,7 @@ BEGIN
     --                1104 IDEMPOTENCY_CONFLICT(D-33), 1105 SCORE_RANGE, 1106 MAX_DELTA, 1107 SCORE_MAX [codes.SpResult]
     --        성공 데이터: season_no, season_start_at(composite 계산용), score, achieved_at, version, replayed
     --
-    --        - 쓰기 차단은 상태가 아니라 시각으로 한다(3.5). 시즌 행의 [start_at, end_at)에 NOW(3)가 들어야 한다.
+    --        - 쓰기 차단은 상태가 아니라 시각으로 한다(3.5). 시즌 행의 [start_at, end_at)에 UTC_TIMESTAMP(3)가 들어야 한다.
     --          검사와 쓰기 사이에 end_at을 지나칠 수 있지만, 기록되는 achieved_at은 검사에 쓴 같은 v_now라 시즌 안이다.
     --          그 차이(수 ms)는 리컨실러 안전마진과 정산 지연(settle_delay)이 흡수한다.
     --        - 랭킹·시즌 검사 실패는 멱등 키 없이 결과만 반환한다(4.1). 그래서 트랜잭션 전에 끝낸다.
@@ -45,8 +45,9 @@ BEGIN
     --          잠그는 문장은 많아야 4개, txn 루프 재시도까지 8개라 40초 안에 끝나거나 1205로 실패한다(50001,
     --          같은 requestId로 재시도). 세션 변수라 풀 커넥션의 다른 SP에 남지 않게 끝에서 되돌린다.
     -- 수정 : 2026.10.09 trisakion 락 대기 5초 제한 (리컨실러 안전마진 보장)
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)        DEFAULT NOW(3);
+    DECLARE v_now              DATETIME(3)        DEFAULT UTC_TIMESTAMP(3);
     DECLARE v_status           TINYINT UNSIGNED;
     DECLARE v_update_rule      TINYINT UNSIGNED;
     DECLARE v_sort_order       TINYINT UNSIGNED;

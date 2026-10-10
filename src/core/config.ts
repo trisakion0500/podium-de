@@ -74,6 +74,7 @@ const mainDb = {
  * @modified 2026-10-06 trisakion API 수신 주소, 처리 제한 시간, Swagger UI 설정 추가
  * @modified 2026-10-07 trisakion Redis 접속 설정 추가
  * @modified 2026-10-09 trisakion 복구 잡 설정 추가
+ * @modified 2026-10-10 trisakion 시즌 스케줄러 설정 추가
  */
 export const config = {
     db: mainDb,
@@ -117,6 +118,13 @@ export const config = {
         marginSec: int('RECOVERY_MARGIN_SEC', 60),
         /** MySQL에서 한 번에 읽는 행 수 (1~10000) */
         chunk: int('RECOVERY_CHUNK', 1000),
+    },
+    /** 워커 시즌 스케줄러 (01_DESIGN 3.3, 3.5) */
+    scheduler: {
+        /** 주기(ms). 상태 전이(OPEN, CLOSED)가 시각보다 늦는 최대 지연이다. 제출 차단은 시각 검사라 마감에는 영향이 없다 */
+        intervalMs: int('SCHEDULER_INTERVAL_MS', 5000),
+        /** 가순위를 한 번에 매기는 행 수 (1~100000). 청크 하나가 트랜잭션 하나다 (01_DESIGN 7.3) */
+        settleChunk: int('SETTLE_CHUNK', 5000),
     },
     /** npm run upgrade 설정. 명령이 없으면 upgrade가 1단계 전에 중단한다 */
     upgrade: {

@@ -9,14 +9,16 @@ const ER_SP_DOES_NOT_EXIST = 1305;
 
 /**
  * MySQL 커넥션 풀을 만든다.
- * 모든 커넥션의 세션 time_zone을 '+00:00'으로 고정한다 — SP의 NOW(3)가 achieved_at과
- * 시즌 시각 검사의 기준이므로 서버 기본값에 의존하지 않는다(01_DESIGN 4.1).
+ * 모든 커넥션의 세션 time_zone을 '+00:00'으로 고정한다. SP는 세션과 무관한 UTC_TIMESTAMP(3)으로 시각을 만들지만,
+ * 풀에서 직접 쓰는 NOW()·FROM_UNIXTIME 같은 세션 의존 함수와 timezone 'Z'의 DATETIME 해석이 같은 UTC를 보게
+ * 한 겹 더 맞춘다 — 서버·OS 시간대가 무엇이든 결과가 같다(01_DESIGN 4.1, D-66).
  * @param account 접속 계정. API·워커는 APP, migrate·upgrade는 MIGRATE
  * @param target 대상 DB. 로그 DB는 메인과 다른 풀로 둔다 — 로그 기록이 메인 커넥션을 차지하거나 메인 트랜잭션에 묶이지 않게 한다(개발 컨벤션 7장)
  * @returns 커넥션 풀
  * @author trisakion
  * @modified 2026-10-01 trisakion 접속 계정 인자 추가
  * @modified 2026-10-02 trisakion 대상 DB 인자 추가 (D-48)
+ * @modified 2026-10-10 trisakion 시간대 원칙 주석 갱신 (D-66)
  */
 export function createPool(account: DbAccount, target: DbTarget = 'MAIN'): Pool {
     const db = target === 'MAIN' ? config.db : config.logDb;

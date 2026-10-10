@@ -8,6 +8,7 @@ BEGIN
     -- 명칭 : SP_GET_CURRENT_SEASON
     -- 작성 : 2026.10.07 trisakion
     -- 수정 : 2026.10.09 trisakion 센티넬 준비 시점 주석 갱신 (D-60)
+    -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
     -- 내용 : 01_DESIGN 5.4, 10.2. API가 랭킹별로 읽어 end_at까지 메모리에 둔다.
     --        RESULT: 0 성공, 1001 파라미터, 1301 현재 시즌 없음 [codes.SpResult]
     --        성공 데이터: season_no, start_at(composite 디코드용), end_at(캐시 만료)
@@ -19,7 +20,7 @@ BEGIN
     --          시즌이 많이 쌓인 랭킹도 몇 행만 읽는다.
     --        - 잠그지 않는 일반 SELECT라 잠금 순서 대상이 아니다.
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)     DEFAULT NOW(3);
+    DECLARE v_now              DATETIME(3)     DEFAULT UTC_TIMESTAMP(3);
     DECLARE v_season_no        INT UNSIGNED;
     DECLARE v_start_at         DATETIME(3);
     DECLARE v_end_at           DATETIME(3);
