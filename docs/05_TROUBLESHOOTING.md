@@ -70,6 +70,8 @@
 | `settling stalled … reconciler synced_at has not passed …` (warn) | 리컨실러 동기화 시각이 end_at + 안전마진을 넘지 못했다 | 워커 복구 잡·Redis 상태 확인(1.3). 따라잡으면 정산이 시작된다 |
 | `SP_SETTLING_EXCHANGE` 1007 | settling 테이블에 다른 시즌 행이 있다 | 사람이 확인할 상황이다. 어느 시즌이 남았는지 보고 처리 |
 | `SP_SETTLING_EXCHANGE` 1008 | 꺼낸 뒤 운영 파티션에 늦은 쓰기가 들어왔다 | 교환하지 않고 멈춘다. 늦은 행의 원인(시각 검사)을 확인 |
+| `SP_UPDATE_SEASON_DELIVERING result 1015` (`settlement cycle failed`) | 순위 재부여가 끝나지 않았다 (확정 도중 제재 추가 등) | 다음 주기에 제재 제외부터 다시 돌아 해소된다. 반복되면 그 시즌의 `MAX(final_rank)`와 `participant_count`를 비교한다 |
+| `reward tiers leave ranks a..b without reward` (warn) | 보상받는 순위 사이에 어느 구간에도 들지 않는 순위가 있다. 흔한 원인은 RANK 1~10위 + PERCENT 11%부터 | 의도한 공백이면 무시한다. 아니면 다음 시즌부터 `ranking_reward_tier`를 고친다(이미 확정에 들어간 시즌은 `tier_snapshot`에 고정됨) |
 | `SP_PARTITION_DROP` 1006 | 비어 있지 않은 파티션 | 먼저 `SP_PARTITION_EXCHANGE`로 백업에 분리 |
 | `... refresh failed N times in a row` (error) | API 키·랭킹 정의 재조회 연속 실패 | 기존 목록으로 동작 중이다. 폐기한 키와 빈도 한도 변경이 반영되지 않으므로 DB 연결을 확인 |
 

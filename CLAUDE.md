@@ -9,6 +9,7 @@
 - 이미 적용된 V 파일은 고치지 않는다(러너가 거부). 바꿀 게 있으면 새 V 파일을 추가한다. 파일 하나에 DDL 하나만 둔다.
 - 테이블 DDL을 바꾸면 01_DESIGN의 설계 DDL도 같이 고친다.
 - 여러 테이블을 잠그는 SP는 `database*/TABLE_LOCK_ORDER.md`의 순서를 따른다.
+- 행 수는 `COUNT(*)` 대신 PK 컬럼으로 센다(`COUNT(member_id)`). PK가 없는 파생 결과(`information_schema` 등)는 예외다.
 
 ## 코드
 - 로그는 log4js만 쓴다. `console.log`는 쓰지 않는다. 예외: CLI가 키 원문을 stdout으로 내보낼 때, 테스트·부하 스크립트(`tests/`, `loadtest/`)가 결과를 출력할 때.

@@ -106,11 +106,11 @@ if (mode === 'setup' || mode === 'clean' || mode === 'verify') {
             console.log(vars.map((v) => `${v.Variable_name}=${v.Value}`).join(' '));
             const { seasonKeys } = await import(root + 'core/redis.js');
             for (const id of IDS) {
-                const [{ n, s }] = await q('SELECT COUNT(*) n, COALESCE(SUM(score), 0) s FROM ranking_entry WHERE ranking_id = ?', [id]);
-                const [{ k }] = await q('SELECT COUNT(*) k FROM ranking_submit_key WHERE ranking_id = ?', [id]);
+                const [{ n, s }] = await q('SELECT COUNT(member_id) n, COALESCE(SUM(score), 0) s FROM ranking_entry WHERE ranking_id = ?', [id]);
+                const [{ k }] = await q('SELECT COUNT(request_id) k FROM ranking_submit_key WHERE ranking_id = ?', [id]);
                 const zkey = seasonKeys(id, 1).board;
                 const z = await R.zCard(zkey);
-                const [[{ lg, rj }]] = await LM.query('SELECT COUNT(*) lg, SUM(rejected IS NOT NULL) rj FROM log_ranking_submit WHERE ranking_id = ?', [id]);
+                const [[{ lg, rj }]] = await LM.query('SELECT COUNT(log_ranking_submit_id) lg, SUM(rejected IS NOT NULL) rj FROM log_ranking_submit WHERE ranking_id = ?', [id]);
                 console.log(`ranking ${id}: entry=${n} sumScore=${s} submitKey=${k} redisZcard=${z} log=${lg} rejected=${rj ?? 0} ${Number(n) === z ? 'OK' : 'MISMATCH'}`);
             }
         }

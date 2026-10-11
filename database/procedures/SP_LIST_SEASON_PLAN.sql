@@ -6,6 +6,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_LIST_SEASON_PLAN
     -- 작성 : 2026.10.10 trisakion
+    -- 수정 : 2026.10.12 trisakion COUNT(*) → COUNT(PK 컬럼) (DB 규칙)
     -- 내용 : 워커 스케줄러(01_DESIGN 3.3)가 주기마다 읽어 시즌 행을 "현재 + 다음 2개"까지 미리 만든다.
     --        - 다음 시즌의 시각 계산(timezone 달력 경계)은 앱이 한다. MySQL CONVERT_TZ는 시간대 테이블 적재가
     --          설치마다 필요해서다. SP는 계산 재료만 돌려준다.
@@ -29,7 +30,7 @@ BEGIN
     -- ponytail: 랭킹마다 ranking_season을 PK 범위로 두 번 읽는다. 랭킹이 수천 개가 되면 한 번의 GROUP BY로 합친다.
     SELECT d.ranking_id, d.timezone, d.start_at, d.end_at, d.cycle_type, d.cycle_value, d.wait_period,
            l.season_no AS last_season_no, l.start_at AS last_start_at, l.end_at AS last_end_at,
-           (SELECT COUNT(*) FROM ranking_season a WHERE a.ranking_id = d.ranking_id AND a.end_at > v_now) AS ahead_count,
+           (SELECT COUNT(a.season_no) FROM ranking_season a WHERE a.ranking_id = d.ranking_id AND a.end_at > v_now) AS ahead_count,
            v_now AS db_now
       FROM ranking_definition d
       LEFT JOIN ranking_season l

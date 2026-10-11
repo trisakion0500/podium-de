@@ -81,11 +81,12 @@ export const CycleType = {
 /**
  * 보상 구간 기준 (ranking_reward_tier.range_type, 01_DESIGN 2.6)
  * @author trisakion
+ * @modified 2026-10-12 trisakion PERCENT 판정 규칙 명시 (D-69)
  */
 export const RangeType = {
     /** 순위 구간 */
     RANK: 1,
-    /** 제재 제외 참가자 수 대비 백분율 구간 */
+    /** 제재 제외 참가자 수 대비 백분율 구간. 내 앞 사람 비율 (순위-1)/P가 [from-1, to)%면 해당 — 상위 t% 누적 인원 ceil(P×t/100) (D-69) */
     PERCENT: 2,
 } as const;
 
@@ -126,7 +127,7 @@ export const RewardStatus = {
     PENDING: 1,
     /** 게임 서버 ack 완료 */
     DELIVERED: 2,
-    /** 대상이었으나 제재로 미지급 */
+    /** 제재로 미지급 (확정 시 제재 제외된 행 전부, D-68) */
     REJECTED: 3,
 } as const;
 
@@ -189,6 +190,7 @@ export const PartitionTarget = {
  * @modified 2026-10-06 trisakion API 계층 코드와 한 번호 공간으로 정리
  * @modified 2026-10-07 trisakion 조회 SP 코드(1301) 추가
  * @modified 2026-10-10 trisakion 정산 SP 코드(1009~1013) 추가
+ * @modified 2026-10-11 trisakion 확정 SP 코드(1014~1015) 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -219,6 +221,10 @@ export const SpResult = {
     SETTLING_NOT_OUT: 1012,
     /** REVIEW 전이: 가순위가 끝나지 않음 (작업 테이블에 남은 행 또는 final_rank NULL 행) */
     PROVISIONAL_RANK_INCOMPLETE: 1013,
+    /** FINALIZING 전이: review_until 전이거나 검수 보류(review_hold = 1) */
+    REVIEW_NOT_DUE: 1014,
+    /** 확정: 앞 단계가 끝나지 않음 (participant_count·tier_snapshot 없음, 또는 순위 재부여 미완료) */
+    FINALIZE_INCOMPLETE: 1015,
     /** 제출: ranking_definition에 랭킹이 없음 */
     RANKING_NOT_FOUND: 1101,
     /** 제출: 랭킹이 ACTIVE가 아님 (D-34) */

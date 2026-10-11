@@ -1,6 +1,6 @@
 /**
  * 3단계 자가 복구 회귀 테스트 (01_DESIGN 6장, D-60). Redis를 강제로 MySQL과 어긋나게 만들고 복구되는지 본다.
- * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이도 함께 본다.
+ * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이와 정산(7.1~7.6)도 함께 본다.
  * 로컬 개발 DB·Redis 전용이다. 운영 DB에 실행하지 않는다.
  *
  * 순서 (프로젝트 루트에서):
@@ -9,9 +9,12 @@
  *
  * - 워커와 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199). 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
- * - 테스트 랭킹 940~951을 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, job_state, 제출 이력, Redis 키, 테스트 API 키).
+ * - 테스트 랭킹 940~959를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
  * - API 키 원문은 메모리에만 두고 출력하지 않는다.
  * - 워커 로그는 logs/app.log.worker.t* 에 남는다. 로그 문구로 판정하는 항목이 있다.
+ * - 진행 상황: 구간 시작·끝에 [경과 mm:ss], 30초마다 "... 진행 중: run N / 구간" 하트비트를 찍는다. 출력이 30초 넘게 멈추면
+ *   그 자리에서 멈춘 것이다. 구간이 5분을 넘거나 예외가 나면 ABORTED와 요약을 찍고 종료 코드 1로 끝난다. 워커·API가
+ *   스스로 종료하면(기동 실패 등) err 로그의 마지막 ERROR 줄과 함께 FAIL로 찍는다.
  * - 규모는 시즌당 2,500명이다. 100만 명 규모 수치는 01_DESIGN 1.7의 실측값을 본다.
  * @author trisakion
  */
@@ -28,12 +31,14 @@ const { seasonKeys, createRedis, closeRedis, finishRebuild } = await import(root
 const { composite, startRankingRefresh } = await import(root + 'core/rankings.js');
 const { startRecovery } = await import(root + 'worker/recovery.js');
 const { nextSeason } = await import(root + 'worker/scheduler.js');
+const { rewardGaps } = await import(root + 'worker/settle.js');
 const { hashApiKey } = await import(root + 'api/auth.js');
 const { ApiScope } = await import(root + 'core/codes.js');
 const { createClient } = await import('redis');
 
 /** 복구 시나리오(BEST·SUM), 락 대기, API 경유(BEST·SUM), 스케줄러(FIXED, 단일 시즌, 종료), 정산(DESC, ASC 이어받기, 빈 시즌) */
-const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940 };
+const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
+    finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959 };
 const ALL_IDS = Object.values(IDS);
 const N = 2500;
 const PORT = Number(process.env.TEST_PORT ?? 3199);
@@ -84,10 +89,10 @@ async function clean() {
                 await q(`ALTER TABLE ${t} DROP PARTITION ${ps.join(', ')}`);
         }
     }
-    for (const t of ['ranking_season', 'ranking_definition', 'ranking_exclusion', 'job_state', 'ranking_entry_settling'])
+    for (const t of ['ranking_season', 'ranking_definition', 'ranking_reward_tier', 'ranking_season_top', 'ranking_exclusion', 'job_state', 'ranking_entry_settling'])
         await q(`DELETE FROM ${t} WHERE ranking_id IN (?)`, [ALL_IDS]);
     // 정산 도중 끊긴 테스트가 남긴 정렬 인덱스·가상 컬럼 (작업 테이블이 비어 있을 때만 — 다른 시즌 정산 중이면 건드리지 않는다)
-    if ((await q('SELECT COUNT(*) n FROM ranking_entry_settling'))[0].n === 0) {
+    if ((await q('SELECT COUNT(member_id) n FROM ranking_entry_settling'))[0].n === 0) {
         if ((await q("SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ranking_entry_settling' AND INDEX_NAME = 'ix_settle_order'")).length)
             await q('ALTER TABLE ranking_entry_settling DROP INDEX ix_settle_order');
         if ((await q("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ranking_entry_settling' AND COLUMN_NAME = 'settle_slot'")).length)
@@ -161,9 +166,25 @@ const workers = new Map();
  * @returns 없음
  */
 function startWorker(id, env = {}) {
-    const p = spawn(process.execPath, ['dist/worker.js'], {
-        stdio: 'ignore',
-        env: { ...process.env, INSTANCE_ID: id, RECOVERY_INTERVAL_MS: '1000', RECOVERY_MARGIN_SEC: '5', ...env },
+    spawnTracked(id, 'worker', { RECOVERY_INTERVAL_MS: '1000', RECOVERY_MARGIN_SEC: '5', ...env });
+}
+
+/**
+ * 워커·API를 띄우고, 테스트가 끄기 전에 스스로 종료하면(기동 실패 등) 바로 FAIL로 알린다.
+ * 스키마 불일치 같은 기동 거부가 "응답 없음"이나 시간 초과로 묻히지 않게 err 로그의 마지막 ERROR 줄을 함께 찍는다.
+ * @param id 인스턴스 ID (로그 파일 suffix)
+ * @param kind 'worker' | 'api'
+ * @param env 추가 환경 변수
+ * @returns 없음
+ */
+function spawnTracked(id, kind, env = {}) {
+    const p = spawn(process.execPath, [`dist/${kind}.js`], { stdio: 'ignore', env: { ...process.env, INSTANCE_ID: id, ...env } });
+    p.on('exit', (code) => {
+        if (p.stopping)
+            return;
+        const errLog = `logs/err.log.${kind}.${id}`;
+        const last = existsSync(errLog) ? readFileSync(errLog, 'utf8').split('\n').filter((l) => l.includes('[ERROR]')).at(-1) ?? '' : '';
+        check(`프로세스 ${kind} ${id} 예기치 않은 종료 (code ${code})`, false, last.slice(0, 300));
     });
     workers.set(id, p);
 }
@@ -173,10 +194,23 @@ function startWorker(id, env = {}) {
  * @returns 없음
  */
 async function killAll() {
-    for (const p of workers.values())
-        p.kill();
-    workers.clear();
+    for (const id of [...workers.keys()])
+        stopProcess(id);
     await sleep(500);
+}
+
+/**
+ * 테스트가 의도해서 프로세스 하나를 끈다 (예기치 않은 종료로 세지 않는다).
+ * @param id 인스턴스 ID
+ * @returns 없음
+ */
+function stopProcess(id) {
+    const p = workers.get(id);
+    if (!p)
+        return;
+    p.stopping = true;
+    p.kill();
+    workers.delete(id);
 }
 
 /**
@@ -325,8 +359,7 @@ async function recoveryScenarios() {
     await sleep(2500);
     check('S5 재구축은 한 워커에서 1회만', rebuilt() - before === 1, `(${rebuilt() - before}회)`);
 
-    workers.get('t1').kill();
-    workers.delete('t1');
+    stopProcess('t1');
     await sleep(500);
     const t2Before = logCount('t2', `rebuilt ranking=${IDS.best} `);
     await R.del(best.ready);
@@ -493,7 +526,7 @@ async function apiScenarios() {
     const writeKey = await mk('rtest-write', ApiScope.WRITE);
     const readKey = await mk('rtest-read', ApiScope.READ);
     startWorker('t5');
-    workers.set('api', spawn(process.execPath, ['dist/api.js'], { stdio: 'ignore', env: { ...process.env, INSTANCE_ID: 'tapi', API_PORT: String(PORT) } }));
+    spawnTracked('tapi', 'api', { API_PORT: String(PORT) });
 
     const post = async (id, body) => (await fetch(`${BASE}/v1/rankings/${id}/scores`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': writeKey }, body: JSON.stringify(body),
@@ -725,7 +758,7 @@ async function finalOrder(id) {
  * @returns 깨끗하면 true
  */
 async function settlingClean() {
-    const [{ n }] = await q('SELECT COUNT(*) n FROM ranking_entry_settling');
+    const [{ n }] = await q('SELECT COUNT(member_id) n FROM ranking_entry_settling');
     const col = await q("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ranking_entry_settling' AND COLUMN_NAME = 'settle_slot'");
     const idx = await q("SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ranking_entry_settling' AND INDEX_NAME = 'ix_settle_order'");
     return n === 0 && col.length === 0 && idx.length === 0;
@@ -820,30 +853,266 @@ async function settlementScenarios() {
     check('T7 review_until = 전이 시각 + review_period', rv.s > 3500 && rv.s <= 3600, `(${rv.s}s 남음)`);
     check('T8 Redis 시즌 키 삭제 (센티넬·순위표)', await R.exists([keys.ready, keys.board, keys.ver]) === 0);
     check('T9 작업 테이블 비움, 정렬 인덱스·settle_slot 제거', await settlingClean());
-    check('T10 빈 시즌 REVIEW, entry 0행', (await q('SELECT COUNT(*) n FROM ranking_entry WHERE ranking_id = ?', [IDS.settleEmpty]))[0].n === 0);
+    check('T10 빈 시즌 REVIEW, entry 0행', (await q('SELECT COUNT(member_id) n FROM ranking_entry WHERE ranking_id = ?', [IDS.settleEmpty]))[0].n === 0);
     const noPart = await until(async () => (await q('SELECT status FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [IDS.settleNoPart]))[0]?.status === 5, 15000);
     check('T11 파티션 없는 지난 시즌은 빈 시즌으로 REVIEW, Redis 키 삭제', noPart >= 0 && await R.exists(seasonKeys(IDS.settleNoPart, 1).ready) === 0, `(${noPart}ms)`);
+
+    await killAll();
+    await finalizeScenarios(redisOrder);
+}
+
+/**
+ * 확정 시나리오 (01_DESIGN 7.5, 7.6). 정산 시나리오가 REVIEW로 만든 시즌을 이어서 쓴다.
+ * - DESC: 제재 2명(이 시즌, 전 시즌 0) 제외, 순위 재부여, 보상 구간(RANK, PERCENT, 겹침), Top N. 손으로 전이와 한 청크만
+ *   한 상태(워커가 도중에 죽은 상태)에서 워커가 이어받는다. 전이 뒤 구간을 고쳐도 스냅샷으로 판정한다.
+ * - ASC: 검수 기간이 지났어도 보류면 REVIEW에 머문다. 빈 시즌: 참가자 0으로 DELIVERING.
+ * @param redisOrder 정산 시나리오에서 잡은 DESC 시즌의 마감 Redis 순서 (= 가순위 순서)
+ * @returns 없음
+ */
+async function finalizeScenarios(redisOrder) {
+    const id = IDS.settleDesc;
+    const tiers = [[1, 1, 1, 10, 'TOP10'], [2, 2, 1, 10, 'P10'], [3, 1, 5, 400, 'R400'], [4, 2, 11, 30, 'P30']];
+    await q('INSERT INTO ranking_reward_tier (ranking_id, tier_no, range_type, range_from, range_to, reward_code) VALUES ?', [tiers.map((x) => [id, ...x])]);
+    const banned = [redisOrder[2], redisOrder[49]];
+    await q(`INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at)
+             VALUES (?, 1, ?, 'test', 'rt', NOW(3)), (?, 0, ?, 'test', 'rt', NOW(3)), (?, 1, 'nobody', 'test', 'rt', NOW(3))`, [id, banned[0], id, banned[1], id]);
+
+    await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 1 SECOND, review_hold = 1 WHERE ranking_id IN (?) AND season_no = 1', [[id, IDS.settleAsc]]);
+    await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 1 SECOND WHERE ranking_id = ? AND season_no = 1', [IDS.settleEmpty]);
+    const held = await callSp(A, 'SP_START_FINALIZING', [id, 1]);
+    await q('UPDATE ranking_season SET review_hold = 0 WHERE ranking_id = ? AND season_no = 1', [id]);
+    await q('UPDATE ranking_season SET review_until = NOW(3) + INTERVAL 1 HOUR WHERE ranking_id = ? AND season_no = 1', [id]);
+    const early = await callSp(A, 'SP_START_FINALIZING', [id, 1]);
+    await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 1 SECOND WHERE ranking_id = ? AND season_no = 1', [id]);
+    const start = await callSp(A, 'SP_START_FINALIZING', [id, 1]);
+    check('F1 보류 1014, 검수 기간 전 1014, 이후 FINALIZING', held.result === 1014 && early.result === 1014 && start.result === 0, `(${held.result}, ${early.result}, ${start.result})`);
+
+    // 워커가 제재 제외와 한 청크만 하고 죽은 상태. 전이 뒤 구간 변경은 판정에 반영되지 않아야 한다
+    const ex = await callSp(A, 'SP_UPDATE_FINAL_EXCLUSION', [id, 1]);
+    const part = await callSp(A, 'SP_UPDATE_FINAL_RANK', [id, 1, 0, 100]);
+    await q("UPDATE ranking_reward_tier SET reward_code = 'CHANGED' WHERE ranking_id = ? AND tier_no = 1", [id]);
+    check('F2 제재 제외 후 참가자 N-2, 한 청크 100행', ex.rows[0]?.participant_count === N - 2 && part.rows[0]?.ranked_count === 100, `(${ex.rows[0]?.participant_count})`);
+
+    startWorker('t8', { SCHEDULER_INTERVAL_MS: '500', SETTLE_CHUNK: '300' });
+    const delivering = await until(async () => {
+        const rows = await q('SELECT status FROM ranking_season WHERE ranking_id IN (?) AND season_no = 1', [[id, IDS.settleEmpty]]);
+        return rows.length === 2 && rows.every((r) => r.status === 7);
+    }, 30000);
+    check('F3 DESC·빈 시즌 DELIVERING', delivering >= 0, `(${delivering}ms)`);
+
+    const P = N - 2;
+    const expected = redisOrder.filter((m) => !banned.includes(m));
+    // RANK 구간이 PERCENT보다 먼저, 같은 종류는 tier_no 순. PERCENT는 내 앞 사람 비율 (r-1)/P가 [from-1, to)% 안 (D-69)
+    const reward = (r) => [...tiers].sort((a, b) => a[1] - b[1] || a[0] - b[0]).find(([, type, from, to]) =>
+        type === 1 ? r >= from && r <= to : (from - 1) * P <= (r - 1) * 100 && (r - 1) * 100 < to * P)?.[4] ?? null;
+    const rows = await q('SELECT member_id, final_rank, reward_code, reward_status, sanctioned FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND final_rank IS NOT NULL ORDER BY final_rank', [id]);
+    const rankOk = rows.length === P && rows.every((r, i) => r.final_rank === i + 1 && r.member_id === expected[i]);
+    check('F4 순위 재부여: 1..N-2 연속, 가순위 순서에서 제재만 빠짐 (이어받기)', rankOk, `(${rows.length}행, 첫 불일치 ${rows.findIndex((r, i) => r.member_id !== expected[i])})`);
+    const bad = rows.find((r) => r.reward_code !== reward(r.final_rank) || r.reward_status !== (reward(r.final_rank) ? 1 : 0) || r.sanctioned !== 0);
+    check('F5 보상 판정: RANK·PERCENT, 겹치면 RANK 먼저·같은 종류는 작은 구간 번호, 전이 시 스냅샷 (CHANGED 없음)', !bad, bad ? `(rank ${bad.final_rank}: ${bad.reward_code})` : `(PENDING ${rows.filter((r) => r.reward_status === 1).length})`);
+
+    const sanc = await q('SELECT final_rank, reward_code, reward_status, sanctioned FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id IN (?)', [id, banned]);
+    const [season] = await q('SELECT participant_count, JSON_LENGTH(tier_snapshot) tiers FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [id]);
+    check('F6 제재 행 final_rank NULL·sanctioned 1·REJECTED, participant_count 기록', sanc.length === 2 && sanc.every((r) => r.final_rank === null && r.sanctioned === 1 && r.reward_status === 3 && r.reward_code === null)
+        && season.participant_count === P && season.tiers === tiers.length);
+
+    const top = await q('SELECT final_rank, member_id FROM ranking_season_top WHERE ranking_id = ? AND season_no = 1 ORDER BY final_rank', [id]);
+    check('F7 Top N: 상위 top_size(100)행, 확정 순위와 같음', top.length === 100 && top.every((r, i) => r.final_rank === i + 1 && r.member_id === expected[i]));
+
+    const [empty] = await q('SELECT participant_count, JSON_LENGTH(tier_snapshot) tiers FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [IDS.settleEmpty]);
+    const [asc] = await q('SELECT status FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [IDS.settleAsc]);
+    check('F8 빈 시즌 참가자 0·구간 없음 빈 배열, 보류 시즌은 REVIEW 유지', empty.participant_count === 0 && empty.tiers === 0 && asc.status === 5, `(${empty.participant_count}, ${empty.tiers}, ${asc.status})`);
+
+    await killAll();
+    await finalizeEdges();
+}
+
+/**
+ * 가순위가 1..n으로 매겨진 REVIEW 시즌을 직접 만든다 (검수 기간 지남). 멤버 f0..f{n-1}이 순서대로 1위..n위다.
+ * @param id 랭킹 ID
+ * @param n 행 수
+ * @param tiers 보상 구간 [tier_no, range_type, from, to, code] 목록
+ * @returns 없음
+ */
+async function createReviewSeason(id, n, tiers = []) {
+    await createDefinition(id);
+    await createSeason(id, 1, -60, -30, 5);
+    await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 1 SECOND WHERE ranking_id = ? AND season_no = 1', [id]);
+    for (let i = 0; i < n; i += 5000) {
+        const rows = [];
+        for (let j = i; j < Math.min(n, i + 5000); j++)
+            rows.push([id, 1, `f${j}`, n - j, new Date(), 1, new Date(), j + 1]);
+        await q('INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at, final_rank) VALUES ?', [rows]);
+    }
+    if (tiers.length)
+        await q('INSERT INTO ranking_reward_tier (ranking_id, tier_no, range_type, range_from, range_to, reward_code) VALUES ?', [tiers.map((x) => [id, ...x])]);
+}
+
+/**
+ * 제재를 이 시즌(1)에 등록한다.
+ * @param id 랭킹 ID
+ * @param members 멤버 ID 목록
+ * @returns 없음
+ */
+async function ban(id, members) {
+    await q("INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES ?",
+        [members.map((m) => [id, 1, m, 'test', 'rt', new Date()])]);
+}
+
+/**
+ * 워커 finalize()와 같은 순서로 SP를 직접 부른다 (전이 → 제재 제외 → 재부여 청크 → DELIVERING).
+ * @param id 랭킹 ID
+ * @param chunk 청크 크기
+ * @param stopAfter 이만큼 청크를 한 뒤 DELIVERING 없이 멈춤 (워커가 도중에 죽은 상태, 기본: 끝까지)
+ * @returns DELIVERING 전이 RESULT (멈췄으면 null)
+ */
+async function runFinalize(id, chunk = 50, stopAfter = Infinity) {
+    await callSp(A, 'SP_START_FINALIZING', [id, 1]);
+    await callSp(A, 'SP_UPDATE_FINAL_EXCLUSION', [id, 1]);
+    let base = 0;
+    for (let c = 0; c < stopAfter; c++) {
+        const n = (await callSp(A, 'SP_UPDATE_FINAL_RANK', [id, 1, base, chunk])).rows[0].ranked_count;
+        if (n === 0)
+            break;
+        base += n;
+    }
+    return stopAfter === Infinity ? (await callSp(A, 'SP_UPDATE_SEASON_DELIVERING', [id, 1])).result : null;
+}
+
+/**
+ * 확정 경계 시나리오 (SP 직접 호출, 워커 없음).
+ * - 재부여 도중 DELIVERING 1015, 그 사이 추가된 제재(처리한 구간·남은 구간)를 다시 돌아 반영, 재호출 멱등
+ * - 전원 제재(참가자 0), 참가자 수 < top_size
+ * - PERCENT 경계(D-69): 상위 t% 누적 인원 ceil(P×t/100), 참가자 1명이면 1위가 최상위 구간
+ * @returns 없음
+ */
+async function finalizeEdges() {
+    // 재부여 도중 중단 + 제재 추가
+    await createReviewSeason(IDS.finAdd, 200);
+    await ban(IDS.finAdd, ['f9']);
+    await runFinalize(IDS.finAdd, 50, 1);
+    const early = await callSp(A, 'SP_UPDATE_SEASON_DELIVERING', [IDS.finAdd, 1]);
+    await ban(IDS.finAdd, ['f20', 'f99']); // f20은 처리한 청크(새 20위), f99는 남은 구간
+    const done = await runFinalize(IDS.finAdd);
+    const out = await q('SELECT member_id, final_rank FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND final_rank IS NOT NULL ORDER BY final_rank', [IDS.finAdd]);
+    const expect = Array.from({ length: 200 }, (_, j) => `f${j}`).filter((m) => !['f9', 'f20', 'f99'].includes(m));
+    check('F9 재부여 도중 DELIVERING 1015, 도중 추가된 제재는 다시 돌아 반영 (1..197 연속, 원래 순서)', early.result === 1015 && done === 0
+        && out.length === 197 && out.every((r, i) => r.final_rank === i + 1 && r.member_id === expect[i]), `(${early.result}, ${done}, ${out.length}행)`);
+
+    const again = [(await callSp(A, 'SP_START_FINALIZING', [IDS.finAdd, 1])).result, (await callSp(A, 'SP_UPDATE_SEASON_DELIVERING', [IDS.finAdd, 1])).result];
+    const [{ n: topN }] = await q('SELECT COUNT(final_rank) n FROM ranking_season_top WHERE ranking_id = ?', [IDS.finAdd]);
+    check('F10 DELIVERING 뒤 전이 SP 재호출은 성공(0), Top N 중복 적재 없음', again.every((r) => r === 0) && topN === 100, `(${again}, top ${topN})`);
+
+    // 전원 제재, 참가자 수 < top_size
+    await createReviewSeason(IDS.finAllBanned, 5, [[1, 1, 1, 3, 'A']]);
+    await ban(IDS.finAllBanned, ['f0', 'f1', 'f2', 'f3', 'f4']);
+    const allBanned = await runFinalize(IDS.finAllBanned);
+    const [ab] = await q(`SELECT s.status, s.participant_count p, (SELECT COUNT(t.final_rank) FROM ranking_season_top t WHERE t.ranking_id = s.ranking_id) top,
+                                 (SELECT COUNT(e.member_id) FROM ranking_entry e WHERE e.ranking_id = s.ranking_id AND e.reward_status = 3) rejected
+                            FROM ranking_season s WHERE s.ranking_id = ?`, [IDS.finAllBanned]);
+    await createReviewSeason(IDS.finSmall, 5, [[1, 1, 1, 3, 'A']]);
+    await ban(IDS.finSmall, ['f1']);
+    const small = await runFinalize(IDS.finSmall);
+    const top = await q('SELECT final_rank, member_id FROM ranking_season_top WHERE ranking_id = ? ORDER BY final_rank', [IDS.finSmall]);
+    check('F11 전원 제재: 참가자 0·Top N 0·전원 REJECTED로 DELIVERING / 참가자 4 < top_size: Top N 4행', allBanned === 0 && ab.status === 7 && ab.p === 0 && ab.top === 0 && ab.rejected === 5
+        && small === 0 && top.map((r) => `${r.final_rank}:${r.member_id}`).join() === '1:f0,2:f2,3:f3,4:f4', `(${JSON.stringify(ab)}, ${top.length})`);
+
+    // PERCENT 경계 (D-69): 상위 1% 누적 인원은 ceil(P/100). P=20001이면 201명(200.01을 올림), 202위부터 밖
+    const P = 20001;
+    await createReviewSeason(IDS.finPercent, P, [[1, 2, 1, 1, 'IN'], [2, 2, 2, 100, 'REST']]);
+    const pct = await runFinalize(IDS.finPercent, 5000);
+    const got = await q('SELECT final_rank, reward_code FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND final_rank IN (201, 202, ?) ORDER BY final_rank', [IDS.finPercent, P]);
+    check('F12 PERCENT 경계: 상위 1%는 ceil(P/100)=201명, 202위·꼴찌는 다음 구간', pct === 0 && got.map((x) => x.reward_code).join() === 'IN,REST,REST',
+        `(판정 ${got.map((x) => `${x.final_rank}:${x.reward_code}`)})`);
+    // 혼자 참가한 시즌: 1위는 앞 사람 0%라 최상위 구간
+    await createReviewSeason(IDS.finAlone, 1, [[1, 2, 1, 1, 'IN'], [2, 2, 2, 100, 'REST']]);
+    const alone = await runFinalize(IDS.finAlone);
+    const [solo] = await q('SELECT reward_code FROM ranking_entry WHERE ranking_id = ? AND season_no = 1', [IDS.finAlone]);
+    check('F13 참가자 1명이면 1위는 상위 1% 구간', alone === 0 && solo?.reward_code === 'IN', `(${solo?.reward_code})`);
+
+    // 상위 RANK + 하위 PERCENT. tier_no를 거꾸로 넣고(PERCENT가 작은 번호) PERCENT를 11%부터 둔 설정
+    const inPct = (r, n, f, t) => (Math.max(f, 1) - 1) * n <= (r - 1) * 100 && (r - 1) * 100 < t * n;
+    const expectMixed = (mixed, n) => (r) => {
+        const hit = [...mixed].sort((a, b) => a[1] - b[1] || a[0] - b[0])
+            .find(([, type, f, t]) => type === 1 ? r >= f && r <= t : inPct(r, n, f, t));
+        return hit?.[4] ?? null;
+    };
+    const mixedGap = [[1, 2, 11, 50, 'P50'], [2, 2, 51, 100, 'P100'], [3, 1, 1, 1, 'R1'], [4, 1, 2, 10, 'R10']];
+    const mixedOk = [[1, 1, 1, 1, 'R1'], [2, 1, 2, 3, 'R3'], [3, 2, 1, 10, 'P10'], [4, 2, 11, 100, 'REST']];
+    let mixedBad = 0;
+    for (const [mid, n, tiersX] of [[IDS.finMixed, 1000, mixedGap], [IDS.finMixedSmall, 7, mixedOk]]) {
+        await createReviewSeason(mid, n, tiersX);
+        await runFinalize(mid, 300);
+        const exp = expectMixed(tiersX, n);
+        const got2 = await q('SELECT final_rank, reward_code FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 ORDER BY final_rank', [mid]);
+        mixedBad += got2.filter((x) => x.reward_code !== exp(x.final_rank)).length + (got2.length === n ? 0 : 1);
+    }
+    const [{ r1, none }] = await q("SELECT MAX(reward_code = 'R1' AND final_rank = 1) r1, SUM(reward_code IS NULL) none FROM ranking_entry WHERE ranking_id = ?", [IDS.finMixed]);
+    check('F14 상위 RANK + 하위 PERCENT: tier_no 역순이어도 RANK 우선, 11~100위만 보상 없음 (P=1000), P=7 공백 없음', mixedBad === 0 && r1 === 1 && Number(none) === 90, `(불일치 ${mixedBad}, 보상 없음 ${none})`);
+
+    // 공백 계산(rewardGaps)이 SP 판정 규칙의 전수 결과와 같은지 — 구성 3개 × P 1..300
+    const toTiers = (xs) => xs.map(([tier_no, range_type, range_from, range_to]) => ({ tier_no, range_type, range_from, range_to }));
+    let gapBad = 0;
+    for (const cfg of [mixedGap, mixedOk, [[1, 1, 5, 8, 'A'], [2, 2, 20, 30, 'B'], [3, 2, 0, 3, 'C']]])
+        for (let n = 1; n <= 300; n++) {
+            const covered = Array.from({ length: n }, (_, i) => expectMixed(cfg, n)(i + 1) !== null);
+            const last = covered.lastIndexOf(true);
+            const brute = [];
+            for (let i = 0; i < last; i++)
+                if (!covered[i])
+                    brute.length && brute.at(-1)[1] === i ? (brute.at(-1)[1] = i + 1) : brute.push([i + 1, i + 1]);
+            if (JSON.stringify(brute) !== JSON.stringify(rewardGaps(toTiers(cfg), n)))
+                gapBad++;
+        }
+    check('F15 보상 공백 계산이 판정 규칙 전수 결과와 일치 (P 1..300, 구성 3개), P=1000 역순 설정은 11..100', gapBad === 0
+        && JSON.stringify(rewardGaps(toTiers(mixedGap), 1000)) === '[[11,100]]', `(불일치 ${gapBad})`);
 }
 
 // ------------------------------------------------------------------------------------------------ 실행
 
+/** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
+const SECTION_TIMEOUT_MS = 5 * 60_000;
+/** 진행 하트비트 간격 — 로그가 이보다 오래 멈추면 그 자리에서 멈춘 것이다 */
+const HEARTBEAT_MS = 30_000;
+const t0 = Date.now();
+const clock = () => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    return `[${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}]`;
+};
+let where = '시작 전';
+let sectionAt = Date.now();
+const heartbeat = setInterval(() => console.log(`${clock()} ... 진행 중: ${where} (${Math.round((Date.now() - sectionAt) / 1000)}s, 통과 ${results.filter(Boolean).length}/${results.length})`), HEARTBEAT_MS);
+
 const unhandled = [];
 process.on('unhandledRejection', (e) => unhandled.push(e));
+let aborted = null;
 try {
     const times = Number(process.argv[2] ?? 3);
     for (let i = 1; i <= times; i++) {
-        console.log(`\n=== run ${i} ===`);
+        console.log(`\n${clock()} === run ${i} ===`);
         for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios]]) {
-            console.log(`-- ${name}`);
+            where = `run ${i} / ${name}`;
+            sectionAt = Date.now();
+            console.log(`${clock()} -- ${name} 시작`);
             await clean();
+            let timer;
             try {
-                await fn();
+                await Promise.race([fn(), new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error(`구간 시간 초과 ${SECTION_TIMEOUT_MS / 1000}s`)), SECTION_TIMEOUT_MS);
+                })]);
             } finally {
+                clearTimeout(timer);
                 await killAll();
             }
+            console.log(`${clock()} -- ${name} 끝 ${Math.round((Date.now() - sectionAt) / 1000)}s`);
         }
     }
+} catch (e) {
+    // 예외로 끝나도 정리와 요약은 한다. 시간 초과면 구간 함수가 뒤에서 아직 돌 수 있어 마지막에 강제 종료한다.
+    aborted = e;
+    check(`ABORTED ${where}`, false, e?.stack?.split('\n').slice(0, 3).join(' | ') ?? String(e));
 } finally {
+    clearInterval(heartbeat);
     await killAll();
     await clean();
     await R.close();
@@ -853,6 +1122,8 @@ try {
 }
 check('unhandled rejection 없음', unhandled.length === 0, unhandled.map(String).join('; '));
 const failed = results.filter((ok) => !ok).length;
-console.log(`\n${results.length - failed}/${results.length} passed`);
+console.log(`\n${clock()} ${aborted ? 'ABORTED — ' : ''}${results.length - failed}/${results.length} passed`);
 (await import(root + 'core/logger.js')).shutdownLogger();
 process.exitCode = failed ? 1 : 0;
+if (aborted)
+    setTimeout(() => process.exit(1), 1000).unref();

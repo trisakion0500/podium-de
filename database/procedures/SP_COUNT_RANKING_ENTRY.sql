@@ -8,6 +8,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_COUNT_RANKING_ENTRY
     -- 작성 : 2026.10.09 trisakion
+    -- 수정 : 2026.10.12 trisakion COUNT(*) → COUNT(PK 컬럼) (DB 규칙)
     -- 내용 : 복구 잡이 시즌마다 1시간 1회 Redis ZCARD와 비교한다 (01_DESIGN 6.4).
     --        RESULT: 0 성공, 1001 파라미터 [codes.SpResult]
     --        성공 데이터: entry_count
@@ -33,7 +34,7 @@ BEGIN
         END IF;
 
         SELECT 0 AS RESULT;
-        SELECT COUNT(*) AS entry_count
+        SELECT COUNT(e.member_id) AS entry_count
           FROM ranking_entry e
          WHERE e.ranking_id = i_ranking_id AND e.season_no = i_season_no
            AND NOT EXISTS (
