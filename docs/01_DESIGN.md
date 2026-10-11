@@ -238,7 +238,7 @@ CREATE TABLE `ranking_reward_tier` (
 ```
 
 - `reward_code`는 게임 서버가 해석하는 코드이며, 랭킹 서버는 의미를 알지 않는다.
-- 정산 시점에 적용된 구간은 시즌에 고정한다.
+- 확정 시작(REVIEW → FINALIZING) 시점의 구간을 시즌에 고정한다(`tier_snapshot`, 7.6).
 - 한 행에 `reward_code` 하나만 둔다. 구간이 겹쳐도 보상은 하나다.
 - **겹칠 때 우선순위:** RANK 구간이 PERCENT보다 먼저이고, 같은 종류끼리는 `tier_no`가 작은 쪽이다 (D-69).
 - PERCENT 구간은 제재 유저를 제외한 참가자 수 P 기준으로 계산한다.
@@ -819,7 +819,7 @@ UPDATE ranking_entry_settling s
 - 1단계 직후 잡이 참가자 수와 스냅샷만으로 구간별 순위 범위를 계산해, 보상 순위 사이 공백이 있으면 경고한다(DB를 훑지 않음). 경고는 시즌마다 워커 프로세스당 한 번이다(재시작하면 다시 남는다).
 - 커서는 잡 메모리에만 둔다. 처리한 행은 1..커서, 남은 행은 가순위 그대로라 커서보다 크다. 중단되면 다음 실행이 제재 제외부터 한 바퀴 다시 돈다(멱등).
 - `tier_snapshot`은 REVIEW → FINALIZING 전이와 같은 문장에서 고정한다(`SP_START_FINALIZING`). 그 뒤 구간을 고쳐도 이 시즌 판정은 바뀌지 않는다.
-- 6·7단계는 한 트랜잭션이다(`SP_UPDATE_SEASON_DELIVERING`). 순위가 1..participant_count로 이어지지 않으면 거부한다(1015).
+- 6·7단계는 한 트랜잭션이다(`SP_UPDATE_SEASON_DELIVERING`). 순위가 1..participant_count로 이어지지 않으면 거부한다(1015). 제재 제외 전에 순위 재부여를 부르면 그 SP도 1015다.
 - REVIEW 전이 조건(`review_until` 경과, `review_hold = 0`)은 정산 잡 목록과 전이 SP가 함께 본다. 아니면 1014.
 - 운영 테이블에서 처리하지만 끝난 시즌 파티션만 건드리며, 제출은 시각 검사로 이 파티션에 쓰지 않는다.
 
