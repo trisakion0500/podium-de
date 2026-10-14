@@ -1,24 +1,31 @@
 import { bootstrap } from './core/bootstrap.js';
 import { ProcessType } from './core/codes.js';
+import { createPool } from './core/db.js';
 import { logger } from './core/logger.js';
 import { startRankingRefresh } from './core/rankings.js';
 import { closeRedis, createRedis } from './core/redis.js';
+import { startLogCleanup, startLogCleanupWatch } from './worker/logcleanup.js';
 import { startRecovery } from './worker/recovery.js';
 import { startScheduler } from './worker/scheduler.js';
 import { startSettlement } from './worker/settle.js';
 
 const { pool, onShutdown } = await bootstrap('worker', ProcessType.WORKER);
 const redis = createRedis();
+// 로그 정리 잡 전용. 메인 풀과 나눠 로그 DB 장애가 메인 커넥션을 붙잡지 않게 한다 (D-48).
+const logPool = createPool('APP', 'LOG');
 
 let stopRecovery: (() => Promise<void>) | undefined;
 let stopScheduler: (() => Promise<void>) | undefined;
 let stopSettlement: (() => Promise<void>) | undefined;
+let stopLogCleanup: (() => Promise<void>) | undefined;
+let stopLogCleanupWatch: (() => Promise<void>) | undefined;
 let stopRefresh: (() => void) | undefined;
-// 잡을 먼저 멈춘 뒤 정의 재조회, Redis 순으로 닫는다. DB 풀은 bootstrap이 마지막에 닫는다 (개발 컨벤션 5.2).
+// 잡을 먼저 멈춘 뒤 정의 재조회, Redis, 로그 DB 풀 순으로 닫는다. 메인 DB 풀은 bootstrap이 마지막에 닫는다 (개발 컨벤션 5.2).
 const shutdown = onShutdown(async () => {
-    await Promise.all([stopRecovery?.(), stopScheduler?.(), stopSettlement?.()]);
+    await Promise.all([stopRecovery?.(), stopScheduler?.(), stopSettlement?.(), stopLogCleanup?.(), stopLogCleanupWatch?.()]);
     stopRefresh?.();
     await closeRedis(redis);
+    await logPool.end();
 });
 
 try {
@@ -31,8 +38,10 @@ try {
 }
 stopRecovery = startRecovery(pool, redis);
 stopScheduler = startScheduler(pool);
-// 확정(FINALIZING)과 보상 전달(DELIVERING)은 4단계 구현 예정 (가순위 생성 후 REVIEW 전이까지 구현).
+// 보상 전달(DELIVERING) 이후는 4단계 구현 예정 (가순위·확정 후 DELIVERING 전이까지 구현).
 stopSettlement = startSettlement(pool, redis);
+stopLogCleanup = startLogCleanup(pool, logPool);
+stopLogCleanupWatch = startLogCleanupWatch(pool);
 logger.info('worker started');
 // pm2 --wait-ready: 기동 확인을 통과한 뒤에만 준비 완료를 알린다.
 process.send?.('ready');

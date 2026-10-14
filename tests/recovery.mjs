@@ -1,6 +1,6 @@
 /**
  * 3단계 자가 복구 회귀 테스트 (01_DESIGN 6장, D-60). Redis를 강제로 MySQL과 어긋나게 만들고 복구되는지 본다.
- * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이와 정산(7.1~7.6)도 함께 본다.
+ * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이와 정산(7.1~7.6), 로그 DB 일 파티션 정리(4.5)도 함께 본다.
  * 로컬 개발 DB·Redis 전용이다. 운영 DB에 실행하지 않는다.
  *
  * 순서 (프로젝트 루트에서):
@@ -10,6 +10,7 @@
  * - 워커와 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199). 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
  * - 테스트 랭킹 940~959를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
+ * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 지운다.
  * - API 키 원문은 메모리에만 두고 출력하지 않는다.
  * - 워커 로그는 logs/app.log.worker.t* 에 남는다. 로그 문구로 판정하는 항목이 있다.
  * - 진행 상황: 구간 시작·끝에 [경과 mm:ss], 30초마다 "... 진행 중: run N / 구간" 하트비트를 찍는다. 출력이 30초 넘게 멈추면
@@ -32,6 +33,7 @@ const { composite, startRankingRefresh } = await import(root + 'core/rankings.js
 const { startRecovery } = await import(root + 'worker/recovery.js');
 const { nextSeason } = await import(root + 'worker/scheduler.js');
 const { rewardGaps } = await import(root + 'worker/settle.js');
+const { checkLogCleanupStall, cleanupLogPartitions } = await import(root + 'worker/logcleanup.js');
 const { hashApiKey } = await import(root + 'api/auth.js');
 const { ApiScope } = await import(root + 'core/codes.js');
 const { createClient } = await import('redis');
@@ -47,6 +49,7 @@ const BASE = `http://localhost:${PORT}`;
 const M = createPool('MIGRATE');
 const A = createPool('APP');
 const LM = createPool('MIGRATE', 'LOG');
+const LA = createPool('APP', 'LOG');
 const R = createClient({ url: config.redis.url, password: config.redis.password });
 await R.connect();
 
@@ -1068,6 +1071,84 @@ async function finalizeEdges() {
         && JSON.stringify(rewardGaps(toTiers(mixedGap), 1000)) === '[[11,100]]', `(불일치 ${gapBad})`);
 }
 
+// ------------------------------------------------------------------------------------------------ 6. 로그 정리 (01_DESIGN 4.5, 11.4)
+
+/** UTC 오늘에서 days일 떨어진 날짜 'YYYY-MM-DD' */
+const utcDay = (days) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+/** 날짜의 일 파티션 이름 */
+const dayPart = (day) => `p_${day.replaceAll('-', '')}`;
+
+/**
+ * 로그 DB 제출 이력의 일 파티션 이름 (p_max 제외, 순서대로)
+ * @returns 파티션 이름 목록
+ */
+async function logDayParts() {
+    return (await LM.query("SELECT PARTITION_NAME n FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_ranking_submit' AND PARTITION_NAME <> 'p_max' ORDER BY PARTITION_ORDINAL_POSITION"))[0].map((x) => x.n);
+}
+
+/**
+ * 테스트 제출 이력 한 줄을 로그 DB에 직접 넣는다.
+ * @param requestId 요청 ID (지울 때 찾는 값)
+ * @param day 기록 날짜 'YYYY-MM-DD'
+ * @returns 없음
+ */
+async function insertLogRow(requestId, day) {
+    await LM.query(`INSERT INTO log_ranking_submit (created_at, ranking_id, season_no, request_id, member_id, input_value, result_code)
+                    VALUES (?, ?, 1, ?, 'm1', 1, 0)`, [`${day} 12:00:00`, IDS.broken, requestId]);
+}
+
+/**
+ * 로그 정리 잡: 오늘 + 7일까지 빈틈없이 생성, 보관 기간이 지난 파티션 삭제, p_max 행 감지, 워커가 job_state를 남김.
+ * 개발 로그 DB의 실제 파티션에 하는 일이다 — 보관 90일이라 최근 파티션과 행은 건드리지 않는다.
+ * @returns 없음
+ */
+async function logCleanupScenarios() {
+    await cleanupLogPartitions(LA, 90);
+    const parts = await logDayParts();
+    const days = parts.map((n) => Date.UTC(+n.slice(2, 6), +n.slice(6, 8) - 1, +n.slice(8, 10)));
+    check('L1 오늘 + 7일까지 일 파티션, 하루씩 빈틈없음', parts.includes(dayPart(utcDay(0))) && parts.at(-1) === dayPart(utcDay(7))
+        && days.every((d, i) => i === 0 || d - days[i - 1] === 86_400_000), `(${parts[0]}..${parts.at(-1)}, ${parts.length}개)`);
+    const again = await cleanupLogPartitions(LA, 90);
+    check('L2 다시 돌면 할 일 없음', again.added === 0 && again.dropped === 0 && !again.pmaxHadRows, JSON.stringify(again));
+
+    // 보관 기간이 지난 파티션 두 개를 맨 앞 파티션에서 떼어 만든다 (오래된 것부터 차례로 생긴 상태)
+    const old = [utcDay(-100), utcDay(-99)];
+    const [[first]] = await LM.query("SELECT PARTITION_DESCRIPTION d FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_ranking_submit' AND PARTITION_NAME = ?", [parts[0]]);
+    await LM.query(`ALTER TABLE log_ranking_submit REORGANIZE PARTITION \`${parts[0]}\` INTO (`
+        + old.map((d, i) => `PARTITION \`${dayPart(d)}\` VALUES LESS THAN ('${old[i + 1] ?? utcDay(-98)} 00:00:00'), `).join('')
+        + `PARTITION \`${parts[0]}\` VALUES LESS THAN (${first.d}))`);
+    await insertLogRow('rt-log-old', old[0]);
+    await insertLogRow('rt-log-today', utcDay(0));
+    const drop = await cleanupLogPartitions(LA, 90);
+    const left = await logDayParts();
+    const [[{ oldRows, todayRows }]] = await LM.query("SELECT SUM(request_id = 'rt-log-old') oldRows, SUM(request_id = 'rt-log-today') todayRows FROM log_ranking_submit WHERE ranking_id = ?", [IDS.broken]);
+    check('L3 보관 기간(90일)이 지난 파티션만 삭제, 오늘 행은 남음', drop.dropped === 2 && !left.some((n) => old.map(dayPart).includes(n)) && left.includes(dayPart(utcDay(0)))
+        && Number(oldRows) === 0 && Number(todayRows) === 1, `(dropped ${drop.dropped}, old ${oldRows}, today ${todayRows})`);
+
+    // 파티션이 없는 날의 행은 p_max로 간다 — 그날 파티션을 제때 만들지 못한 상태
+    await insertLogRow('rt-log-pmax', utcDay(30));
+    const warned = await cleanupLogPartitions(LA, 90);
+    await LM.query("DELETE FROM log_ranking_submit WHERE request_id = 'rt-log-pmax'");
+    const clear = await cleanupLogPartitions(LA, 90);
+    check('L4 p_max에 행이 있으면 알림 값, 없어지면 해제', warned.pmaxHadRows && !clear.pmaxHadRows);
+
+    await q("DELETE FROM job_state WHERE job_name = 'log_cleanup'");
+    startWorker('tL');
+    const recorded = await until(async () => (await q("SELECT job_name FROM job_state WHERE job_name = 'log_cleanup'")).length === 1, 15000);
+    check('L5 워커가 로그 정리 후 job_state(log_cleanup) 기록', recorded >= 0);
+
+    // 정체 감시: 마지막 성공이 3시간 넘으면 정체, 기록이 없으면 프로세스 가동 3시간 뒤부터 정체
+    const fresh = await checkLogCleanupStall(A);
+    await q("UPDATE job_state SET last_run_at = UTC_TIMESTAMP(3) - INTERVAL 4 HOUR WHERE job_name = 'log_cleanup'");
+    const stale = await checkLogCleanupStall(A);
+    await q("DELETE FROM job_state WHERE job_name = 'log_cleanup'");
+    const neverEarly = await checkLogCleanupStall(A, 60);
+    const neverLate = await checkLogCleanupStall(A, 4 * 3600);
+    check('L6 정체 감시: 방금 성공은 정상, 4시간 전이면 정체, 기록 없음은 가동 3시간 뒤부터 정체',
+        !fresh.stalled && stale.stalled && stale.ageSec >= 4 * 3600 && !neverEarly.stalled && neverLate.stalled && neverLate.ageSec === null,
+        JSON.stringify({ fresh, stale, neverEarly, neverLate }));
+}
+
 // ------------------------------------------------------------------------------------------------ 실행
 
 /** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
@@ -1090,7 +1171,7 @@ try {
     const times = Number(process.argv[2] ?? 3);
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
-        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios]]) {
+        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['로그 정리', logCleanupScenarios]]) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);
@@ -1119,6 +1200,7 @@ try {
     await M.end();
     await A.end();
     await LM.end();
+    await LA.end();
 }
 check('unhandled rejection 없음', unhandled.length === 0, unhandled.map(String).join('; '));
 const failed = results.filter((ok) => !ok).length;

@@ -7,6 +7,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_LOG_PARTITION_ADD
     -- 작성 : 2026.10.04 trisakion
+    -- 수정 : 2026.10.14 trisakion 재구성 전 p_max 행 여부(pmax_had_rows) 반환
     -- 내용 : 로그 정리 잡이 매일 다음 며칠 치 일 파티션을 미리 만든다 (01_DESIGN 4.5).
     --        파티션 p_YYYYMMDD는 [그날 00:00, 다음날 00:00) UTC 범위다.
     --        - 파티션 이름과 경계는 DATE 값으로만 조립한다 (D-48). DATE_FORMAT 결과는 숫자와 '-'뿐이다.
@@ -17,8 +18,12 @@ BEGIN
     --        - 호출당 64일로 제한한다. 장기 중단 뒤에도 DDL 하나가 지나치게 커지지 않게 하며, 잡은 added_count가
     --          0이 될 때까지 다시 호출한다. i_until_day는 오늘 + 31일까지만 받는다(파티션 수 상한 8192 보호).
     --        - 경계는 PARTITION_DESCRIPTION('2026-10-06 00:00:00' 형태)에서 읽는다. 따옴표를 벗겨 DATETIME으로 바꾼다.
+    --        - 재구성 전에 p_max에 행이 있었는지 pmax_had_rows로 돌려준다. 일 파티션이 있는데 p_max에 행이 있으면
+    --          그날 파티션을 제때 만들지 못한 것이라 잡이 경고한다 (11.4). 재구성 뒤에는 행이 옮겨져 보이지 않으므로 먼저 본다.
+    --          일 파티션이 없는 첫 실행은 원래 모든 행이 p_max에 있으므로 0으로 둔다.
     -- ------------------------------------------------------------------------------------------------------------ --
     DECLARE v_day              DATE;
+    DECLARE v_pmax             TINYINT(1)      DEFAULT 0;
     DECLARE v_defs             VARCHAR(8192)   DEFAULT '';
     DECLARE v_count            INT UNSIGNED    DEFAULT 0;
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';
@@ -45,6 +50,8 @@ BEGIN
                       LIMIT 1);
         IF v_day IS NULL THEN
             SET v_day = UTC_DATE();
+        ELSE
+            SET v_pmax = EXISTS(SELECT 1 FROM `log_ranking_submit` PARTITION (`p_max`));
         END IF;
 
         WHILE v_day <= i_until_day AND v_count < 64 DO
@@ -60,7 +67,7 @@ BEGIN
         END IF;
 
         SELECT 0 AS RESULT;
-        SELECT v_count AS added_count;
+        SELECT v_count AS added_count, v_pmax AS pmax_had_rows;
     END proc_block;
 END$$
 DELIMITER ;

@@ -191,8 +191,9 @@ podiumDE/
 │   └── worker/          # 워커 잡
 │       ├── loop.ts      # 잡 주기 실행(GET_LOCK 단일 실행, 정상 종료 대기)
 │       ├── recovery.ts  # 자가 복구 잡(L2 리컨실러, L3 재구축, 보조 점검)
-│       ├── settle.ts    # 정산 잡(시작 조건, 가순위, 시즌 키 삭제, REVIEW 전이)
-│       └── scheduler.ts # 시즌 스케줄러(시즌 경계 계산, 선행 생성, 상태 전이)
+│       ├── settle.ts    # 정산 잡(시작 조건, 가순위, 시즌 키 삭제, REVIEW 전이, 확정·DELIVERING 전이)
+│       ├── scheduler.ts # 시즌 스케줄러(시즌 경계 계산, 선행 생성, 상태 전이)
+│       └── logcleanup.ts # 로그 정리 잡(로그 DB 일 파티션 생성·삭제, p_max 경고)과 정체 감시
 ├── database/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)
@@ -362,6 +363,7 @@ migrate가 하트비트로 거부되면
   - ✅ 마이그레이션 러너(버전·반복 마이그레이션, 체크섬, 기동 시 스키마 확인), 하트비트, 중단 패치(`npm run upgrade`)
   - ✅ 테이블 DDL — 메인 DB 13개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리)
   - ✅ 파티션·정산 관리 SP (`SP_PARTITION_*`, `SP_SETTLING_EXCHANGE`, 로그 DB 일 파티션)
+  - ✅ 로그 정리 잡 — 로그 DB 일 파티션을 오늘 + 7일까지 미리 만들고 보관 기간이 지난 파티션 삭제, 1시간 주기, `p_max` 행 경고, 정체 감시(3시간)
   - ✅ 스코어 적재 SP `SP_SUBMIT_SCORE` (BEST/SUM, 멱등 키, 하드 검증)
 - ✅ 2단계: API 인증, 제출 API, Redis 반영, 순위 조회 → 부하 테스트
   - ✅ API 키 테이블·SP, 발급·폐기 CLI(`npm run credential`)

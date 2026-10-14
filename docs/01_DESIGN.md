@@ -516,7 +516,10 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 - 정상 종료 시 진행 중인 적재가 끝나기를 기다린 뒤 로그 DB 풀을 닫는다. 응답은 나갔지만 아직 커넥션을 받지 못한 적재가 풀 종료로 유실되지 않게 한다.
 - 인증 실패와 형식 오류는 남기지 않는다. 형식 오류는 NOT NULL 컬럼(`member_id`, `request_id` 등)을 채울 수 없는 경우가 있고, 인증 실패는 아직 제출로 볼 수 없다. 둘 다 앱 로그의 요청·응답 줄에 남는다.
 - 제출 바디는 16KB로 제한한다. `meta`가 해석 없이 그대로 쌓이므로 기본값(1MiB)보다 작게 둔다.
-- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 매일 다음 며칠의 일 파티션을 `p_max`에서 떼어 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 DROP한다(`SP_LOG_PARTITION_DROP`). 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다.
+- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 앞으로 며칠의 일 파티션을 `p_max`에서 떼어 미리 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 DROP한다(`SP_LOG_PARTITION_DROP`). 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다.
+  - 잡은 1시간마다 `GET_LOCK('podium:log-cleanup')`으로 한 워커에서만 돈다. 하루 한 번이면 되지만, 실패나 워커 정지 뒤에 하루를 기다리지 않고 따라잡기 위해서다. 할 일이 없으면 SP 두 번뿐이다.
+  - 일 파티션은 오늘 + 7일까지 미리 만든다. 성공하면 `job_state`(`job_name = 'log_cleanup'`)의 `last_run_at`을 남긴다.
+  - 정체 감시는 별도 잡이 10분마다 `GET_LOCK('podium:log-cleanup-watch')`으로 돈다. 마지막 성공이 3시간(정리 주기의 3배)을 넘으면 한 번 경고하고, 풀리면 한 번 알린다. 성공 기록이 없으면 프로세스 가동 3시간 뒤부터 정체로 본다. 정리 잡 자신은 멈추면 경고를 남길 수 없기 때문이다.
 - `p_max`는 안전망이다. 정리 잡이 멈춰도 INSERT가 실패하지 않는다. `p_max`에 행이 쌓이면 정리 잡 이상으로 보고 알린다 (11.4).
 - 조사 목적의 임의 조회는 이 테이블에서 한다. 메인 DB 운영 테이블에는 하지 않는다.
 - 로그 DB에는 자기 `SP_EXEC_DDL`의 감사 로그용으로 `log_ddl_audit`를 하나 더 둔다. 구조는 메인과 같다 (11.4). 감사 로그는 DDL을 실행한 DB에 기록해야 하고, 로그 DB는 별도 인스턴스일 수 있기 때문이다.
@@ -1120,7 +1123,7 @@ CREATE TABLE `api_credential` (
 | `SP_SETTLING_EXCHANGE(rid, sno)` | SETTLING의 DDL 단계를 상태를 보고 진행: 꺼내기와 정렬 컬럼·인덱스 추가, 또는 둘 제거와 `WITHOUT VALIDATION` 되돌리기. 단계 반환 (7.3, 8.6) | 앱 |
 | `SP_PARTITION_EXCHANGE(code, rid, sno)` | 분리 조건(8.2)을 다시 확인한 뒤 백업 테이블 생성 후 교환. 파티션이 비어 있으면 교환하지 않음 (재실행 시 되돌아감 방지) | 앱 |
 | `SP_PARTITION_DROP(code, rid, sno)` | 파티션이 비어 있고 시즌이 SETTLED(또는 시즌 행 없음)일 때만 삭제 | 앱 |
-| `SP_LOG_PARTITION_ADD(day)` | 로그 DB. `log_ranking_submit` 일 파티션을 `day`까지 생성 (호출당 최대 64일) | 앱 |
+| `SP_LOG_PARTITION_ADD(day)` | 로그 DB. `log_ranking_submit` 일 파티션을 `day`까지 생성 (`day`는 오늘 + 31일 이하, 호출당 최대 64일). 재구성 전 `p_max` 행 여부 반환 | 앱 |
 | `SP_LOG_PARTITION_DROP(day)` | 로그 DB. `day` 이전 일 파티션 삭제 (호출당 최대 31개) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
@@ -1181,6 +1184,8 @@ CREATE TABLE `api_credential` (
 | 로그 DB 기록 실패율이 임계치 초과 | 제출 이력 |
 
 - 디스크 사용률 알림은 설치 환경(인프라 모니터링)에 둔다.
+- `p_max` 감시는 로그 정리 잡이 재구성 전에 확인해 경고 로그로 남긴다. 로그 정리 잡 정체는 별도 감시 잡이 확인한다 (4.5). 나머지(오래된 백업 테이블, 백업 정리 잡 정체, 로그 DB 기록 실패율)는 아카이브와 함께 5단계 구현 예정이다.
+- 감시는 경고 로그까지 남긴다. 메신저 등으로 전달하는 것과 워커 프로세스 자체의 정지 감지는 설치 환경(로그 수집·인프라 모니터링)의 몫이다.
 
 ```sql
 CREATE TABLE `log_ddl_audit` (

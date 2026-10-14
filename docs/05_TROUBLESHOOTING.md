@@ -74,6 +74,9 @@
 | `reward tiers leave ranks a..b without reward` (warn) | 보상받는 순위 사이에 어느 구간에도 들지 않는 순위가 있다. 흔한 원인은 RANK 1~10위 + PERCENT 11%부터 | 의도한 공백이면 무시한다. 아니면 다음 시즌부터 `ranking_reward_tier`를 고친다(이미 확정에 들어간 시즌은 `tier_snapshot`에 고정됨) |
 | `SP_PARTITION_DROP` 1006 | 비어 있지 않은 파티션 | 먼저 `SP_PARTITION_EXCHANGE`로 백업에 분리 |
 | `... refresh failed N times in a row` (error) | API 키·랭킹 정의 재조회 연속 실패 | 기존 목록으로 동작 중이다. 폐기한 키와 빈도 한도 변경이 반영되지 않으므로 DB 연결을 확인 |
+| `log_ranking_submit p_max had rows …` (warn) | 그날 일 파티션을 제때 만들지 못했다 (워커 정지, 로그 DB 장애) | 같은 주기에 파티션을 만들어 행을 옮겼으므로 조치는 필요 없다. 반복되면 워커와 로그 DB 연결을 확인 |
+| `log cleanup cycle failed` | 로그 DB 접속 실패, 파티션 DDL 실패 | 1시간 뒤 다시 시도한다. 반복되면 로그 DB 연결과 `log_ddl_audit`(로그 DB)을 확인 |
+| `log cleanup stalled: last success …` (warn) | 로그 정리 잡이 3시간 넘게 성공하지 못했다 (로그 DB 장애, 반복 실패, 정리 잡을 도는 워커 정지) | 앞의 `log cleanup cycle failed` 로그로 원인을 찾는다. 마지막 성공 후 7일 안에 풀리지 않으면 행이 `p_max`에 쌓인다. 풀리면 `log cleanup recovered`가 남는다 |
 
 ---
 
