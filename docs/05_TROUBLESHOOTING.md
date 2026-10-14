@@ -20,6 +20,7 @@
 | `이미 적용된 마이그레이션이 변경되었습니다` | 적용된 테이블 파일(`V0xx`)을 고쳤다 | 파일을 원래대로 돌리고 변경은 새 `V` 파일로 추가 |
 | `SP_xxx이(가) DB에 없습니다. npm run migrate가 필요합니다` | 미적용 DB | `npm run migrate` |
 | `로그 DB(...) 접속 설정이 잘못되었습니다` | `DB_LOG_*` 계정·DB 이름 오류(1044/1045/1049) | 환경 변수 확인. 네트워크 수준 실패면 경고만 남기고 기동한다 |
+| `환경 변수 LOG_RETENTION_DAYS은(는) 1 이상이어야 합니다` (기동 거부) | 보관 일수를 0 이하로 넣었다 | 1 이상으로 설정. 무제한 보관 설정은 없다 |
 | `worker startup failed` | 워커가 기동 시 랭킹 정의를 읽지 못했다 | DB 연결과 `SP_LIST_RANKING_DEFINITION` 적용 여부 확인. 워커가 없으면 새 시즌 센티넬이 생기지 않아 조회가 계속 2007이다 |
 | `no active api credential — all requests will be rejected` | 활성 API 키가 없다 | `npm run credential -- create <이름> <권한>` |
 | upgrade `[2/5 wait stop] ... 멈추지 않았습니다` | 중지 명령 후에도 하트비트가 남았다 | 남은 인스턴스를 확인해 중지. 비정상 종료면 30초 뒤 재실행 |

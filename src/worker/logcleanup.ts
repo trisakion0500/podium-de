@@ -35,17 +35,9 @@ export interface LogCleanupResult {
 }
 
 /**
- * UTC 기준 오늘에서 days일 떨어진 날짜를 'YYYY-MM-DD'로 만든다.
- * @param days 오늘 기준 일수 (음수: 과거)
- * @returns 날짜 문자열
- */
-function utcDay(days: number): string {
-    return new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
-}
-
-/**
  * 로그 DB 제출 이력의 일 파티션을 정리한다 (01_DESIGN 4.5): 오늘 + AHEAD_DAYS까지 만들고, 보관 기간이 지난 것을 지운다.
  * SP는 호출당 개수 제한이 있어(64·31개) 0이 나올 때까지 다시 부른다 — 오래 멈췄다 재개한 경우다.
+ * 날짜는 SP가 DB 시각으로 계산한다. created_at이 로그 DB 시각이라 호스트 시계와 무관하게 같은 기준이 된다.
  * @param logPool 로그 DB 풀
  * @param retentionDays 보관 일수 (LOG_RETENTION_DAYS)
  * @param checkpoint SP 호출 사이마다 부른다. 락을 잃었거나 종료 중이면 예외로 멈춘다
@@ -55,7 +47,7 @@ function utcDay(days: number): string {
 export async function cleanupLogPartitions(logPool: Pool, retentionDays: number, checkpoint: () => Promise<void> = async () => {}): Promise<LogCleanupResult> {
     const out: LogCleanupResult = { added: 0, dropped: 0, pmaxHadRows: false };
     for (let first = true; ; first = false) {
-        const { result, rows } = await callSp(logPool, 'SP_LOG_PARTITION_ADD', [utcDay(AHEAD_DAYS)]);
+        const { result, rows } = await callSp(logPool, 'SP_LOG_PARTITION_ADD', [AHEAD_DAYS]);
         if (result !== SpResult.OK)
             throw new Error(`SP_LOG_PARTITION_ADD result ${result}`);
         // 첫 호출만 본다. 그 뒤 호출은 앞 호출이 옮기지 못한(아직 파티션이 없는 날의) 행을 다시 보는 것이다
@@ -67,7 +59,7 @@ export async function cleanupLogPartitions(logPool: Pool, retentionDays: number,
         await checkpoint();
     }
     for (;;) {
-        const { result, rows } = await callSp(logPool, 'SP_LOG_PARTITION_DROP', [utcDay(-retentionDays)]);
+        const { result, rows } = await callSp(logPool, 'SP_LOG_PARTITION_DROP', [retentionDays]);
         if (result !== SpResult.OK)
             throw new Error(`SP_LOG_PARTITION_DROP result ${result}`);
         out.dropped += rows[0].dropped_count;

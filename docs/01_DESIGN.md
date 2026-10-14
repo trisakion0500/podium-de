@@ -516,7 +516,7 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 - 정상 종료 시 진행 중인 적재가 끝나기를 기다린 뒤 로그 DB 풀을 닫는다. 응답은 나갔지만 아직 커넥션을 받지 못한 적재가 풀 종료로 유실되지 않게 한다.
 - 인증 실패와 형식 오류는 남기지 않는다. 형식 오류는 NOT NULL 컬럼(`member_id`, `request_id` 등)을 채울 수 없는 경우가 있고, 인증 실패는 아직 제출로 볼 수 없다. 둘 다 앱 로그의 요청·응답 줄에 남는다.
 - 제출 바디는 16KB로 제한한다. `meta`가 해석 없이 그대로 쌓이므로 기본값(1MiB)보다 작게 둔다.
-- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 앞으로 며칠의 일 파티션을 `p_max`에서 떼어 미리 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 DROP한다(`SP_LOG_PARTITION_DROP`). 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다.
+- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 앞으로 며칠의 일 파티션을 `p_max`에서 떼어 미리 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 DROP한다(`SP_LOG_PARTITION_DROP`). 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다. 날짜는 SP가 DB 시각으로 계산한다(`created_at`과 같은 기준). `LOG_RETENTION_DAYS`는 1 이상이어야 한다. 0을 "무제한"으로 넣으면 오늘을 뺀 로그가 모두 지워지므로 설정과 SP 양쪽에서 거부한다.
   - 잡은 1시간마다 `GET_LOCK('podium:log-cleanup')`으로 한 워커에서만 돈다. 하루 한 번이면 되지만, 실패나 워커 정지 뒤에 하루를 기다리지 않고 따라잡기 위해서다. 할 일이 없으면 SP 두 번뿐이다.
   - 일 파티션은 오늘 + 7일까지 미리 만든다. 성공하면 `job_state`(`job_name = 'log_cleanup'`)의 `last_run_at`을 남긴다.
   - 정체 감시는 별도 잡이 10분마다 `GET_LOCK('podium:log-cleanup-watch')`으로 돈다. 마지막 성공이 3시간(정리 주기의 3배)을 넘으면 한 번 경고하고, 풀리면 한 번 알린다. 성공 기록이 없으면 프로세스 가동 3시간 뒤부터 정체로 본다. 정리 잡 자신은 멈추면 경고를 남길 수 없기 때문이다.
@@ -1123,8 +1123,8 @@ CREATE TABLE `api_credential` (
 | `SP_SETTLING_EXCHANGE(rid, sno)` | SETTLING의 DDL 단계를 상태를 보고 진행: 꺼내기와 정렬 컬럼·인덱스 추가, 또는 둘 제거와 `WITHOUT VALIDATION` 되돌리기. 단계 반환 (7.3, 8.6) | 앱 |
 | `SP_PARTITION_EXCHANGE(code, rid, sno)` | 분리 조건(8.2)을 다시 확인한 뒤 백업 테이블 생성 후 교환. 파티션이 비어 있으면 교환하지 않음 (재실행 시 되돌아감 방지) | 앱 |
 | `SP_PARTITION_DROP(code, rid, sno)` | 파티션이 비어 있고 시즌이 SETTLED(또는 시즌 행 없음)일 때만 삭제 | 앱 |
-| `SP_LOG_PARTITION_ADD(day)` | 로그 DB. `log_ranking_submit` 일 파티션을 `day`까지 생성 (`day`는 오늘 + 31일 이하, 호출당 최대 64일). 재구성 전 `p_max` 행 여부 반환 | 앱 |
-| `SP_LOG_PARTITION_DROP(day)` | 로그 DB. `day` 이전 일 파티션 삭제 (호출당 최대 31개) | 앱 |
+| `SP_LOG_PARTITION_ADD(ahead_days)` | 로그 DB. `log_ranking_submit` 일 파티션을 DB 기준 오늘 + `ahead_days`(0~31)까지 생성 (호출당 최대 64일). 재구성 전 `p_max` 행 여부 반환 | 앱 |
+| `SP_LOG_PARTITION_DROP(retention_days)` | 로그 DB. DB 기준 오늘 - `retention_days`(1 이상)보다 앞선 일 파티션 삭제 (호출당 최대 31개) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
 - SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1015, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.

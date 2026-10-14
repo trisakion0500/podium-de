@@ -21,15 +21,18 @@ function required(name: string): string {
  * 정수 환경 변수를 읽는다.
  * @param name 환경 변수 이름
  * @param fallback 미설정 시 기본값
+ * @param min 허용 최솟값 (없으면 검사 안 함). 잘못된 값으로 뜨면 되돌릴 수 없는 일을 하는 설정에 둔다
  * @returns 정수 값
  */
-function int(name: string, fallback: number): number {
+function int(name: string, fallback: number, min?: number): number {
     const raw = process.env[name];
     if (raw === undefined || raw === '')
         return fallback;
     const value = Number(raw);
     if (!Number.isInteger(value))
         throw new Error(`환경 변수 ${name}은(는) 정수여야 합니다: ${raw}`);
+    if (min !== undefined && value < min)
+        throw new Error(`환경 변수 ${name}은(는) ${min} 이상이어야 합니다: ${raw}`);
     return value;
 }
 
@@ -75,6 +78,7 @@ const mainDb = {
  * @modified 2026-10-07 trisakion Redis 접속 설정 추가
  * @modified 2026-10-09 trisakion 복구 잡 설정 추가
  * @modified 2026-10-10 trisakion 시즌 스케줄러 설정 추가
+ * @modified 2026-10-14 trisakion LOG_RETENTION_DAYS 1 미만 거부
  */
 export const config = {
     db: mainDb,
@@ -88,8 +92,8 @@ export const config = {
         database: required('DB_LOG_NAME'),
         poolSize: int('DB_LOG_POOL_SIZE', 5),
     },
-    /** 로그 DB 제출 이력 보관 일수 (01_DESIGN 4.5) */
-    logRetentionDays: int('LOG_RETENTION_DAYS', 90),
+    /** 로그 DB 제출 이력 보관 일수 (01_DESIGN 4.5). 0을 "무제한"으로 넣으면 오늘을 뺀 로그가 모두 지워지므로 1 미만은 기동을 막는다 */
+    logRetentionDays: int('LOG_RETENTION_DAYS', 90, 1),
     apiPort: int('API_PORT', 3000),
     /**
      * 수신 주소. Fastify 기본값(localhost)은 로드밸런서에서 닿지 않아 '::'(IPv6+IPv4 겸용)을 쓴다.

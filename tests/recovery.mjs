@@ -1132,6 +1132,13 @@ async function logCleanupScenarios() {
     const clear = await cleanupLogPartitions(LA, 90);
     check('L4 p_max에 행이 있으면 알림 값, 없어지면 해제', warned.pmaxHadRows && !clear.pmaxHadRows);
 
+    // 보관 0일은 오늘을 뺀 전부를 지우므로 SP가 거부한다. 미리 만들기는 31일까지만
+    const before = await logDayParts();
+    const zero = await callSp(LA, 'SP_LOG_PARTITION_DROP', [0]);
+    const over = await callSp(LA, 'SP_LOG_PARTITION_ADD', [32]);
+    check('L4b 보관 0일·미리 만들기 32일은 1001, 파티션 그대로', zero.result === 1001 && over.result === 1001
+        && JSON.stringify(await logDayParts()) === JSON.stringify(before), `(${zero.result}, ${over.result})`);
+
     await q("DELETE FROM job_state WHERE job_name = 'log_cleanup'");
     startWorker('tL');
     const recorded = await until(async () => (await q("SELECT job_name FROM job_state WHERE job_name = 'log_cleanup'")).length === 1, 15000);
