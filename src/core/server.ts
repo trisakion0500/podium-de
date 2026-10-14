@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Ajv } from 'ajv';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import swagger from '@fastify/swagger';
@@ -97,6 +98,7 @@ function resultCodeTable(): string {
  * @author trisakion
  * @modified 2026-10-06 trisakion 인증 키 ID(credentialId)를 요청에 선언하고 응답 로그에 추가
  * @modified 2026-10-07 trisakion 순위 집계 중(2007)은 오류 로그에서 제외
+ * @modified 2026-10-14 trisakion 바디 검증은 타입 변환을 끔 (쿼리·경로는 유지)
  */
 export async function buildServer(): Promise<FastifyInstance> {
     // Fastify 요청 처리 순서(아래 훅·핸들러가 끼어드는 위치):
@@ -109,9 +111,15 @@ export async function buildServer(): Promise<FastifyInstance> {
         genReqId: () => randomUUID(),
         // 클라이언트가 보낸 ID를 믿지 않는다 — 인스턴스 로그 안에서 유일해야 짝짓기가 된다.
         requestIdHeader: false,
-        // Swagger 문서용 example 키워드를 검증기(ajv strict)가 모르는 키워드로 거부하지 않게 한다.
-        ajv: { customOptions: { keywords: ['example'] } },
     });
+
+    // 검증기를 요청 부위별로 나눈다. 쿼리·경로는 원래 문자열이라 숫자 변환(coerceTypes)이 필요하지만, JSON 바디는 타입이 그대로 오므로
+    // 변환하면 "10"이 정수로, "f0"이 1개짜리 배열로 통과해 클라이언트 실수가 숨는다 — 바디만 변환을 끄고 2001로 거부한다.
+    // 나머지 옵션은 Fastify 기본값(@fastify/ajv-compiler)과 같다. example은 Swagger 문서용이라 strict 모드가 거부하지 않게 등록한다.
+    const ajvOptions = { useDefaults: true, removeAdditional: true, addUsedSchema: false, allErrors: false, keywords: ['example'] };
+    const bodyAjv = new Ajv({ ...ajvOptions, coerceTypes: false });
+    const partAjv = new Ajv({ ...ajvOptions, coerceTypes: 'array' });
+    app.setValidatorCompiler(({ schema, httpPart }) => (httpPart === 'body' ? bodyAjv : partAjv).compile(schema));
 
     // decorateRequest: 요청 객체에 필드를 미리 선언한다. 요청마다 필드를 새로 붙이면 객체 형태가 달라져 V8 최적화가 깨지므로
     // Fastify는 미리 선언하게 한다. 인증 가드(auth.ts)가 채운다.

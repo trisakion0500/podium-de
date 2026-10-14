@@ -7,6 +7,35 @@ import { logger } from './logger.js';
 
 const ER_SP_DOES_NOT_EXIST = 1305;
 
+/** 풀·전용 커넥션 → 대상 DB. 연결 상태 로그를 DB별로 남기려고 createPool·withLock이 등록한다 */
+const targetOf = new WeakMap<object, DbTarget>();
+/** 연결 실패 경고를 남기고 아직 회복을 못 본 DB */
+const unreachable = new Set<DbTarget>();
+
+/**
+ * DB 호출 결과로 연결 상태를 갱신하고, 상태가 바뀔 때만 한 줄 남긴다 — Redis의 unavailable/ready와 같은 방식이다.
+ * 요청마다 남는 ERROR 줄과 별개로, 언제 끊겼고 언제 돌아왔는지를 한 쌍의 로그로 보이게 한다.
+ * 회복은 이벤트가 아니라 다음 호출의 성공으로 안다. 호출이 없으면 회복 로그도 그만큼 늦다.
+ * @param db 호출에 쓴 풀 또는 전용 커넥션 (등록되지 않은 것은 무시)
+ * @param err 실패 오류. 성공이면 생략
+ */
+function noteDbState(db: object, err?: unknown): void {
+    const target = targetOf.get(db);
+    if (!target)
+        return;
+    const name = target === 'MAIN' ? 'main' : 'log';
+    if (err === undefined) {
+        if (unreachable.delete(target))
+            logger.info(`${name} db recovered`);
+        return;
+    }
+    // fatal: mysql2가 연결 자체의 오류(거부·끊김·시간 초과·인증)에 붙인다. SQL 오류는 연결이 살아 있으므로 제외한다.
+    if ((err as { fatal?: boolean }).fatal && !unreachable.has(target)) {
+        unreachable.add(target);
+        logger.warn(`${name} db unreachable — calls fail with 50001 until it recovers`, err);
+    }
+}
+
 /**
  * MySQL 커넥션 풀을 만든다.
  * 모든 커넥션의 세션 time_zone을 '+00:00'으로 고정한다. SP는 세션과 무관한 UTC_TIMESTAMP(3)으로 시각을 만들지만,
@@ -19,6 +48,7 @@ const ER_SP_DOES_NOT_EXIST = 1305;
  * @modified 2026-10-01 trisakion 접속 계정 인자 추가
  * @modified 2026-10-02 trisakion 대상 DB 인자 추가 (D-48)
  * @modified 2026-10-10 trisakion 시간대 원칙 주석 갱신 (D-66)
+ * @modified 2026-10-14 trisakion 연결 상태 로그용 대상 DB 등록
  */
 export function createPool(account: DbAccount, target: DbTarget = 'MAIN'): Pool {
     const db = target === 'MAIN' ? config.db : config.logDb;
@@ -41,6 +71,7 @@ export function createPool(account: DbAccount, target: DbTarget = 'MAIN'): Pool 
                 conn.destroy();
         });
     });
+    targetOf.set(pool, target);
     return pool;
 }
 
@@ -68,6 +99,8 @@ export interface SpResult {
  * @modified 2026-10-01 trisakion SP 없음(1305)을 migrate 안내 오류로 변환
  * @modified 2026-10-06 trisakion RESULT=50001을 BusinessException(DATABASE_ERROR)으로 던짐
  * @modified 2026-10-07 trisakion 데이터 결과셋 자리에 온 50001(RESULT 0 이후 SELECT 실패)도 DB 오류로 던짐
+ * @modified 2026-10-14 trisakion 연결 실패 등 호출 자체의 오류도 DATABASE_ERROR로 던짐
+ * @modified 2026-10-14 trisakion 연결 끊김·회복을 상태가 바뀔 때만 로그로 남김
  */
 export async function callSp(db: Pool | PoolConnection, name: string, params: unknown[]): Promise<SpResult> {
     if (!/^SP_[A-Z0-9_]+$/.test(name))
@@ -76,10 +109,17 @@ export async function callSp(db: Pool | PoolConnection, name: string, params: un
     let sets: RowDataPacket[][];
     try {
         [sets] = await db.query<RowDataPacket[][]>(`CALL ${name}(${placeholders})`, params);
+        noteDbState(db);
     } catch (err) {
-        if ((err as { errno?: number }).errno === ER_SP_DOES_NOT_EXIST)
+        noteDbState(db, err);
+        const e = err as { errno?: number; code?: string; sqlState?: string; message?: string };
+        if (e.errno === ER_SP_DOES_NOT_EXIST)
             throw new Error(`${name}이(가) DB에 없습니다. npm run migrate가 필요합니다.`, { cause: err });
-        throw err;
+        // 연결 거부·끊김, 풀 종료 등 SP 밖의 DB 오류. SP 안의 오류(50001)와 같은 코드로 내야 게임 서버가 한 가지 기준으로 재시도한다.
+        throw new BusinessException(ApiResult.DATABASE_ERROR, `${name}: DB 호출 실패 ${e.code ?? ''} ${e.message ?? ''}`, {
+            sqlState: e.sqlState,
+            errorNo: e.errno,
+        });
     }
     const head = sets[0]?.[0];
     if (!head || typeof head.RESULT !== 'number')
@@ -119,9 +159,20 @@ export class LockNotAcquiredError extends Error {
  * @param work 락을 보유한 동안 실행할 작업. 전용 커넥션을 받는다
  * @returns 작업 결과
  * @author trisakion
+ * @modified 2026-10-14 trisakion 연결 실패를 연결 상태 로그에 반영
  */
 export async function withLock<T>(pool: Pool, lockName: string, timeoutSec: number, work: (conn: PoolConnection) => Promise<T>): Promise<T> {
-    const conn = await pool.getConnection();
+    let conn: PoolConnection;
+    try {
+        conn = await pool.getConnection();
+    } catch (err) {
+        // 워커는 SP 전에 여기서 연결을 얻으므로 연결 실패가 callSp가 아니라 여기서 난다.
+        noteDbState(pool, err);
+        throw err;
+    }
+    const target = targetOf.get(pool);
+    if (target)
+        targetOf.set(conn, target);
     let healthy = true;
     try {
         const [[row]] = await conn.query<RowDataPacket[]>('SELECT GET_LOCK(?, ?) AS acquired', [lockName, timeoutSec]);
