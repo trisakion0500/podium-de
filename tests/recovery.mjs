@@ -10,7 +10,7 @@
  *
  * - 워커와 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199). 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
- * - 테스트 랭킹 940~964를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
+ * - 테스트 랭킹 940~968을 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
  * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 지운다.
  * - API 키 원문은 메모리에만 두고 출력하지 않는다.
  * - 워커 로그는 logs/app.log.worker.t* 에 남는다. 로그 문구로 판정하는 항목이 있다.
@@ -42,7 +42,8 @@ const { createClient } = await import('redis');
 
 /** 복구 시나리오(BEST·SUM), 락 대기, API 경유(BEST·SUM), 스케줄러(FIXED, 단일 시즌, 종료), 정산(DESC, ASC 이어받기, 빈 시즌), 보상 전달 */
 const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
-    finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964 };
+    finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964,
+    fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968 };
 const ALL_IDS = Object.values(IDS);
 const N = 2500;
 const PORT = Number(process.env.TEST_PORT ?? 3199);
@@ -219,14 +220,15 @@ function stopProcess(id) {
 }
 
 /**
- * 워커 로그에서 문구가 나온 횟수. 날짜 회전된 파일(app.log.worker.{id}.YYYYMMDD)까지 합친다 — 날짜가 바뀐 뒤 첫 기록에서
+ * 워커·API 로그에서 문구가 나온 횟수. 날짜 회전된 파일(app.log.{kind}.{id}.YYYYMMDD)까지 합친다 — 날짜가 바뀐 뒤 첫 기록에서
  * 현재 파일이 회전되면 현재 파일만 센 값은 줄어들어 "증가" 판정이 틀린다.
  * @param id 인스턴스 ID
  * @param text 찾을 문구
+ * @param kind 'worker' | 'api'
  * @returns 횟수
  */
-function logCount(id, text) {
-    const base = `app.log.worker.${id}`;
+function logCount(id, text, kind = 'worker') {
+    const base = `app.log.${kind}.${id}`;
     if (!existsSync('logs'))
         return 0;
     return readdirSync('logs')
@@ -1359,6 +1361,246 @@ async function logCleanupScenarios() {
         JSON.stringify({ fresh, stale, neverEarly, neverLate }));
 }
 
+// ------------------------------------------------------------------------------------------------ 8. 장애 주입
+
+/** 닿지 않는 주소 (연결 즉시 거부). Redis·로그 DB·메인 DB 장애를 프로세스 단위로 만든다 */
+const DEAD_PORT = '1';
+
+/**
+ * 인스턴스를 띄우고 스스로 종료하기를 기다린다 (기동 거부 확인용, spawnTracked와 달리 종료를 FAIL로 보지 않는다).
+ * @param kind 'api' | 'worker'
+ * @param id 인스턴스 ID
+ * @param env 추가 환경 변수
+ * @param ms 제한 시간
+ * @returns 종료 코드 (시간 안에 끝나지 않으면 강제 종료하고 null)
+ */
+async function runUntilExit(kind, id, env, ms = 20000) {
+    const p = spawn(process.execPath, [`dist/${kind}.js`], { stdio: 'ignore', env: { ...process.env, INSTANCE_ID: id, ...env } });
+    return await new Promise((ok) => {
+        const t = setTimeout(() => {
+            p.kill();
+            ok(null);
+        }, ms);
+        p.on('exit', (code) => {
+            clearTimeout(t);
+            ok(code);
+        });
+    });
+}
+
+/**
+ * API 장애 주입: 요청 형식 오류·권한·상태 거부, 빈도 초과, 같은 requestId 동시 제출, 락 대기로 응답 시간 초과(2005) 뒤 커밋,
+ * Redis·로그 DB가 죽은 API, 메인 DB에 닿지 않는 API·워커의 기동 거부, 실행 중 migrate 거부.
+ * @returns 없음
+ */
+async function apiFaults() {
+    await createRanking(IDS.fxSum, 2);
+    await createRanking(IDS.fxRate, 1);
+    await createRanking(IDS.fxPaused, 1);
+    await q('UPDATE ranking_definition SET max_submit_per_min = 3 WHERE ranking_id = ?', [IDS.fxRate]);
+    await q('UPDATE ranking_definition SET status = 2 WHERE ranking_id = ?', [IDS.fxPaused]);
+    const mk = async (name, scopes) => {
+        const key = randomBytes(32).toString('base64url');
+        await callSp(M, 'SP_INSERT_API_CREDENTIAL', [name, hashApiKey(key), scopes]);
+        return key;
+    };
+    const writeKey = await mk('rtest-write', ApiScope.WRITE);
+    const readKey = await mk('rtest-read', ApiScope.READ);
+    startWorker('t11');
+    // tx1: 정상 API (처리 제한 2초). tx2: Redis·로그 DB가 모두 죽은 API
+    spawnTracked('tx1', 'api', { API_PORT: String(PORT), API_TIMEOUT_MS: '2000' });
+    spawnTracked('tx2', 'api', { API_PORT: String(PORT + 1), REDIS_URL: `redis://127.0.0.1:${DEAD_PORT}`, DB_LOG_PORT: DEAD_PORT });
+    const DOWN = `http://localhost:${PORT + 1}`;
+    const raw = async (base, path, { key = writeKey, method = 'POST', body } = {}) => {
+        const res = await fetch(base + path, { method, headers: { 'content-type': 'application/json', ...(key ? { 'x-api-key': key } : {}) }, body });
+        return { status: res.status, ...(await res.json()) };
+    };
+    const post = (id, b, base = BASE) => raw(base, `/v1/rankings/${id}/scores`, { body: JSON.stringify(b) });
+    const get = (path, base = BASE) => raw(base, path, { key: readKey, method: 'GET' });
+    const up = await until(async () => {
+        try {
+            return (await get('/health')).result === 0 && (await get('/health', DOWN)).result === 0 && (await get(`/v1/rankings/${IDS.fxSum}/top?size=1`)).result === 0;
+        } catch {
+            return false; // 기동 전 연결 거부
+        }
+    }, 30000);
+    check('X0 정상 API·장애 API(Redis·로그 DB 없음) 모두 기동, 순위표 준비', up >= 0, `(${up}ms)`);
+
+    // 형식·권한·상태 거부: 결과 코드와 HTTP 상태가 함께 맞아야 한다
+    const tag = `fx-${Date.now()}`;
+    const ok = (o) => ({ memberId: tag, value: 1, seasonNo: 1, requestId: `${tag}-${++seq}`, ...o });
+    const cases = [
+        ['깨진 JSON', await raw(BASE, `/v1/rankings/${IDS.fxSum}/scores`, { body: '{"memberId":' }), 2001, 400],
+        ['필수 필드 없음', await post(IDS.fxSum, { memberId: tag, value: 1 }), 2001, 400],
+        ['memberId 65자', await post(IDS.fxSum, ok({ memberId: 'x'.repeat(65) })), 2001, 400],
+        ['바디 16KB 초과', await post(IDS.fxSum, ok({ meta: { pad: 'x'.repeat(17000) } })), 2001, 400],
+        ['값 타입 오류', await post(IDS.fxSum, ok({ value: 'ten' })), 2001, 400],
+        ['없는 경로', await raw(BASE, '/v1/nothing', { method: 'GET' }), 2004, 404],
+        ['키 없음', await raw(BASE, `/v1/rankings/${IDS.fxSum}/scores`, { key: null, body: JSON.stringify(ok()) }), 2002, 401],
+        ['위조 키', await raw(BASE, `/v1/rankings/${IDS.fxSum}/scores`, { key: randomBytes(32).toString('base64url'), body: JSON.stringify(ok()) }), 2002, 401],
+        ['read 키로 제출', await raw(BASE, `/v1/rankings/${IDS.fxSum}/scores`, { key: readKey, body: JSON.stringify(ok()) }), 2003, 403],
+        ['없는 랭킹', await post(99999, ok()), 1101, 404],
+        ['중지된 랭킹', await post(IDS.fxPaused, ok()), 1102, 409],
+        ['지난 시즌 번호', await post(IDS.fxSum, ok({ seasonNo: 2 })), 1103, 409],
+        ['BEST 음수', await post(IDS.fxRate, ok({ memberId: `${tag}-neg`, value: -1 })), 1105, 400],
+        ['SUM 상한 초과', await post(IDS.fxSum, ok({ value: 9000 })), 1107, 400],
+    ];
+    const wrong = cases.filter(([, r, code, http]) => r.result !== code || r.status !== http);
+    check(`X1 형식·권한·상태 거부 ${cases.length}종: 결과 코드와 HTTP 상태`, wrong.length === 0, wrong.map(([n, r]) => `${n}=${r.result}/${r.status}`).join(', '));
+
+    // 빈도 초과: 분당 3회. 4번째는 2006/429, 다른 멤버는 영향 없음
+    const rate = [];
+    for (let i = 0; i < 4; i++)
+        rate.push(await post(IDS.fxRate, ok({ value: 10 + i })));
+    const other = await post(IDS.fxRate, ok({ memberId: `${tag}-other`, value: 5 }));
+    check('X2 빈도 초과: 같은 멤버 4번째 2006/429, 다른 멤버는 성공', rate.slice(0, 3).every((r) => r.result === 0) && rate[3].result === 2006 && rate[3].status === 429 && other.result === 0,
+        `(${rate.map((r) => r.result)}, ${other.result})`);
+
+    // 같은 requestId 10개 동시 (SUM +5): 한 번만 반영, 나머지는 재전송. 같은 키로 다른 값은 1104
+    const same = ok({ memberId: `${tag}-dup`, value: 5 });
+    const burst = await Promise.all(Array.from({ length: 10 }, () => post(IDS.fxSum, same)));
+    const conflict = await post(IDS.fxSum, { ...same, value: 6 });
+    const firsts = burst.filter((r) => r.result === 0 && r.data.replayed === false).length;
+    check('X3 같은 requestId 동시 10개: 1개만 반영·9개 재전송, 점수 5 / 같은 키 다른 값 1104', burst.every((r) => r.result === 0 && r.data.score === 5) && firsts === 1 && conflict.result === 1104,
+        `(첫 반영 ${firsts}, ${burst.map((r) => r.result)}, ${conflict.result})`);
+
+    // 다른 세션이 멤버 행을 잠근 동안 제출 → 2초에 2005, 잠금이 풀리면 SP가 커밋. 같은 requestId 재시도는 재전송으로 한 번만 반영
+    const lockMember = `${tag}-lock`;
+    await post(IDS.fxSum, ok({ memberId: lockMember, value: 10 }));
+    const holder = await M.getConnection();
+    try {
+        await holder.query('START TRANSACTION');
+        await holder.query('SELECT score FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ? FOR UPDATE', [IDS.fxSum, lockMember]);
+        const late = ok({ memberId: lockMember, value: 7 });
+        const t = Date.now();
+        const timedOut = await post(IDS.fxSum, late);
+        const waited = Date.now() - t;
+        await holder.query('ROLLBACK');
+        const applied = await until(async () => (await q('SELECT score FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.fxSum, lockMember]))[0].score === 17, 10000);
+        const retry = await post(IDS.fxSum, late);
+        check('X4 락 대기로 제출 2005(2초) → 잠금 해제 후 실제 반영(17), 같은 requestId 재시도는 replayed·점수 그대로', timedOut.result === 2005 && timedOut.status === 503
+            && waited < 4000 && applied >= 0 && retry.result === 0 && retry.data.replayed === true && retry.data.score === 17, `(${timedOut.result}, ${waited}ms, ${applied}ms, ${retry.data?.score})`);
+    } finally {
+        await holder.query('ROLLBACK');
+        holder.release();
+    }
+
+    // Redis·로그 DB가 죽은 API: 제출은 원장에 성공, 조회는 2007, 빈도 검사는 통과로 동작. 워커가 순위표를 채운다
+    const downMember = `${tag}-down`;
+    const downSubmit = await post(IDS.fxSum, ok({ memberId: downMember, value: 3 }), DOWN);
+    const downRead = await get(`/v1/rankings/${IDS.fxSum}/members/${downMember}`, DOWN);
+    const downRate = [];
+    for (let i = 0; i < 5; i++)
+        downRate.push((await post(IDS.fxRate, ok({ memberId: `${tag}-rd`, value: 20 + i }), DOWN)).result);
+    const filled = await until(async () => (await get(`/v1/rankings/${IDS.fxSum}/members/${downMember}`)).data?.score === 3, 15000);
+    const logWarn = await until(async () => logCount('tx2', 'submit log write failed', 'api') > 0, 10000);
+    const [[{ n: logRows }]] = await LM.query('SELECT COUNT(log_ranking_submit_id) n FROM log_ranking_submit WHERE ranking_id = ? AND member_id = ?', [IDS.fxSum, downMember]);
+    check('X5 Redis·로그 DB 장애 API: 제출 성공·조회 2007·빈도 검사 통과(5회), 워커가 순위표 채움, 이력 기록 실패 경고(로그 DB 행 없음)',
+        downSubmit.result === 0 && downRead.result === 2007 && downRead.status === 503 && downRate.every((r) => r === 0) && filled >= 0 && logWarn >= 0 && logRows === 0
+        && logCount('tx2', 'unreachable', 'api') > 0, `(${downSubmit.result}, ${downRead.result}, ${downRate}, ${filled}ms, 로그 DB ${logRows}행)`);
+
+    // 메인 DB에 닿지 않으면 API·워커 모두 기동을 거부하고 종료한다
+    const apiExit = await runUntilExit('api', 'tx3', { API_PORT: String(PORT + 2), DB_PORT: DEAD_PORT });
+    const workerExit = await runUntilExit('worker', 'tx4', { DB_PORT: DEAD_PORT });
+    check('X6 메인 DB 접속 불가: API·워커 기동 거부(종료 코드 1)', apiExit === 1 && workerExit === 1, `(${apiExit}, ${workerExit})`);
+
+    // 인스턴스가 떠 있는 동안 migrate는 거부한다
+    const mig = await new Promise((done) => {
+        const p = spawn(process.execPath, ['dist/migrate.js'], { env: process.env });
+        let out = '';
+        p.stdout.on('data', (d) => { out += d; });
+        p.stderr.on('data', (d) => { out += d; });
+        p.on('exit', (code) => done({ code, out }));
+    });
+    check('X7 실행 중 인스턴스가 있으면 migrate 거부', mig.code !== 0 && mig.out.includes('실행 중인 인스턴스가 있어 migrate를 거부합니다'), `(code ${mig.code})`);
+}
+
+/**
+ * 워커 장애 주입: Redis·로그 DB가 죽은 워커(정산은 쉬고 로그 정리는 실패 로그), 가순위·확정 도중 워커 강제 종료 후 다른 워커가 이어받기,
+ * 두 워커 동시 실행. 시즌: 2,500명, 점수 0..N-1을 섞어 넣어 기대 순서가 하나로 정해진다 (DESC).
+ * @returns 없음
+ */
+async function workerFaults() {
+    const id = IDS.fxSettle;
+    await createDefinition(id, { settleDelay: 1, reviewPeriod: 3600 });
+    await createSeason(id, 1, -60, -30, 3);
+    const [{ start_at: startAt }] = await q('SELECT start_at FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [id]);
+    const scores = Array.from({ length: N }, (_, i) => i).sort(() => Math.random() - 0.5);
+    await q('INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at) VALUES ?',
+        [scores.map((sc, i) => [id, 1, `w${i}`, sc, startAt, 1, new Date()])]);
+    const expected = scores.map((sc, i) => [sc, `w${i}`]).sort((a, b) => b[0] - a[0]).map((x) => x[1]);
+    // 시작 조건(7.1)은 정산 구간에서 본다. 여기서는 SETTLING으로 바로 둔다
+    await q('UPDATE ranking_season SET status = 4 WHERE ranking_id = ? AND season_no = 1', [id]);
+    const status = async () => (await q('SELECT status FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [id]))[0].status;
+
+    // Redis·로그 DB가 죽은 워커: 정산은 건너뛰고(시즌 키를 못 지우므로), 로그 정리는 실패 로그를 남기고, 프로세스는 살아 있다
+    const fast = { SCHEDULER_INTERVAL_MS: '300', SETTLE_CHUNK: '5' };
+    const failed0 = logCount('tx5', 'log cleanup cycle failed');
+    startWorker('tx5', { ...fast, REDIS_URL: `redis://127.0.0.1:${DEAD_PORT}`, DB_LOG_PORT: DEAD_PORT });
+    const logFail = await until(async () => logCount('tx5', 'log cleanup cycle failed') > failed0, 15000);
+    await sleep(2000);
+    const [{ n: outRows }] = await q('SELECT COUNT(member_id) n FROM ranking_entry_settling WHERE ranking_id = ?', [id]);
+    check('X8 Redis·로그 DB 장애 워커: 정산 건너뜀(작업 테이블 비어 있음, SETTLING 유지), 로그 정리 실패 로그, 프로세스 유지',
+        logFail >= 0 && outRows === 0 && await status() === 4 && workers.has('tx5'), `(${logFail}ms, settling ${outRows}행)`);
+    stopProcess('tx5');
+
+    // 정상 워커 2대 동시. 가순위가 진행 중일 때(작업 테이블에 행, 일부 순위 매김) 둘 다 강제 종료 → 세 번째 워커가 이어받는다
+    startWorker('tx6', fast);
+    startWorker('tx7', fast);
+    let midSettle = null;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 30000) {
+        const [{ n, r }] = await q('SELECT COUNT(member_id) n, COUNT(final_rank) r FROM ranking_entry_settling WHERE ranking_id = ?', [id]);
+        if (n > 0 && r >= 100) {
+            midSettle = r;
+            break;
+        }
+        await sleep(10);
+    }
+    stopProcess('tx6');
+    stopProcess('tx7');
+    await sleep(500);
+    const [{ r: frozen }] = await q('SELECT COUNT(final_rank) r FROM ranking_entry_settling WHERE ranking_id = ?', [id]);
+    startWorker('tx8', fast);
+    const reviewed = await until(async () => await status() === 5, 60000);
+    const settled = await finalOrder(id);
+    check('X9 가순위 도중 워커 2대 강제 종료 → 다른 워커가 이어받아 REVIEW, 1..N 연속·기대 순서, 작업 테이블 원상복구',
+        midSettle !== null && frozen < N && reviewed >= 0 && settled.ranks.every((r, i) => r === i + 1) && settled.members.join() === expected.join() && await settlingClean(),
+        `(종료 시점 ${midSettle}/${N}, 종료 후 ${frozen}, ${reviewed}ms)`);
+    stopProcess('tx8');
+
+    // 확정 도중 강제 종료: 제재 2명, 보상 구간. FINALIZING에서 보상 판정이 진행 중일 때 죽이고 다른 워커가 이어받는다
+    const banned = [expected[3], expected[500]];
+    await ban(id, banned);
+    await q('INSERT INTO ranking_reward_tier (ranking_id, tier_no, range_type, range_from, range_to, reward_code) VALUES (?, 1, 1, 1, 10, ?), (?, 2, 2, 1, 10, ?)', [id, 'TOP10', id, 'P10']);
+    await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 1 SECOND WHERE ranking_id = ? AND season_no = 1', [id]);
+    startWorker('tx9', fast);
+    let midFinal = null;
+    const t1 = Date.now();
+    while (Date.now() - t1 < 30000) {
+        const [{ s, judged }] = await q(`SELECT (SELECT status FROM ranking_season WHERE ranking_id = ? AND season_no = 1) s,
+                                                COUNT(member_id) judged FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND reward_status = 1`, [id, id]);
+        if (s === 6 && judged > 0) {
+            midFinal = judged;
+            break;
+        }
+        await sleep(10);
+    }
+    stopProcess('tx9');
+    await sleep(500);
+    const stuck = await status();
+    startWorker('tx10', fast);
+    const delivering = await until(async () => await status() === 7, 60000);
+    const fin = await q('SELECT member_id, final_rank, reward_code FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND final_rank IS NOT NULL ORDER BY final_rank', [id]);
+    const expFin = expected.filter((m) => !banned.includes(m));
+    const [{ top }] = await q('SELECT COUNT(final_rank) top FROM ranking_season_top WHERE ranking_id = ?', [id]);
+    // RANK 1~10위 TOP10 먼저, 그 뒤 앞 사람 비율 10% 미만이면 P10 (D-69)
+    const tierOk = fin.every((r) => r.reward_code === (r.final_rank <= 10 ? 'TOP10' : (r.final_rank - 1) * 100 < 10 * (N - 2) ? 'P10' : null));
+    check('X10 확정 도중 워커 강제 종료 → 다른 워커가 이어받아 DELIVERING, 제재 제외 1..N-2 연속, 보상 판정, Top N 100행',
+        midFinal !== null && stuck === 6 && delivering >= 0 && fin.length === N - 2 && fin.every((r, i) => r.final_rank === i + 1 && r.member_id === expFin[i]) && tierOk && top === 100,
+        `(종료 시점 PENDING ${midFinal}, 종료 후 상태 ${stuck}, ${delivering}ms)`);
+}
+
 // ------------------------------------------------------------------------------------------------ 실행
 
 /** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
@@ -1381,7 +1623,8 @@ try {
     const times = Number(process.argv[2] ?? 3);
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
-        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios]]) {
+        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios],
+            ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]]) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);
