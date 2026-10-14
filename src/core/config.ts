@@ -79,6 +79,7 @@ const mainDb = {
  * @modified 2026-10-09 trisakion 복구 잡 설정 추가
  * @modified 2026-10-10 trisakion 시즌 스케줄러 설정 추가
  * @modified 2026-10-14 trisakion LOG_RETENTION_DAYS 1 미만 거부
+ * @modified 2026-10-14 trisakion 보상 전달 경고 기준 추가
  */
 export const config = {
     db: mainDb,
@@ -129,6 +130,15 @@ export const config = {
         intervalMs: int('SCHEDULER_INTERVAL_MS', 5000),
         /** 가순위를 한 번에 매기는 행 수 (1~100000). 청크 하나가 트랜잭션 하나다 (01_DESIGN 7.3) */
         settleChunk: int('SETTLE_CHUNK', 5000),
+    },
+    /** 워커 보상 전달 잡 경고 기준 (01_DESIGN 7.7) */
+    delivery: {
+        /** 주기(ms). 남은 수를 시즌마다 세므로 정산 잡보다 길게 둔다. 마지막 ack 뒤 SETTLED까지의 최대 지연이다 */
+        intervalMs: int('DELIVERY_INTERVAL_MS', 30000, 1),
+        /** DELIVERING 시즌의 남은 전달 대상이 이 시간(초) 동안 그대로면 ack 정체로 경고한다 */
+        stallSec: int('DELIVERY_STALL_SEC', 3600, 1),
+        /** DELIVERING 시즌 수가 이보다 많으면 적체로 경고한다. 시즌마다 파티션이 남아 테이블당 상한(8192)에 다가간다 */
+        backlogMax: int('DELIVERY_BACKLOG_MAX', 100, 1),
     },
     /** npm run upgrade 설정. 명령이 없으면 upgrade가 1단계 전에 중단한다 */
     upgrade: {

@@ -361,6 +361,8 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
 
 SCHEDULED → OPEN → CLOSED 전이는 스케줄러가 시각만 보고 일괄로 한다(`SP_ADVANCE_SEASON_STATUS`). 닫기를 먼저 하므로, 워커가 시즌 내내 멈췄다면 SCHEDULED에서 바로 CLOSED로 간다. OPEN 전이에 딸린 작업이 없어 잃는 것이 없다.
 
+CLOSED → SETTLING → REVIEW → FINALIZING → DELIVERING은 정산 잡(7.1~7.6), DELIVERING → SETTLED는 전달 잡(7.7, D-70)이 넘긴다.
+
 ---
 
 ## 4. 스코어 적재
@@ -848,7 +850,8 @@ UPDATE ranking_entry_settling s
 - 정산 완료 웹훅은 "가져갈 목록이 생김" 신호로만 사용한다. 웹훅 유실에 대비해 게임 서버는 주기적으로 확인한다. 웹훅은 6단계 구현 예정이며, 그전에는 주기 확인(`GET /v1/rewards/pending`)만으로 동작한다 (D-64).
 - 수령 기간은 랭킹 서버에 두지 않는다. 우편 만료는 게임 서버 정책이다.
 - held 건은 GM 판단 후 PENDING 또는 REJECTED로 전환한다 (6단계 구현 예정).
-- PENDING(held 제외)이 모두 처리되면 SETTLED.
+- PENDING(held 제외)이 모두 처리되면 SETTLED. 워커 전달 잡(`DELIVERY_INTERVAL_MS`, 기본 30초)이 남은 수 0인 시즌을 넘긴다(`SP_UPDATE_SEASON_SETTLED`). 보상 대상이 없는 시즌(빈 시즌, 구간 없음)도 이 경로로 끝난다 (D-70).
+- 결과·보상 API는 DELIVERING 전 시즌을 1003으로 거부한다. FINALIZING 중의 `final_rank`, `reward_status`는 아직 바뀌는 값이다.
 - 전달이 끝나지 않은 시즌은 기한 없이 운영 테이블에 보관한다. 게임 서버가 장애에서 복구되면 `GET /v1/rewards/pending`으로 밀린 시즌을 찾아 오래된 것부터 가져간다. 보상 API는 운영 테이블만 읽으므로(D-23), SETTLED 전에는 `ranking_entry` 시즌 파티션을 백업으로 분리하지 않는다 (8.2).
 
 **알림 (연동 장애)**
@@ -858,7 +861,7 @@ UPDATE ranking_entry_settling s
 | ack 정체 | DELIVERING 시즌의 PENDING이 설정 시간 동안 줄지 않음 |
 | DELIVERING 적체 | DELIVERING 시즌 수가 설정 임계치 초과. 짧은 주기 랭킹은 장애 동안 시즌마다 `ranking_entry`, `ranking_submit_key` 파티션이 남아 테이블당 파티션 상한(8192)에 다가간다 |
 
-두 기준은 설정값이다 (이름은 스케줄러 구현 시 정한다).
+두 기준은 설정값이다: `DELIVERY_STALL_SEC`(기본 3600초), `DELIVERY_BACKLOG_MAX`(기본 100). 워커 전달 잡이 정체·적체가 시작될 때와 풀릴 때 한 번씩 남긴다. 정체 기준 시각은 워커가 그 시즌을 처음 본 때 또는 남은 수가 마지막으로 바뀐 때라, 워커가 재시작하면 다시 잰다.
 
 **강제 종료 (GM, 6단계 구현 예정)**
 
@@ -870,9 +873,9 @@ UPDATE ranking_entry_settling s
 
 - 게임 서버는 우편 발송에 성공한 건만 ack한다. ack를 먼저 보내면 발송 실패 시 보상이 유실된다.
 - 목록 조회와 ack는 모두 재시도해도 안전하다. 게임 서버는 실패 시 백오프하며 재시도한다.
-- ack는 멱등이다. `reward_status = PENDING`인 행만 DELIVERED로 바꾸고(조건부 갱신), 이미 DELIVERED인 행은 성공으로 본다. 그 외 상태(보류, REJECTED)라서 반영되지 않은 `member_id`는 응답에 따로 돌려준다.
+- ack는 멱등이다. `reward_status = PENDING`인 행만 DELIVERED로 바꾸고(조건부 갱신), 이미 DELIVERED인 행은 성공으로 본다. 반영되지 않은 `member_id`(보류, REJECTED, 보상 없음, 시즌에 없음)는 응답 `notApplied`로 돌려준다. ack 목록은 JSON 배열 하나로 SP에 넘겨 `JSON_TABLE`로 펼친다(정적 SQL).
 - ack가 유실되면 해당 행은 다음 조회에 다시 나온다. 게임 서버는 지급 멱등 키 `(ranking_id, season_no, member_id)`로 중복 발송을 거른다.
-- 목록은 `member_id` 오름차순 커서로 페이징한다. 한 페이지와 ack 한 번의 최대 건수는 같은 상한(예: 1,000)을 둔다. 대량 처리를 짧은 트랜잭션으로 나누기 위해서다.
+- 목록은 `member_id` 오름차순 커서로 페이징한다. 한 페이지와 ack 한 번의 최대 건수는 같은 상한(1,000)을 둔다. 대량 처리를 짧은 트랜잭션으로 나누기 위해서다.
 - 웹훅 유실에 대비해 게임 서버는 전달 대기 시즌 목록(`GET /v1/rewards/pending`: DELIVERING 상태 (ranking_id, season_no)와 남은 건수)을 주기적으로 조회한다.
 
 ### 7.8 제재 처리
@@ -1071,12 +1074,12 @@ CREATE TABLE `api_credential` (
 | GET | `/v1/rankings/{id}/top?offset&size&memberId` | read | 현재 시즌 상위 페이징 (`size` 기본 20·최대 100, `memberId`를 주면 내 순위 함께) | ✅ |
 | GET | `/v1/rankings/{id}/members/{memberId}` | read | 현재 시즌 내 순위 | ✅ |
 | GET | `/v1/rankings/{id}/seasons/current` | read | 현재 시즌 정보 | ✅ |
-| GET | `/v1/rankings/{id}/seasons/{n}/results?offset&size` | read | 직전 시즌 결과 | 4단계 예정 |
-| GET | `/v1/rankings/{id}/seasons/{n}/results/{memberId}` | read | 직전 시즌 내 결과 | 4단계 예정 |
-| GET | `/v1/rankings/{id}/seasons/{n}/top?offset&size` | read | 시즌별 Top N (`top_size`까지 영구) | 4단계 예정 |
-| GET | `/v1/rankings/{id}/seasons/{n}/rewards?cursor` | reward | 전달 대상 목록 | 4단계 예정 |
-| POST | `/v1/rankings/{id}/seasons/{n}/rewards/ack` | reward | 전달 완료 (멱등, 7.7) | 4단계 예정 |
-| GET | `/v1/rewards/pending` | reward | 전달 대기 시즌 목록과 남은 건수 (웹훅 유실 대비 주기 확인) | 4단계 예정 |
+| GET | `/v1/rankings/{id}/seasons/{n}/results?offset&size` | read | 직전 시즌 결과 | ✅ |
+| GET | `/v1/rankings/{id}/seasons/{n}/results/{memberId}` | read | 직전 시즌 내 결과 | ✅ |
+| GET | `/v1/rankings/{id}/seasons/{n}/top?offset&size` | read | 시즌별 Top N (`top_size`까지 영구) | ✅ |
+| GET | `/v1/rankings/{id}/seasons/{n}/rewards?cursor&size` | reward | 전달 대상 목록 (`size` 기본·최대 1000) | ✅ |
+| POST | `/v1/rankings/{id}/seasons/{n}/rewards/ack` | reward | 전달 완료 (멱등, 7.7) | ✅ |
+| GET | `/v1/rewards/pending` | reward | 전달 대기 시즌 목록과 남은 건수 (웹훅 유실 대비 주기 확인) | ✅ |
 
 `sanctioned` 행은 플래그와 함께 반환한다. 표시 방식은 게임 서버가 정한다.
 
@@ -1134,7 +1137,7 @@ CREATE TABLE `api_credential` (
 | `SP_LOG_PARTITION_DROP(retention_days)` | 로그 DB. DB 기준 오늘 - `retention_days`(1 이상)보다 앞선 일 파티션 삭제 (호출당 최대 31개) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
-- SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1015, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
+- SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1016, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
 - 관리 SP는 상태를 관측해 다음 단계만 실행하므로 같은 인자로 다시 호출해도 안전하다.
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.

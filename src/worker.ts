@@ -4,6 +4,7 @@ import { createPool } from './core/db.js';
 import { logger } from './core/logger.js';
 import { startRankingRefresh } from './core/rankings.js';
 import { closeRedis, createRedis } from './core/redis.js';
+import { startDelivery } from './worker/delivery.js';
 import { startLogCleanup, startLogCleanupWatch } from './worker/logcleanup.js';
 import { startRecovery } from './worker/recovery.js';
 import { startScheduler } from './worker/scheduler.js';
@@ -17,12 +18,13 @@ const logPool = createPool('APP', 'LOG');
 let stopRecovery: (() => Promise<void>) | undefined;
 let stopScheduler: (() => Promise<void>) | undefined;
 let stopSettlement: (() => Promise<void>) | undefined;
+let stopDelivery: (() => Promise<void>) | undefined;
 let stopLogCleanup: (() => Promise<void>) | undefined;
 let stopLogCleanupWatch: (() => Promise<void>) | undefined;
 let stopRefresh: (() => void) | undefined;
 // 잡을 먼저 멈춘 뒤 정의 재조회, Redis, 로그 DB 풀 순으로 닫는다. 메인 DB 풀은 bootstrap이 마지막에 닫는다 (개발 컨벤션 5.2).
 const shutdown = onShutdown(async () => {
-    await Promise.all([stopRecovery?.(), stopScheduler?.(), stopSettlement?.(), stopLogCleanup?.(), stopLogCleanupWatch?.()]);
+    await Promise.all([stopRecovery?.(), stopScheduler?.(), stopSettlement?.(), stopDelivery?.(), stopLogCleanup?.(), stopLogCleanupWatch?.()]);
     stopRefresh?.();
     await closeRedis(redis);
     await logPool.end();
@@ -38,8 +40,8 @@ try {
 }
 stopRecovery = startRecovery(pool, redis);
 stopScheduler = startScheduler(pool);
-// 보상 전달(DELIVERING) 이후는 4단계 구현 예정 (가순위·확정 후 DELIVERING 전이까지 구현).
 stopSettlement = startSettlement(pool, redis);
+stopDelivery = startDelivery(pool);
 stopLogCleanup = startLogCleanup(pool, logPool);
 stopLogCleanupWatch = startLogCleanupWatch(pool);
 logger.info('worker started');

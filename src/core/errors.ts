@@ -18,9 +18,12 @@ export interface ErrorEntry {
  * @author trisakion
  * @modified 2026-10-07 trisakion 제출 SP 코드(1001, 1101~1107)와 빈도 초과(2006) 추가
  * @modified 2026-10-07 trisakion 현재 시즌 없음(1301)과 순위 집계 중(2007) 추가
+ * @modified 2026-10-14 trisakion 시즌 없음(1002)과 확정 전(1003) 추가 (결과·보상 API)
  */
 export const ERROR_MAP = {
     [SpResult.INVALID_PARAM]: { message: '요청 값이 허용 범위를 벗어났습니다.', httpStatus: 400 },
+    [SpResult.SEASON_NOT_FOUND]: { message: '존재하지 않는 시즌입니다.', httpStatus: 404 },
+    [SpResult.SEASON_STATUS_INVALID]: { message: '아직 결과가 확정되지 않은 시즌입니다.', httpStatus: 409 },
     [SpResult.RANKING_NOT_FOUND]: { message: '존재하지 않는 랭킹입니다.', httpStatus: 404 },
     [SpResult.RANKING_INACTIVE]: { message: '운영 중인 랭킹이 아닙니다.', httpStatus: 409 },
     [SpResult.SEASON_MISMATCH]: { message: '현재 진행 중인 시즌이 아닙니다. 현재 시즌을 다시 조회하세요.', httpStatus: 409 },

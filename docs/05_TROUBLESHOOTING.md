@@ -21,6 +21,7 @@
 | `SP_xxx이(가) DB에 없습니다. npm run migrate가 필요합니다` | 미적용 DB | `npm run migrate` |
 | `로그 DB(...) 접속 설정이 잘못되었습니다` | `DB_LOG_*` 계정·DB 이름 오류(1044/1045/1049) | 환경 변수 확인. 네트워크 수준 실패면 경고만 남기고 기동한다 |
 | `환경 변수 LOG_RETENTION_DAYS은(는) 1 이상이어야 합니다` (기동 거부) | 보관 일수를 0 이하로 넣었다 | 1 이상으로 설정. 무제한 보관 설정은 없다 |
+| `환경 변수 DELIVERY_INTERVAL_MS·DELIVERY_STALL_SEC·DELIVERY_BACKLOG_MAX은(는) 1 이상이어야 합니다` (기동 거부) | 보상 전달 잡 설정을 0 이하로 넣었다 | 1 이상으로 설정. 경고를 끄는 설정은 없다 |
 | `worker startup failed` | 워커가 기동 시 랭킹 정의를 읽지 못했다 | DB 연결과 `SP_LIST_RANKING_DEFINITION` 적용 여부 확인. 워커가 없으면 새 시즌 센티넬이 생기지 않아 조회가 계속 2007이다 |
 | `no active api credential — all requests will be rejected` | 활성 API 키가 없다 | `npm run credential -- create <이름> <권한>` |
 | upgrade `[2/5 wait stop] ... 멈추지 않았습니다` | 중지 명령 후에도 하트비트가 남았다 | 남은 인스턴스를 확인해 중지. 비정상 종료면 30초 뒤 재실행 |
@@ -31,7 +32,9 @@
 |---|---|---|
 | 2001 / 400 | 요청 형식 오류 (필수 필드 누락, 타입·길이 위반, 잘못된 JSON). `message` 뒤에 어느 필드인지 붙는다 | 요청 바디·쿼리 확인 |
 | 2002 / 401 | `x-api-key` 헤더가 없거나 등록되지 않은 키. 새로 발급한 키는 최대 30초 뒤부터 통과한다 | 키 확인, 발급 직후면 잠시 후 재시도 |
-| 2003 / 403 | 키에 이 API의 권한이 없다 (제출은 write, 조회는 read) | 키 권한 확인, 필요하면 새 키 발급 |
+| 2003 / 403 | 키에 이 API의 권한이 없다 (제출은 write, 조회는 read, 보상은 reward) | 키 권한 확인, 필요하면 새 키 발급 |
+| 1002 / 404 | 없는 시즌 (결과·보상 API) | 시즌 번호 확인 |
+| 1003 / 409 | 아직 확정 전 시즌 (DELIVERING 이전) | 전달할 시즌은 `/v1/rewards/pending`으로 찾는다. 결과는 확정 뒤 조회 |
 | 1101 / 404 | 없는 랭킹. 새로 등록한 랭킹은 최대 30초 뒤부터 보인다 (D-56) | ID 확인, 등록 직후면 잠시 후 재시도 |
 | 1102 / 409 | 운영 중(ACTIVE)이 아닌 랭킹 | 랭킹 상태 확인 |
 | 1103 / 409 | 현재 시즌이 아니다 (시즌 경계, 잘못된 `seasonNo`) | 현재 시즌을 다시 조회. 같은 `requestId` 재시도로는 해결되지 않는다 |
@@ -73,6 +76,9 @@
 | `SP_SETTLING_EXCHANGE` 1008 | 꺼낸 뒤 운영 파티션에 늦은 쓰기가 들어왔다 | 교환하지 않고 멈춘다. 늦은 행의 원인(시각 검사)을 확인 |
 | `SP_UPDATE_SEASON_DELIVERING result 1015` (`settlement cycle failed`) | 순위 재부여가 끝나지 않았다 (확정 도중 제재 추가 등) | 다음 주기에 제재 제외부터 다시 돌아 해소된다. 반복되면 그 시즌의 `MAX(final_rank)`와 `participant_count`를 비교한다 |
 | `reward tiers leave ranks a..b without reward` (warn) | 보상받는 순위 사이에 어느 구간에도 들지 않는 순위가 있다. 흔한 원인은 RANK 1~10위 + PERCENT 11%부터 | 의도한 공백이면 무시한다. 아니면 다음 시즌부터 `ranking_reward_tier`를 고친다(이미 확정에 들어간 시즌은 `tier_snapshot`에 고정됨) |
+| `reward ack stalled ranking=… season=…: N pending unchanged …` (warn) | DELIVERING 시즌의 남은 전달 대상이 `DELIVERY_STALL_SEC` 동안 줄지 않았다 (게임 서버 pull 중단, ack 실패) | 게임 서버의 보상 수신·ack 로그를 확인한다. 다시 줄면 `reward ack resumed`가 남는다 |
+| `DELIVERING backlog: N seasons > M` (warn) | 전달이 끝나지 않은 시즌이 임계치를 넘었다. 시즌마다 파티션이 남아 상한(8192)에 다가간다 | 게임 서버 연동 상태 확인. 포기할 시즌은 GM 강제 종료(6단계 구현 예정) |
+| `delivery cycle failed` | 전달 잡 DB 오류 | 다음 주기(`DELIVERY_INTERVAL_MS`, 기본 30초)에 다시 시도한다. 반복되면 DB 연결 확인 |
 | `SP_PARTITION_DROP` 1006 | 비어 있지 않은 파티션 | 먼저 `SP_PARTITION_EXCHANGE`로 백업에 분리 |
 | `... refresh failed N times in a row` (error) | API 키·랭킹 정의 재조회 연속 실패 | 기존 목록으로 동작 중이다. 폐기한 키와 빈도 한도 변경이 반영되지 않으므로 DB 연결을 확인 |
 | `log_ranking_submit p_max had rows …` (warn) | 그날 일 파티션을 제때 만들지 못했다 (워커 정지, 로그 DB 장애) | 같은 주기에 파티션을 만들어 행을 옮겼으므로 조치는 필요 없다. 반복되면 워커와 로그 DB 연결을 확인 |

@@ -1,6 +1,7 @@
 /**
  * 3단계 자가 복구 회귀 테스트 (01_DESIGN 6장, D-60). Redis를 강제로 MySQL과 어긋나게 만들고 복구되는지 본다.
- * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이와 정산(7.1~7.6), 로그 DB 일 파티션 정리(4.5)도 함께 본다.
+ * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이와 정산(7.1~7.6), 결과 조회·보상 전달(7.7, 8.5),
+ * 로그 DB 일 파티션 정리(4.5)도 함께 본다.
  * 로컬 개발 DB·Redis 전용이다. 운영 DB에 실행하지 않는다.
  *
  * 순서 (프로젝트 루트에서):
@@ -9,7 +10,7 @@
  *
  * - 워커와 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199). 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
- * - 테스트 랭킹 940~959를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
+ * - 테스트 랭킹 940~964를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
  * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 지운다.
  * - API 키 원문은 메모리에만 두고 출력하지 않는다.
  * - 워커 로그는 logs/app.log.worker.t* 에 남는다. 로그 문구로 판정하는 항목이 있다.
@@ -34,13 +35,14 @@ const { startRecovery } = await import(root + 'worker/recovery.js');
 const { nextSeason } = await import(root + 'worker/scheduler.js');
 const { rewardGaps } = await import(root + 'worker/settle.js');
 const { checkLogCleanupStall, cleanupLogPartitions } = await import(root + 'worker/logcleanup.js');
+const { createDeliveryWatch } = await import(root + 'worker/delivery.js');
 const { hashApiKey } = await import(root + 'api/auth.js');
 const { ApiScope } = await import(root + 'core/codes.js');
 const { createClient } = await import('redis');
 
-/** 복구 시나리오(BEST·SUM), 락 대기, API 경유(BEST·SUM), 스케줄러(FIXED, 단일 시즌, 종료), 정산(DESC, ASC 이어받기, 빈 시즌) */
+/** 복구 시나리오(BEST·SUM), 락 대기, API 경유(BEST·SUM), 스케줄러(FIXED, 단일 시즌, 종료), 정산(DESC, ASC 이어받기, 빈 시즌), 보상 전달 */
 const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
-    finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959 };
+    finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964 };
 const ALL_IDS = Object.values(IDS);
 const N = 2500;
 const PORT = Number(process.env.TEST_PORT ?? 3199);
@@ -1071,6 +1073,207 @@ async function finalizeEdges() {
         && JSON.stringify(rewardGaps(toTiers(mixedGap), 1000)) === '[[11,100]]', `(불일치 ${gapBad})`);
 }
 
+// ------------------------------------------------------------------------------------------------ 7. 결과 조회·보상 전달 (01_DESIGN 7.7, 8.5)
+
+/**
+ * 결과·Top N·보상 API와 워커 SETTLED 전이를 본다.
+ * 시즌 dlv: 10명, 보상 TOP5(1~5위), f2 제재(REJECTED), 확정 뒤 f4 보류 → 전달 대상 f0 f1 f3 f5. dlvEmpty: 빈 시즌. dlvReview: 확정 전.
+ * @returns 없음
+ */
+async function deliveryScenarios() {
+    await createReviewSeason(IDS.dlv, 10, [[1, 1, 1, 5, 'TOP5']]);
+    await ban(IDS.dlv, ['f2']);
+    await createReviewSeason(IDS.dlvEmpty, 0);
+    await createReviewSeason(IDS.dlvReview, 3);
+    const fin = [await runFinalize(IDS.dlv), await runFinalize(IDS.dlvEmpty)];
+    // 오류 주입용 시즌(deliveryFaults). API가 랭킹 정의를 기동 때 읽으므로(D-56) API보다 먼저 만든다
+    for (const id of [IDS.dlvF1, IDS.dlvF2]) {
+        await createReviewSeason(id, 10, [[1, 1, 1, 5, 'TOP5']]);
+        await runFinalize(id);
+    }
+    await q('UPDATE ranking_entry SET reward_held = 1 WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.dlv, 'f4']);
+
+    const mk = async (name, scopes) => {
+        const key = randomBytes(32).toString('base64url');
+        await callSp(M, 'SP_INSERT_API_CREDENTIAL', [name, hashApiKey(key), scopes]);
+        return key;
+    };
+    const readKey = await mk('rtest-read', ApiScope.READ);
+    const rewardKey = await mk('rtest-reward', ApiScope.REWARD);
+    // 처리 제한 시간을 줄여 ack 응답 유실(2005)을 실제로 만든다 (R10)
+    spawnTracked('tapi2', 'api', { API_PORT: String(PORT), API_TIMEOUT_MS: '3000' });
+    const call = async (path, key, body) => (await fetch(BASE + path, body === undefined ? { headers: { 'x-api-key': key } }
+        : { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': key }, body: JSON.stringify(body) })).json();
+    const up = await until(async () => {
+        try {
+            return (await call('/v1/rewards/pending', rewardKey)).result === 0;
+        } catch {
+            return false; // 기동 전 연결 거부
+        }
+    }, 30000);
+    check('R0 확정 2시즌 DELIVERING, API 기동', fin.every((r) => r === 0) && up >= 0, `(${fin}, ${up}ms)`);
+
+    const s = `/v1/rankings/${IDS.dlv}/seasons/1`;
+    const page = await call(`${s}/results?offset=1&size=3`, readKey);
+    const tail = await call(`${s}/results?offset=9&size=3`, readKey);
+    const notFinal = await call(`/v1/rankings/${IDS.dlvReview}/seasons/1/results`, readKey);
+    const noSeason = await call(`/v1/rankings/${IDS.dlv}/seasons/99/results`, readKey);
+    check('R1 결과 페이지: 참가자 9, 2~4위(f1 f3 f4), 범위 밖 빈 배열, 확정 전 1003, 시즌 없음 1002',
+        page.data?.participantCount === 9 && page.data.items.map((x) => `${x.rank}:${x.memberId}:${x.rewardCode}`).join() === '2:f1:TOP5,3:f3:TOP5,4:f4:TOP5'
+        && tail.data?.items.length === 0 && tail.data.participantCount === 9 && notFinal.result === 1003 && noSeason.result === 1002,
+        `(${JSON.stringify(page.data?.items?.map((x) => x.memberId))}, ${notFinal.result}, ${noSeason.result})`);
+
+    const banned = await call(`${s}/results/f2`, readKey);
+    const none = await call(`${s}/results/nobody`, readKey);
+    const first = await call(`${s}/results/f0`, readKey);
+    check('R2 내 결과: 제재 rank null·REJECTED, 기록 없음 null, 1위 TOP5·전달 전',
+        banned.data?.rank === null && banned.data.rewardStatus === 3 && banned.data.sanctioned === true
+        && none.data?.rank === null && none.data.score === null && first.data?.rank === 1 && first.data.rewardCode === 'TOP5' && first.data.rewardStatus === 1,
+        `(${JSON.stringify(banned.data)})`);
+
+    const top = await call(`${s}/top?offset=1&size=2`, readKey);
+    const topReview = await call(`/v1/rankings/${IDS.dlvReview}/seasons/1/top`, readKey);
+    check('R3 Top N 페이지 2~3위, 확정 전은 빈 배열', top.data?.items.map((x) => `${x.rank}:${x.memberId}`).join() === '2:f1,3:f3' && topReview.data?.items.length === 0);
+
+    const pages = [];
+    for (let cursor = '', i = 0; i < 5; i++) {
+        const r = await call(`${s}/rewards?size=2${cursor ? `&cursor=${cursor}` : ''}`, rewardKey);
+        pages.push(r.data.items.map((x) => x.memberId).join('+'));
+        cursor = r.data.nextCursor;
+        if (!cursor)
+            break;
+    }
+    const wrongScope = await call(`${s}/rewards`, readKey);
+    const listReview = await call(`/v1/rankings/${IDS.dlvReview}/seasons/1/rewards`, rewardKey);
+    check('R4 보상 목록 커서: 보류·제재 제외 f0+f1 / f3+f5 / 빈 페이지, read 키 2003, 확정 전 1003',
+        pages.join(' / ') === 'f0+f1 / f3+f5 / ' && wrongScope.result === 2003 && listReview.result === 1003, `(${pages.join(' / ')})`);
+
+    const pending = await call('/v1/rewards/pending', rewardKey);
+    const mine = (pending.data?.seasons ?? []).filter((x) => [IDS.dlv, IDS.dlvEmpty].includes(x.rankingId)).map((x) => `${x.rankingId}:${x.remaining}`).sort().join();
+    check('R5 전달 대기 시즌: dlv 남은 4, 빈 시즌 0', mine === [`${IDS.dlv}:4`, `${IDS.dlvEmpty}:0`].sort().join(), `(${mine})`);
+
+    const ackBody = { memberIds: ['f0', 'f1', 'f2', 'f4', 'nobody', 'F3'] };
+    const ack = await call(`${s}/rewards/ack`, rewardKey, ackBody);
+    const [{ at1 }] = await q('SELECT delivered_at at1 FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.dlv, 'f0']);
+    await sleep(20);
+    const replay = await call(`${s}/rewards/ack`, rewardKey, ackBody);
+    const [{ at2 }] = await q('SELECT delivered_at at2 FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.dlv, 'f0']);
+    const ackReview = await call(`/v1/rankings/${IDS.dlvReview}/seasons/1/rewards/ack`, rewardKey, { memberIds: ['f0'] });
+    const tooMany = await call(`${s}/rewards/ack`, rewardKey, { memberIds: Array.from({ length: 1001 }, (_, i) => `m${i}`) });
+    const notApplied = (r) => [...(r.data?.notApplied ?? [])].sort().join();
+    check('R6 ack: 보류·제재·없음·대소문자 다른 ID는 notApplied, 재시도 같은 응답·delivered_at 유지, 확정 전 1003, 1001개 2001',
+        notApplied(ack) === 'F3,f2,f4,nobody' && notApplied(replay) === notApplied(ack) && at1 !== null && at1.getTime() === at2.getTime()
+        && ackReview.result === 1003 && tooMany.result === 2001, `(${notApplied(ack)}, ${ackReview.result}, ${tooMany.result})`);
+
+    // 남은 f3 f5까지 ack → 워커 첫 주기에 두 시즌 SETTLED (보류 f4는 PENDING으로 남는다)
+    await call(`${s}/rewards/ack`, rewardKey, { memberIds: ['f3', 'f5'] });
+    const early = await callSp(A, 'SP_UPDATE_SEASON_SETTLED', [IDS.dlvReview, 1]);
+    startWorker('t9');
+    const settled = await until(async () => {
+        const rows = await q('SELECT status, settled_at FROM ranking_season WHERE ranking_id IN (?) AND season_no = 1', [[IDS.dlv, IDS.dlvEmpty]]);
+        return rows.length === 2 && rows.every((r) => r.status === 8 && r.settled_at !== null);
+    }, 30000);
+    const after = await call(`${s}/rewards/ack`, rewardKey, { memberIds: ['f0'] });
+    const [{ held }] = await q('SELECT reward_status held FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.dlv, 'f4']);
+    check('R7 남은 대상 0 → 워커가 SETTLED (빈 시즌 포함), 보류는 PENDING 유지, SETTLED 뒤 ack 재시도 성공, 확정 전 시즌 전이 1003',
+        settled >= 0 && after.result === 0 && notApplied(after) === '' && held === 1 && early.result === 1003, `(${settled}ms, ${early.result})`);
+
+    // 경고 판정 (createDeliveryWatch): 정체 1회, 변화 시 해소, 사라진 시즌은 잊음, 적체 시작·해소 각 1회
+    const w = createDeliveryWatch(1000, 2);
+    const a = { rankingId: 1, seasonNo: 1, remaining: 5 };
+    const ev = [
+        w([a], 1, 0), w([a], 1, 500), w([a], 3, 1500), w([a], 3, 3000),
+        w([{ ...a, remaining: 4 }], 3, 3500), w([], 1, 4000), w([a], 1, 4100), w([a], 1, 4600),
+    ];
+    const flat = ev.map((e) => `${e.stalled.length}${e.recovered.length}${e.backlog === null ? '-' : e.backlog ? 'B' : 'b'}`).join(' ');
+    check('R8 경고 판정: 1초 정체 1회·변화 시 해소·재등장은 새로 잼, 적체(>2) 시작·해소 1회', flat === '00- 00- 10B 00- 01- 00b 00- 00-', `(${flat})`);
+
+    await stopProcess('t9');
+    await deliveryFaults(call, rewardKey, notApplied);
+}
+
+/**
+ * 보상 전달 오류 주입: 동시 중복 ack, 락 대기로 응답이 시간 초과(2005)된 뒤 커밋, 데드락(50001) 후 재시도,
+ * 워커가 실제로 남기는 정체·적체·재개·SETTLED 로그. 시즌 F1·F2(deliveryScenarios가 DELIVERING으로 만들어 둠): 10명, TOP5(f0~f4) 대상.
+ * @param call API 호출 함수 (경로, 키, 바디)
+ * @param rewardKey reward 권한 키
+ * @param notApplied 응답의 notApplied를 정렬해 이은 문자열
+ * @returns 없음
+ */
+async function deliveryFaults(call, rewardKey, notApplied) {
+    const ack = (id, memberIds) => call(`/v1/rankings/${id}/seasons/1/rewards/ack`, rewardKey, { memberIds });
+    const entry = async (id, m) => (await q('SELECT reward_status, delivered_at FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [id, m]))[0];
+
+    // 게임 서버 인스턴스 여럿이 같은 목록을 동시에 ack. 잘못된 JSON 바디는 2001
+    const same = await Promise.all(Array.from({ length: 5 }, () => ack(IDS.dlvF1, ['f0'])));
+    const bad = await (await fetch(`${BASE}/v1/rankings/${IDS.dlvF1}/seasons/1/rewards/ack`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': rewardKey }, body: '{"memberIds": [',
+    })).json();
+    check('R9 같은 ack 5개 동시: 모두 성공·notApplied 없음, 깨진 JSON 2001', same.every((r) => r.result === 0 && notApplied(r) === '') && (await entry(IDS.dlvF1, 'f0')).reward_status === 2
+        && bad.result === 2001, `(${same.map((r) => r.result)}, ${bad.result})`);
+
+    // 다른 세션이 f1 행을 잠근 동안 ack → API는 3초에 2005, 잠금이 풀리면 SP가 이어서 커밋한다 (응답 유실)
+    const holder = await M.getConnection();
+    let lost;
+    let committed;
+    try {
+        await holder.query('START TRANSACTION');
+        await holder.query("SELECT member_id FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = 'f1' FOR UPDATE", [IDS.dlvF1]);
+        lost = await ack(IDS.dlvF1, ['f1']);
+        await holder.query('ROLLBACK');
+        committed = await until(async () => (await entry(IDS.dlvF1, 'f1')).reward_status === 2, 10000);
+    } finally {
+        await holder.query('ROLLBACK');
+        holder.release();
+    }
+    const at = (await entry(IDS.dlvF1, 'f1')).delivered_at;
+    await sleep(20);
+    const retry = await ack(IDS.dlvF1, ['f1']);
+    check('R10 락 대기로 ack 2005 → 잠금 해제 후 실제 반영, 재시도는 성공·delivered_at 그대로', lost.result === 2005 && committed >= 0 && retry.result === 0 && notApplied(retry) === ''
+        && (await entry(IDS.dlvF1, 'f1')).delivered_at.getTime() === at.getTime(), `(${lost.result}, ${committed}ms, ${retry.result})`);
+
+    // 데드락: holder가 f3(과 F2 전체)을 잡고, ack [f2, f3]이 f2를 잡은 채 f3을 기다릴 때 holder가 f2를 요청한다.
+    // InnoDB는 잠금이 적은 쪽(ack SP)을 희생시킨다 → SP EXIT HANDLER 50001 → 500. 재시도하면 반영된다.
+    const h2 = await M.getConnection();
+    let deadlocked;
+    let holderErr = null;
+    try {
+        await h2.query('START TRANSACTION');
+        await h2.query('SELECT member_id FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 FOR UPDATE', [IDS.dlvF2]);
+        await h2.query("SELECT member_id FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = 'f3' FOR UPDATE", [IDS.dlvF1]);
+        const pendingAck = ack(IDS.dlvF1, ['f2', 'f3']);
+        await sleep(500);
+        try {
+            await h2.query("SELECT member_id FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = 'f2' FOR UPDATE", [IDS.dlvF1]);
+        } catch (e) {
+            holderErr = e.errno;
+        }
+        deadlocked = await pendingAck;
+    } finally {
+        await h2.query('ROLLBACK');
+        h2.release();
+    }
+    const after = [(await entry(IDS.dlvF1, 'f2')).reward_status, (await entry(IDS.dlvF1, 'f3')).reward_status];
+    const again = await ack(IDS.dlvF1, ['f2', 'f3']);
+    check('R11 ack 데드락 → 50001(500)·반영 없음(롤백), 재시도 성공', deadlocked.result === 50001 && holderErr === null && after.join() === '1,1'
+        && again.result === 0 && notApplied(again) === '', `(${deadlocked.result}, holder ${holderErr}, ${after})`);
+
+    // 워커 실제 로그: 1초 정체, 적체 > 1, 0.5초 주기. F1 남은 f4, F2 남은 5명
+    const [{ others }] = await q('SELECT COUNT(season_no) others FROM ranking_season WHERE status = 7 AND ranking_id NOT IN (?)', [[IDS.dlvF1, IDS.dlvF2]]);
+    const base = (text) => logCount('t10', text);
+    const b0 = ['reward ack stalled ranking=' + IDS.dlvF1, 'reward ack stalled ranking=' + IDS.dlvF2, 'DELIVERING backlog:', 'rewards delivered ranking=' + IDS.dlvF1, 'reward ack resumed ranking=' + IDS.dlvF2, 'DELIVERING backlog cleared'].map(base);
+    const grew = (i, text) => base(text) > b0[i];
+    startWorker('t10', { DELIVERY_STALL_SEC: '1', DELIVERY_BACKLOG_MAX: '1', DELIVERY_INTERVAL_MS: '500' });
+    const warned = await until(async () => grew(0, 'reward ack stalled ranking=' + IDS.dlvF1) && grew(1, 'reward ack stalled ranking=' + IDS.dlvF2) && grew(2, 'DELIVERING backlog:'), 20000);
+    await ack(IDS.dlvF1, ['f4']);
+    await ack(IDS.dlvF2, ['f0']);
+    const cleared = await until(async () => grew(3, 'rewards delivered ranking=' + IDS.dlvF1) && grew(4, 'reward ack resumed ranking=' + IDS.dlvF2)
+        && (others > 0 || grew(5, 'DELIVERING backlog cleared')), 20000);
+    const [{ status }] = await q('SELECT status FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [IDS.dlvF1]);
+    check('R12 워커 로그: 두 시즌 ack 정체·적체 경고 → ack 후 F1 SETTLED, F2 재개, 적체 해소', warned >= 0 && cleared >= 0 && status === 8,
+        `(${warned}ms, ${cleared}ms, 다른 DELIVERING ${others})`);
+}
+
 // ------------------------------------------------------------------------------------------------ 6. 로그 정리 (01_DESIGN 4.5, 11.4)
 
 /** UTC 오늘에서 days일 떨어진 날짜 'YYYY-MM-DD' */
@@ -1178,7 +1381,7 @@ try {
     const times = Number(process.argv[2] ?? 3);
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
-        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['로그 정리', logCleanupScenarios]]) {
+        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios]]) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);

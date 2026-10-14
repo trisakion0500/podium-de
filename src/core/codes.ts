@@ -191,6 +191,7 @@ export const PartitionTarget = {
  * @modified 2026-10-07 trisakion 조회 SP 코드(1301) 추가
  * @modified 2026-10-10 trisakion 정산 SP 코드(1009~1013) 추가
  * @modified 2026-10-11 trisakion 확정 SP 코드(1014~1015) 추가
+ * @modified 2026-10-14 trisakion SETTLED 전이 코드(1016) 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -225,6 +226,8 @@ export const SpResult = {
     REVIEW_NOT_DUE: 1014,
     /** 확정: 앞 단계가 끝나지 않음 (participant_count·tier_snapshot 없음, 또는 순위 재부여 미완료) */
     FINALIZE_INCOMPLETE: 1015,
+    /** SETTLED 전이: 남은 전달 대상(PENDING, 보류 제외)이 있음 */
+    REWARD_REMAINING: 1016,
     /** 제출: ranking_definition에 랭킹이 없음 */
     RANKING_NOT_FOUND: 1101,
     /** 제출: 랭킹이 ACTIVE가 아님 (D-34) */

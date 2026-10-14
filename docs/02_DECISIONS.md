@@ -929,3 +929,32 @@ SP와 앱의 직접 쿼리는 `NOW(3)` 대신 `UTC_TIMESTAMP(3)`을 쓴다. 풀�
 - 경계마다 t%보다 최대 1명 더 준다(P=199의 상위 1%는 2명 = 1.005%).
 - RANK와 PERCENT가 겹치는 순위에 일부러 PERCENT 보상을 주는 구성은 쓸 수 없다.
 - 공백은 경고뿐이라 로그를 보지 않으면 놓친다. 등록 도구(6단계)에서 등록 시점에 함께 보여 준다.
+
+### D-70. SETTLED 전이와 전달 감시는 워커 전달 잡이 한다 — 확정
+
+**결정:**
+- DELIVERING → SETTLED는 ack API가 아니라 워커 전달 잡이 한다. 잡은 `DELIVERY_INTERVAL_MS`(기본 30초)마다 DELIVERING 시즌의 남은 전달 대상(PENDING, 보류 제외)을 세고, 0인 시즌을 `SP_UPDATE_SEASON_SETTLED`로 넘긴다.
+- 전이는 조건부 UPDATE 한 문장(`status = 7 AND NOT EXISTS 남은 대상`)이다. 남아 있으면 1016으로 거부하고 다음 주기에 다시 본다.
+- 전달 잡은 정산 잡과 다른 락(`podium:delivery`)으로 돈다. ack 정체(`DELIVERY_STALL_SEC`)와 적체(`DELIVERY_BACKLOG_MAX`)도 이 잡이 판정한다.
+- 결과·보상 API는 DELIVERING 전 시즌을 1003으로 거부한다.
+
+**배경:**
+- 보상 대상이 0건인 시즌(빈 시즌, 보상 구간 없음, 전원 제재)은 게임 서버가 ack할 것이 없다. ack에서 전이하면 이런 시즌은 영원히 DELIVERING에 남는다.
+- ack 정체·적체 경고는 ack가 오지 않을 때 필요한 것이라, ack 경로에서는 판정할 수 없다.
+- FINALIZING 중에는 `SP_UPDATE_FINAL_RANK`가 `final_rank`, `reward_status`를 다시 쓴다. 이때 ack가 DELIVERED로 바꾸면 다음 청크가 PENDING으로 덮을 수 있다.
+
+**검토한 대안:**
+- ack SP가 마지막 PENDING을 처리하면 같은 트랜잭션에서 SETTLED로 전이: 지연이 없다. 하지만 0건 시즌을 끝낼 다른 경로가 어차피 필요하다. ack마다 시즌 행을 잠가 동시 ack가 한 줄로 서고, 잠금 순서(season 3 → entry 7)도 ack SP에 들어온다.
+- `SP_UPDATE_SEASON_DELIVERING`에서 대상 0건이면 바로 SETTLED: 0건 시즌은 해결된다. 하지만 상태 흐름에 건너뛰기가 생기고, 보류 건이 PENDING으로 전환(6단계)되는 경우를 다시 따로 처리해야 한다.
+- 정산 잡(5초 주기)에 붙이기: 큰 시즌 확정이 몇 분 걸리는 동안 SETTLED와 경고가 밀린다. 남은 수를 5초마다 세는 비용도 든다.
+
+**이유**
+- 0건 시즌, 마지막 ack, 6단계의 보류 전환·강제 종료 뒤가 모두 같은 한 경로로 끝난다.
+- ack SP는 `ranking_entry`만 잠근다. 동시 ack 5개, ack 도중 데드락(1213 → 50001 후 재시도)을 실제로 일으켜도 결과가 같았다(회귀 R9·R11).
+- 전이 조건을 문장 안에서 다시 보므로, 목록을 읽은 뒤 무엇이 바뀌어도 남은 대상이 있는 시즌은 넘어가지 않는다.
+
+**감수할 것:**
+- 마지막 ack 뒤 SETTLED까지 최대 `DELIVERY_INTERVAL_MS`만큼 늦다. SETTLED 뒤의 백업 분리(5단계)도 그만큼 늦게 시작한다.
+- 주기마다 DELIVERING 시즌마다 남은 수를 센다(`ix_reward_status` 범위 + `reward_held` 행 조회). 게임 서버 장애로 큰 시즌이 많이 쌓이면 그만큼 읽는다. 적체 경고로 드러난다.
+- ack 정체 기준 시각은 워커 메모리에 둔다. 워커가 재시작하면 처음부터 다시 잰다(재시작 직후 최대 `DELIVERY_STALL_SEC`만큼 경고가 늦다).
+- 보류(held) 행은 남은 대상으로 세지 않는다. 보류가 남은 채 SETTLED가 되고 PENDING인 채 백업으로 분리된다(7.7). 6단계 GM 전환 전까지 보류는 항상 0이다(D-64).

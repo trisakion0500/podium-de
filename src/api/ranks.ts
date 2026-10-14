@@ -11,10 +11,23 @@ import { readBoard, type Redis } from '../core/redis.js';
 const TOP_SIZE_DEFAULT = 20;
 const TOP_SIZE_MAX = 100;
 
-const errorRef = { $ref: 'ErrorResponse#' };
+/**
+ * 실패 응답 스키마 참조 (조회·보상 라우트 공용)
+ * @author trisakion
+ */
+export const errorRef = { $ref: 'ErrorResponse#' };
 
-const rankingIdParam = { type: 'integer', minimum: 1, maximum: 4294967295, description: '랭킹 ID', example: 1 };
-const memberIdSchema = { type: 'string', minLength: 1, maxLength: 64, description: '멤버 ID (대소문자 구분)', example: 'user-1001' };
+/**
+ * 경로 파라미터 랭킹 ID 스키마 (조회·보상 라우트 공용)
+ * @author trisakion
+ */
+export const rankingIdParam = { type: 'integer', minimum: 1, maximum: 4294967295, description: '랭킹 ID', example: 1 };
+
+/**
+ * 멤버 ID 스키마 (조회·보상 라우트 공용)
+ * @author trisakion
+ */
+export const memberIdSchema = { type: 'string', minLength: 1, maxLength: 64, description: '멤버 ID (대소문자 구분)', example: 'user-1001' };
 const seasonNoSchema = { type: 'integer', description: '현재 시즌 번호', example: 12 };
 
 /** 순위 행. 순위는 모두 고유하다 — 같은 점수면 먼저 달성한 쪽, 같은 시간 단위 안이면 member 순서로 갈린다 (01_DESIGN 5.2) */
@@ -37,8 +50,11 @@ const myRank = {
     },
 };
 
-/** 조회 공통 실패 응답. 503은 2007(집계 중)과 2005(시간 초과) */
-const readErrors = { 400: errorRef, 401: errorRef, 403: errorRef, 404: errorRef, 500: errorRef, 503: errorRef };
+/**
+ * 조회 공통 실패 응답. 503은 2007(집계 중)과 2005(시간 초과)
+ * @author trisakion
+ */
+export const readErrors = { 400: errorRef, 401: errorRef, 403: errorRef, 404: errorRef, 500: errorRef, 503: errorRef };
 
 const unavailableNote = '- 현재 시즌 순위표를 쓸 수 없으면(Redis 장애·재구축 중, 워커 정지) 2007/503이다. 잠시 후 다시 조회한다.';
 
@@ -46,8 +62,10 @@ const unavailableNote = '- 현재 시즌 순위표를 쓸 수 없으면(Redis �
  * 랭킹 정의를 찾는다. 없으면 제출과 같은 1101로 거부한다.
  * @param rankingId 랭킹 ID
  * @returns 랭킹 정의
+ * @author trisakion
+ * @modified 2026-10-14 trisakion 결과·보상 라우트와 공용으로 export
  */
-function rankingOrThrow(rankingId: number): RankingRule {
+export function rankingOrThrow(rankingId: number): RankingRule {
     const rule = getRanking(rankingId);
     if (!rule)
         throw new BusinessException(SpResult.RANKING_NOT_FOUND);
