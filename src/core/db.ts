@@ -11,6 +11,11 @@ const ER_SP_DOES_NOT_EXIST = 1305;
 const targetOf = new WeakMap<object, DbTarget>();
 /** 연결 실패 경고를 남기고 아직 회복을 못 본 DB */
 const unreachable = new Set<DbTarget>();
+/** 호출 제한 시간을 둔 풀 → 제한 시간(ms). API 풀만 등록한다 */
+const queryTimeoutOf = new WeakMap<Pool, number>();
+const QUERY_TIMEOUT = 'PROTOCOL_SEQUENCE_TIMEOUT';
+/** 풀 대기열 상한 = 커넥션 수 × 이 값. 넘는 요청은 기다리지 않고 바로 실패한다 */
+const QUEUE_PER_CONNECTION = 20;
 
 /**
  * DB 호출 결과로 연결 상태를 갱신하고, 상태가 바뀔 때만 한 줄 남긴다 — Redis의 unavailable/ready와 같은 방식이다.
@@ -30,7 +35,9 @@ function noteDbState(db: object, err?: unknown): void {
         return;
     }
     // fatal: mysql2가 연결 자체의 오류(거부·끊김·시간 초과·인증)에 붙인다. SQL 오류는 연결이 살아 있으므로 제외한다.
-    if ((err as { fatal?: boolean }).fatal && !unreachable.has(target)) {
+    // 호출 제한 시간 초과는 fatal이 아니지만 연결은 됐는데 응답이 없는 상태라 같이 본다.
+    const e = err as { fatal?: boolean; code?: string };
+    if ((e.fatal || e.code === QUERY_TIMEOUT) && !unreachable.has(target)) {
         unreachable.add(target);
         logger.warn(`${name} db unreachable — calls fail with 50001 until it recovers`, err);
     }
@@ -42,15 +49,19 @@ function noteDbState(db: object, err?: unknown): void {
  * 풀에서 직접 쓰는 NOW()·FROM_UNIXTIME 같은 세션 의존 함수와 timezone 'Z'의 DATETIME 해석이 같은 UTC를 보게
  * 한 겹 더 맞춘다 — 서버·OS 시간대가 무엇이든 결과가 같다(01_DESIGN 4.1, D-66).
  * @param account 접속 계정. API·워커는 APP, migrate·upgrade는 MIGRATE
+ * 대기열에 상한을 둔다. DB가 응답하지 않을 때 무제한 대기열은 메모리를 계속 키우고, 회복 뒤에는 이미 2005를 받은
+ * 요청들을 먼저 처리하느라 새 요청까지 늦춘다. 상한을 넘으면 바로 실패(50001)해 게임 서버가 재시도하게 한다.
  * @param target 대상 DB. 로그 DB는 메인과 다른 풀로 둔다 — 로그 기록이 메인 커넥션을 차지하거나 메인 트랜잭션에 묶이지 않게 한다(개발 컨벤션 7장)
+ * @param queryTimeoutMs callSp 호출 하나의 제한 시간(ms, 0: 없음). API만 쓴다 (config.dbQueryTimeoutMs)
  * @returns 커넥션 풀
  * @author trisakion
  * @modified 2026-10-01 trisakion 접속 계정 인자 추가
  * @modified 2026-10-02 trisakion 대상 DB 인자 추가 (D-48)
  * @modified 2026-10-10 trisakion 시간대 원칙 주석 갱신 (D-66)
  * @modified 2026-10-14 trisakion 연결 상태 로그용 대상 DB 등록
+ * @modified 2026-10-16 trisakion 대기열 상한, 호출 제한 시간 인자 추가
  */
-export function createPool(account: DbAccount, target: DbTarget = 'MAIN'): Pool {
+export function createPool(account: DbAccount, target: DbTarget = 'MAIN', queryTimeoutMs = 0): Pool {
     const db = target === 'MAIN' ? config.db : config.logDb;
     const pool = mysql.createPool({
         host: db.host,
@@ -58,6 +69,7 @@ export function createPool(account: DbAccount, target: DbTarget = 'MAIN'): Pool 
         ...dbCredential(account, target),
         database: db.database,
         connectionLimit: db.poolSize,
+        queueLimit: db.poolSize * QUEUE_PER_CONNECTION,
         charset: 'UTF8MB4_0900_AI_CI',
         timezone: 'Z',
         // score_max는 2^53 이하(01_DESIGN 2.4)라 number로 정확히 표현된다. 그 이상만 문자열로 받는다.
@@ -72,7 +84,35 @@ export function createPool(account: DbAccount, target: DbTarget = 'MAIN'): Pool 
         });
     });
     targetOf.set(pool, target);
+    if (queryTimeoutMs > 0)
+        queryTimeoutOf.set(pool, queryTimeoutMs);
     return pool;
+}
+
+/**
+ * 제한 시간을 두고 풀에서 쿼리 하나를 실행한다. pool.query는 시간 초과 뒤에도 응답 없는 명령이 남은 커넥션을
+ * 풀에 돌려줘 다음 쿼리가 그 뒤에 막히므로, 커넥션을 직접 받아 시간 초과·연결 오류면 버린다.
+ * 버려도 이미 DB에 닿은 SP는 취소되지 않는다(2005와 같다 — 같은 requestId 재시도로 맞춘다).
+ * @param pool 커넥션 풀
+ * @param sql 실행할 SQL
+ * @param params 바인딩 값
+ * @param timeout 제한 시간(ms)
+ * @returns 결과셋
+ */
+async function queryWithTimeout(pool: Pool, sql: string, params: unknown[], timeout: number): Promise<RowDataPacket[][]> {
+    const conn = await pool.getConnection();
+    try {
+        const [sets] = await conn.query<RowDataPacket[][]>({ sql, timeout }, params);
+        conn.release();
+        return sets;
+    } catch (err) {
+        const e = err as { fatal?: boolean; code?: string };
+        if (e.fatal || e.code === QUERY_TIMEOUT)
+            conn.destroy();
+        else
+            conn.release();
+        throw err;
+    }
 }
 
 /**
@@ -101,21 +141,23 @@ export interface SpResult {
  * @modified 2026-10-07 trisakion 데이터 결과셋 자리에 온 50001(RESULT 0 이후 SELECT 실패)도 DB 오류로 던짐
  * @modified 2026-10-14 trisakion 연결 실패 등 호출 자체의 오류도 DATABASE_ERROR로 던짐
  * @modified 2026-10-14 trisakion 연결 끊김·회복을 상태가 바뀔 때만 로그로 남김
+ * @modified 2026-10-16 trisakion 제한 시간을 둔 풀(API)은 시간 초과 시 커넥션을 버림
  */
 export async function callSp(db: Pool | PoolConnection, name: string, params: unknown[]): Promise<SpResult> {
     if (!/^SP_[A-Z0-9_]+$/.test(name))
         throw new Error(`잘못된 SP 이름: ${name}`);
-    const placeholders = params.map(() => '?').join(', ');
+    const sql = `CALL ${name}(${params.map(() => '?').join(', ')})`;
+    const timeout = queryTimeoutOf.get(db as Pool);
     let sets: RowDataPacket[][];
     try {
-        [sets] = await db.query<RowDataPacket[][]>(`CALL ${name}(${placeholders})`, params);
+        sets = timeout ? await queryWithTimeout(db as Pool, sql, params, timeout) : (await db.query<RowDataPacket[][]>(sql, params))[0];
         noteDbState(db);
     } catch (err) {
         noteDbState(db, err);
         const e = err as { errno?: number; code?: string; sqlState?: string; message?: string };
         if (e.errno === ER_SP_DOES_NOT_EXIST)
             throw new Error(`${name}이(가) DB에 없습니다. npm run migrate가 필요합니다.`, { cause: err });
-        // 연결 거부·끊김, 풀 종료 등 SP 밖의 DB 오류. SP 안의 오류(50001)와 같은 코드로 내야 게임 서버가 한 가지 기준으로 재시도한다.
+        // 연결 거부·끊김, 호출 제한 시간 초과, 풀 대기열 초과, 풀 종료 등 SP 밖의 DB 오류. SP 안의 오류(50001)와 같은 코드로 내야 게임 서버가 한 가지 기준으로 재시도한다.
         throw new BusinessException(ApiResult.DATABASE_ERROR, `${name}: DB 호출 실패 ${e.code ?? ''} ${e.message ?? ''}`, {
             sqlState: e.sqlState,
             errorNo: e.errno,

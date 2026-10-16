@@ -11,9 +11,9 @@ import { registerResultRoutes } from './api/results.js';
 import { buildServer } from './core/server.js';
 import { drainSubmitLogs, registerSubmitRoute } from './api/submit.js';
 
-const { pool, onShutdown } = await bootstrap('api', ProcessType.API);
+const { pool, onShutdown } = await bootstrap('api', ProcessType.API, config.dbQueryTimeoutMs);
 // 제출 이력은 로그 DB 전용 풀로 쓴다 — 메인 커넥션을 차지하거나 메인 트랜잭션에 묶이지 않게 한다 (개발 컨벤션 7장).
-const logPool = createPool('APP', 'LOG');
+const logPool = createPool('APP', 'LOG', config.dbQueryTimeoutMs);
 const redis = createRedis();
 
 const app = await buildServer();

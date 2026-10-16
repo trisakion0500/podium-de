@@ -80,6 +80,7 @@ const mainDb = {
  * @modified 2026-10-10 trisakion 시즌 스케줄러 설정 추가
  * @modified 2026-10-14 trisakion LOG_RETENTION_DAYS 1 미만 거부
  * @modified 2026-10-14 trisakion 보상 전달 경고 기준 추가
+ * @modified 2026-10-16 trisakion 처리 제한 기본 5초, API DB 호출 제한 시간 추가
  */
 export const config = {
     db: mainDb,
@@ -103,7 +104,13 @@ export const config = {
      */
     apiHost: process.env.API_HOST || '::',
     /** 요청 처리 제한 시간(ms). 넘으면 TIMEOUT 응답만 보내고 진행 중 작업은 취소하지 않는다 (개발 컨벤션 7.2) */
-    apiTimeoutMs: int('API_TIMEOUT_MS', 30000),
+    apiTimeoutMs: int('API_TIMEOUT_MS', 5000),
+    /**
+     * API의 DB 호출 하나의 제한 시간(ms, 0: 없음). 넘으면 그 커넥션을 버려 풀로 돌려받고 50001로 실패시킨다 — DB가 응답하지 않을 때
+     * 커넥션이 무한히 묶이지 않게 한다. 제출 SP는 문장마다 락을 5초까지 기다리고 SUM은 최대 세 문장이 기다릴 수 있어 그보다 길게 둔다.
+     * 워커는 쓰지 않는다 — 정산 청크처럼 오래 걸리는 SP가 정상이다.
+     */
+    dbQueryTimeoutMs: int('DB_QUERY_TIMEOUT_MS', 20000, 0),
     /** 1이면 Swagger UI(/docs)를 연다. 설치본 운영 환경에 API 구조를 기본으로 드러내지 않도록 기본은 끈다 */
     apiDocs: int('API_DOCS', 0) === 1,
     /** Redis 실시간 순위표 (01_DESIGN 5장). 원장은 MySQL이라 Redis 장애는 기동을 막지 않는다 */

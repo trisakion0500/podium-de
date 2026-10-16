@@ -42,7 +42,7 @@
 | 1105 / 1106 / 1107 (400) | 스코어 범위, 1회 증분(`max_delta`), 누적 상한(`score_max`) 초과 | 값 확인. SUM은 `max_delta`를 먼저 검사한다 |
 | 2006 / 429 | 분당 제출 한도 초과 | 잠시 후 같은 `requestId`로 재시도 |
 | 2005 / 503 | 처리 시간 초과. 서버에서는 반영됐을 수 있다 | 같은 `requestId`로 재시도 (반영됐으면 `replayed: true`) |
-| 50001 / 500 | DB 시스템 오류 (SP 내부 오류, DB 연결 실패) | 같은 `requestId`로 재시도. 서버 로그의 `DB 오류 <errno> (<sqlstate>)` 또는 `DB 호출 실패 <code>`로 원인 확인 |
+| 50001 / 500 | DB 시스템 오류 (SP 내부 오류, DB 연결 실패, DB 무응답, 풀 대기열 초과) | 같은 `requestId`로 재시도. 서버 로그의 `DB 오류 <errno> (<sqlstate>)` 또는 `DB 호출 실패 <code>`로 원인 확인. `PROTOCOL_SEQUENCE_TIMEOUT`은 호출 제한 시간 초과, `Queue limit reached`는 대기열이 찬 것이다 |
 | 1301 / 404 | 지금 시각에 해당하는 시즌이 없다 (시즌 사이 공백, 종료된 랭킹) | `seasons/current`로 확인. 시즌이 생성됐는지(스케줄러) 확인 |
 | 2007 / 503 | 순위표를 쓸 수 없다: 센티넬 없음(준비 전 — 워커 정지·시즌 행 지연, 재구축 중) 또는 Redis 장애 | 잠시 후 재조회. 센티넬은 시즌 시작 60초 전에 미리 생기므로 시즌 경계에서는 나지 않는다. 재구축은 100만 명 시즌 기준 BEST 약 6초, SUM 약 11초 걸린다. 그보다 오래 계속되면 Redis 연결 로그와 재구축 상태 확인 |
 
@@ -67,7 +67,7 @@
 
 | 증상 | 원인 | 조치 |
 |---|---|---|
-| `main db unreachable — calls fail with 50001 until it recovers` (warn) | 메인 DB 연결 실패(거부·끊김·시간 초과·인증). 프로세스마다 상태가 바뀔 때 한 번만 남는다 | 그동안 제출·조회는 50001, 워커 잡은 `… cycle failed`로 주기마다 다시 시도한다. DB 접속을 확인한다. 다음 호출이 성공하면 `main db recovered`가 남는다(호출이 없으면 그만큼 늦게 남는다) |
+| `main db unreachable — calls fail with 50001 until it recovers` (warn) | 메인 DB 연결 실패(거부·끊김·시간 초과·인증) 또는 무응답(API 호출이 `DB_QUERY_TIMEOUT_MS` 초과). 프로세스마다 상태가 바뀔 때 한 번만 남는다 | 그동안 제출·조회는 50001, 워커 잡은 `… cycle failed`로 주기마다 다시 시도한다. DB 접속을 확인한다. 다음 호출이 성공하면 `main db recovered`가 남는다(호출이 없으면 그만큼 늦게 남는다) |
 | `log db unreachable — calls fail with 50001 until it recovers` (warn) | 로그 DB 연결 실패 | 제출은 계속 성공하고 이력만 빠진다(`submit log write failed`). 복구되면 `log db recovered`가 남는다 |
 | 제출이 500(`DATABASE_ERROR`), 서버 로그에 `SP_SUBMIT_SCORE: DB 오류 1205` | 같은 멤버나 같은 requestId의 다른 제출이 행 락을 5초 넘게 잡았다 | 게임 서버가 같은 `requestId`로 재시도하면 처리된다(멱등). 잦으면 긴 트랜잭션이나 같은 멤버로 몰린 동시 제출을 확인한다 |
 | DDL 실패 errno 1205 | 운영 테이블 MDL 대기가 2초를 넘었다 (긴 트랜잭션) | 잡이 다음 주기에 상태를 다시 보고 재시도한다(시즌 파티션 추가는 스케줄러가 매 주기 빠진 것을 채운다). 반복되면 긴 트랜잭션을 찾는다 |

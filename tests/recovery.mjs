@@ -1467,6 +1467,7 @@ async function runUntilExit(kind, id, env, ms = 20000) {
  * Redis·로그 DB가 죽은 API, 메인 DB에 닿지 않는 API·워커의 기동 거부, 실행 중 migrate 거부.
  * X11~X20: 조회·보상 API 검증, 같은 멤버 동시 첫 제출, API 경유 1205 롤백, TCP 프록시(tcpProxy)로 만든 실행 중 Redis 무응답·다운,
  * 로그 DB·메인 DB 다운 → 복구, 제출 처리 중 API 강제 종료, 잘못된 설정·포트 충돌 기동 거부, 키 폐기 전파(30초).
+ * X21~X22: 제출 경로 데드락, 메인 DB 무응답 중 동시 제출(풀 대기열 상한·호출 제한 시간).
  * 포트: TEST_PORT ~ TEST_PORT+5.
  * @returns 없음
  */
@@ -1495,11 +1496,13 @@ async function apiFaults() {
     redisUrl.hostname = '127.0.0.1';
     redisUrl.port = String(redisProxy.port);
     startWorker('t11', { REDIS_URL: redisUrl.href });
-    // tx1: 정상 API (처리 제한 2초). tx2: Redis·로그 DB가 모두 죽은 API. tx12: 프록시 경유 API (처리 제한 기본 30초). tx13: 강제 종료용
+    // tx1: 정상 API (처리 제한 2초). tx2: Redis·로그 DB가 모두 죽은 API. tx13: 강제 종료용
+    // tx12: 프록시 경유 API. 처리 제한 15초·DB 호출 제한 7초 — 락 대기 5초(1205)를 50001로 받고, DB 무응답은 7초에 끊는다
     spawnTracked('tx1', 'api', { API_PORT: String(PORT), API_TIMEOUT_MS: '2000' });
     spawnTracked('tx2', 'api', { API_PORT: String(PORT + 1), REDIS_URL: `redis://127.0.0.1:${DEAD_PORT}`, DB_LOG_PORT: DEAD_PORT });
     spawnTracked('tx12', 'api', {
         API_PORT: String(PORT + 3), REDIS_URL: redisUrl.href, DB_HOST: '127.0.0.1', DB_PORT: String(dbProxy.port), DB_LOG_HOST: '127.0.0.1', DB_LOG_PORT: String(logProxy.port),
+        API_TIMEOUT_MS: '15000', DB_QUERY_TIMEOUT_MS: '7000',
     });
     spawnTracked('tx13', 'api', { API_PORT: String(PORT + 4) });
     const DOWN = `http://localhost:${PORT + 1}`;
@@ -1654,7 +1657,7 @@ async function apiFaults() {
         && bestRace.every((r) => r.result === 0) && Number(bestRow?.score) === 200 && raceRedis >= 0,
         `(SUM ${sumRace.map((r) => r.result).filter((x) => x !== 0)}, ${sumRow?.score}/${sumRow?.version}, BEST ${bestRow?.score}, ${raceRedis}ms)`);
 
-    // 락 대기 5초 초과(1205)를 처리 제한 30초 API로 받는다: SP가 롤백하고 50001/500. 멱등 키도 롤백되어 같은 requestId 재시도는 새로 반영
+    // 락 대기 5초 초과(1205)를 처리 제한 15초 API로 받는다: SP가 롤백하고 50001/500. 멱등 키도 롤백되어 같은 requestId 재시도는 새로 반영
     const lw = `${tag}-lw`;
     await post(IDS.fxSum, ok({ memberId: lw, value: 10 }), PROXIED);
     const lwReq = ok({ memberId: lw, value: 4 });
@@ -1678,7 +1681,42 @@ async function apiFaults() {
         lwRes.result === 50001 && lwRes.status === 500 && lwMs >= 4800 && lwMs < 8000 && lwKeys === 0 && Number(lwScore) === 10
         && lwRetry.result === 0 && lwRetry.data.replayed === false && lwRetry.data.score === 14, `(${lwRes.result}/${lwRes.status}, ${lwMs}ms, 키 ${lwKeys}, 점수 ${lwScore}, 재시도 ${lwRetry.data?.score})`);
 
-    // Redis 무응답(연결 유지): 제출은 Redis 제한 시간(0.5초) 뒤 성공, 조회는 2007. API 처리 제한(30초)까지 매달리지 않는다
+    // 제출 경로 데드락: SP는 멱등 키를 넣은 뒤 멤버 행을 잠근다. holder가 멤버 행을 잡은 채 같은 키를 넣으면 서로를 기다린다.
+    // holder는 미리 키 20개를 넣어(롤백 대상) SP보다 무겁게 만든다 — InnoDB는 가벼운 쪽(SP)을 희생시킨다 → 1213 → 50001, 전부 롤백
+    const dl = `${tag}-dl`;
+    await post(IDS.fxSum, ok({ memberId: dl, value: 10 }));
+    const dlReq = ok({ memberId: dl, value: 3 });
+    const dlLog0 = logCount('tx1', 'DB 오류 1213', 'api');
+    const keyInsert = 'INSERT INTO ranking_submit_key (ranking_id, season_no, request_id, member_id, input_value, rejected, created_at) VALUES ?';
+    const h5 = await M.getConnection();
+    let dlRes;
+    let dlHolderErr = null;
+    try {
+        await h5.query('START TRANSACTION');
+        await h5.query(keyInsert, [Array.from({ length: 20 }, (_, i) => [IDS.fxSum, 1, `${tag}-dlpad-${i}`, dl, 0, null, new Date()])]);
+        await h5.query('SELECT score FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ? FOR UPDATE', [IDS.fxSum, dl]);
+        const pending = post(IDS.fxSum, dlReq);
+        await sleep(500);
+        try {
+            await h5.query(keyInsert, [[[IDS.fxSum, 1, dlReq.requestId, dl, 3, null, new Date()]]]);
+        } catch (e) {
+            dlHolderErr = e.errno;
+        }
+        dlRes = await pending;
+    } finally {
+        await h5.query('ROLLBACK');
+        h5.release();
+    }
+    const [{ n: dlKeys }] = await q('SELECT COUNT(request_id) n FROM ranking_submit_key WHERE ranking_id = ? AND season_no = 1 AND request_id = ?', [IDS.fxSum, dlReq.requestId]);
+    const [{ score: dlScore }] = await q('SELECT score FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.fxSum, dl]);
+    const dlRetry = await post(IDS.fxSum, dlReq);
+    const dlLogged = await until(async () => logCount('tx1', 'DB 오류 1213', 'api') > dlLog0, 5000);
+    check('X21 제출 경로 데드락: SP가 희생돼 50001/500(로그 1213), 원장·멱등 키 롤백(점수 10, 키 0), 같은 requestId 재시도는 새로 반영(13)',
+        dlRes.result === 50001 && dlRes.status === 500 && dlHolderErr === null && dlLogged >= 0 && dlKeys === 0 && Number(dlScore) === 10
+        && dlRetry.result === 0 && dlRetry.data.replayed === false && dlRetry.data.score === 13,
+        `(${dlRes.result}/${dlRes.status}, holder ${dlHolderErr}, 키 ${dlKeys}, 점수 ${dlScore}, 재시도 ${dlRetry.data?.score})`);
+
+    // Redis 무응답(연결 유지): 제출은 Redis 제한 시간(0.5초) 뒤 성공, 조회는 2007. API 처리 제한(15초)까지 매달리지 않는다
     const hm = `${tag}-hang`;
     redisProxy.hang();
     let t = Date.now();
@@ -1748,6 +1786,33 @@ async function apiFaults() {
         mdSubmit.status === 500 && mdSubmit.result === 50001 && mdSecond.result === 50001 && mdMs < 3000 && workers.has('tx12') && mdBack >= 0 && Number(mdRow?.score) === 1
         && ms1[0] - ms0[0] === 1 && ms1[1] - ms0[1] === 1,
         `(${mdSubmit.result}/${mdSubmit.status} ${mdMs}ms, 복구 ${mdBack}ms, 점수 ${mdRow?.score}, 상태 로그 +${ms1[0] - ms0[0]}/+${ms1[1] - ms0[1]})`);
+
+    // 메인 DB 무응답(연결 유지)에 동시 제출: 커넥션 수만큼은 DB에서 멈추고, 대기열(커넥션 × 20)까지 기다리고, 넘는 요청은 바로 50001.
+    // DB에 보낸 호출은 호출 제한(7초)에 커넥션을 버리고 50001·unreachable 1줄. 재개 뒤 대기열은 곧바로 처리되고 recovered 1줄
+    const poolSize = config.db.poolSize;
+    const burstN = poolSize * 21 + 50;
+    const hb = `${tag}-hb`;
+    const hs0 = dbState('main');
+    dbProxy.hang();
+    t = Date.now();
+    const burstP = Array.from({ length: burstN }, (_, i) => post(IDS.fxSum, ok({ memberId: `${hb}-${i}`, value: 1 }), PROXIED).then((r) => ({ ...r, ms: Date.now() - t })));
+    const hungWarn = await until(async () => dbState('main')[0] > hs0[0], 15000);
+    await dbProxy.up();
+    const hbRes = await Promise.all(burstP);
+    t = Date.now();
+    const hbAfter = await post(IDS.fxSum, ok({ memberId: `${hb}-after`, value: 1 }), PROXIED);
+    const hbAfterMs = Date.now() - t;
+    await until(async () => dbState('main')[1] > hs0[1], 5000);
+    const hs1 = dbState('main');
+    const fast = hbRes.filter((r) => r.result === 50001 && r.ms < 2000).length;
+    const cut = hbRes.filter((r) => r.result === 50001 && r.ms >= 6500).length;
+    const hbOk = hbRes.filter((r) => r.result === 0).length;
+    const [{ n: hbRows }] = await q('SELECT COUNT(member_id) n FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id LIKE ?', [IDS.fxSum, `${hb}-%`]);
+    // 하트비트·재조회가 같은 풀을 쓰므로 바로 실패하는 수는 몇 개 더 많을 수 있다
+    check(`X22 메인 DB 무응답에 ${burstN}건 동시: 대기열 초과 ~50건 즉시 50001, DB에 보낸 호출은 7초에 50001·unreachable 1줄, 나머지는 재개 뒤 반영, 새 제출 즉시 성공·recovered 1줄`,
+        fast >= 50 && fast <= 53 && cut >= 1 && fast + cut + hbOk === burstN && Number(hbRows) === hbOk + 1 && hbAfter.result === 0 && hbAfterMs < 1000
+        && hungWarn >= 6500 && hs1[0] - hs0[0] === 1 && hs1[1] - hs0[1] === 1,
+        `(즉시 ${fast}, 7초 ${cut}, 반영 ${hbOk}/${hbRows}행, 경고 ${hungWarn}ms, 재개 뒤 ${hbAfter.result} ${hbAfterMs}ms, 상태 로그 +${hs1[0] - hs0[0]}/+${hs1[1] - hs0[1]}, 기타 ${hbRes.filter((r) => r.result !== 0 && r.result !== 50001).map((r) => r.result)})`);
 
     // 제출 처리 중(SP가 락 대기 중) API 프로세스 강제 종료. 커밋 여부와 무관하게 같은 requestId 재시도로 정확히 한 번 반영되고, Redis도 맞춰진다
     const km = `${tag}-kill`;

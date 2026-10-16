@@ -12,14 +12,16 @@ import { verifySchema } from './migration.js';
  * 지워야 migrate가 아직 일하는 인스턴스를 놓치지 않고, 풀은 마지막에 닫아야 정지 중인 작업이 실패하지 않는다.
  * @param name 로그용 프로세스 이름
  * @param processType 하트비트 프로세스 유형 (codes.ProcessType)
+ * @param queryTimeoutMs 메인 풀 callSp 호출 제한 시간(ms, 0: 없음). API만 넘긴다
  * @returns 커넥션 풀과 종료 훅 등록 함수. 등록 함수는 같은 종료 절차를 직접 부르는 함수를 돌려준다(listen 실패 등 기동 후반 실패용)
  * @author trisakion
  * @modified 2026-10-01 trisakion 하트비트 기록 후 migrate 락 안에서 스키마 확인, 실패 시 하트비트 삭제
  * @modified 2026-10-06 trisakion 종료 훅 등록 시 종료 함수 반환
  * @modified 2026-10-07 trisakion 종료 절차를 한 번만 실행하고, 처리 중단이 실패해도 하트비트·풀·로거 정리는 진행
+ * @modified 2026-10-16 trisakion 호출 제한 시간 인자 추가
  */
-export async function bootstrap(name: string, processType: number): Promise<{ pool: Pool; onShutdown: (beforeClose: () => Promise<void>) => (reason: string) => Promise<void> }> {
-    const pool = createPool('APP');
+export async function bootstrap(name: string, processType: number, queryTimeoutMs = 0): Promise<{ pool: Pool; onShutdown: (beforeClose: () => Promise<void>) => (reason: string) => Promise<void> }> {
+    const pool = createPool('APP', 'MAIN', queryTimeoutMs);
     let stopHeartbeat: (() => Promise<void>) | undefined;
     try {
         stopHeartbeat = await startHeartbeat(pool, processType);
