@@ -41,7 +41,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 쓰는 주체 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- |
-| `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 일 파티션 DROP | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
+| `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 일 파티션 DROP. 월 테이블로 옮겨 `LOG_ARCHIVE_MONTHS` 후 지우는 방식은 5단계 구현 예정 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
 | `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db), [11.4](01_DESIGN.md#114-운영-테이블) |
 | `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
 
