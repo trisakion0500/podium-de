@@ -180,7 +180,7 @@ podiumDE/
 │   │   ├── refresh.ts   # 메모리 목록 주기 재조회(키·랭킹 정의 공용)
 │   │   ├── errors.ts    # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
 │   │   ├── codes.ts     # 상태·구분값 코드와 결과 코드(SpResult·ApiResult)
-│   │   ├── db.ts        # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001은 BusinessException), GET_LOCK 헬퍼
+│   │   ├── db.ts        # mysql2 풀(세션 time_zone '+00:00' 고정), SP 호출(50001·연결 실패는 BusinessException, 연결 상태 로그), GET_LOCK 헬퍼
 │   │   ├── logger.ts    # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
 │   │   └── config.ts    # 환경변수 로딩
 │   ├── api/             # API 도메인
