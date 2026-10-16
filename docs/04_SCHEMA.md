@@ -45,7 +45,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 | `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db), [11.4](01_DESIGN.md#114-운영-테이블) |
 | `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
 
-**메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`). 시즌마다 생기며 `history_retention`이 지나면 삭제한다 ([8.3](01_DESIGN.md#83-보관-방식)). 정리가 멈추면 알린다 ([11.4](01_DESIGN.md#114-운영-테이블)).
+**메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`). 시즌마다 생기며 `history_retention`이 지나면 경고하고, 삭제는 운영자가 한다 ([8.3](01_DESIGN.md#83-보관-방식), [11.4](01_DESIGN.md#114-운영-테이블)).
 
 **코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/core/codes.ts`에 있다 (D-46).
 
@@ -270,7 +270,7 @@ flowchart LR
         HALL[ranking_season_top]
     end
 
-    subgraph BACKUP[백업 테이블 — history_retention 후 삭제]
+    subgraph BACKUP[백업 테이블 — history_retention 후 경고, 운영자 삭제]
         EB[ranking_entry_r_s]
         KB[ranking_submit_key_r_s]
     end
@@ -306,7 +306,7 @@ flowchart LR
 | ③ | 마감과 정산 | `ranking_entry` 파티션을 `ranking_entry_settling`으로 꺼내(EXCHANGE) `final_rank` 가순위를 매기고 같은 파티션으로 되돌린다(EXCHANGE). 행 복사 없음. Redis 시즌 키 삭제 |
 | ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트로 보류, 상위 N → `ranking_season_top` |
 | ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED. 남은 대상이 0이면 워커 전달 잡이 SETTLED로 넘긴다 (D-70). 결과는 `ranking_entry`, Top N은 `ranking_season_top`에서 조회한다 |
-| ⑥ | SETTLED 이후 | `ranking_submit_key`(자기 시즌 SETTLED), `ranking_entry`(자기·다음 시즌 SETTLED, 마지막 시즌은 자기 시즌) 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 삭제 |
+| ⑥ | SETTLED 이후 | `ranking_submit_key`(자기 시즌 SETTLED), `ranking_entry`(자기·다음 시즌 SETTLED, 마지막 시즌은 자기 시즌) 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 경고(삭제는 운영자) |
 
 - Redis는 `ranking_entry`의 투영이다. 언제든 MySQL로 재구축할 수 있으므로 흐름의 끝점이 아니다 (1.5, 6.3).
 - 로그 DB는 서비스 경로가 아니라서 시즌과 무관하게 날짜로 정리하며, 데이터가 찬 일 파티션을 DROP한다 (4.5).
