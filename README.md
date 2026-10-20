@@ -195,7 +195,9 @@ podiumDE/
 │       ├── delivery.ts  # 보상 전달 잡(SETTLED 전이, ack 정체·적체 경고)
 │       ├── settle.ts    # 정산 잡(시작 조건, 가순위, 시즌 키 삭제, REVIEW 전이, 확정·DELIVERING 전이)
 │       ├── scheduler.ts # 시즌 스케줄러(시즌 경계 계산, 선행 생성, 상태 전이)
-│       └── logcleanup.ts # 로그 정리 잡(로그 DB 일 파티션 생성·삭제, p_max 경고)과 정체 감시
+│       ├── archive.ts   # 시즌 백업 분리 잡(SETTLED 파티션 → 백업 테이블, 오래된 백업 경고)
+│       ├── logcleanup.ts # 로그 정리 잡(로그 DB 일 파티션 생성, 월 테이블 이동·삭제, p_max 경고)
+│       └── stall.ts     # 정리 잡 정체 감시(백업 분리, 로그 정리)
 ├── database/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)
@@ -365,7 +367,7 @@ migrate가 하트비트로 거부되면
   - ✅ 마이그레이션 러너(버전·반복 마이그레이션, 체크섬, 기동 시 스키마 확인), 하트비트, 중단 패치(`npm run upgrade`)
   - ✅ 테이블 DDL — 메인 DB 13개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리)
   - ✅ 파티션·정산 관리 SP (`SP_PARTITION_*`, `SP_SETTLING_EXCHANGE`, 로그 DB 일 파티션)
-  - ✅ 로그 정리 잡 — 로그 DB 일 파티션을 오늘 + 7일까지 미리 만들고 보관 기간이 지난 파티션 삭제, 1시간 주기, `p_max` 행 경고, 정체 감시(3시간)
+  - ✅ 로그 정리 잡 — 로그 DB 일 파티션을 오늘 + 7일까지 미리 만들고 보관 기간이 지난 파티션 정리(5단계부터 월 테이블로 이동), 1시간 주기, `p_max` 행 경고, 정체 감시(3시간)
   - ✅ 스코어 적재 SP `SP_SUBMIT_SCORE` (BEST/SUM, 멱등 키, 하드 검증)
 - ✅ 2단계: API 인증, 제출 API, Redis 반영, 순위 조회 → 부하 테스트
   - ✅ API 키 테이블·SP, 발급·폐기 CLI(`npm run credential`)
@@ -382,9 +384,9 @@ migrate가 하트비트로 거부되면
   - ✅ 정산 가순위 — 시작 조건(7.1), 작업 테이블 꺼내기·청크 가순위·되돌리기, Redis 시즌 키 삭제, REVIEW 전이 (D-65, D-66)
   - ✅ 확정(FINALIZING) — 검수 종료·보류 확인, 제재 제외, 순위 재부여와 보상 판정(청크), 구간 스냅샷, 시즌 Top N, DELIVERING 전이, PERCENT "앞 사람 비율" 판정·RANK 우선·보상 공백 경고 (D-68, D-69)
   - ✅ 보상 전달·결과 조회 — 결과·내 결과·시즌 Top N API, 보상 목록(커서)·ack(멱등)·대기 시즌 API, SETTLED 전이, ack 정체·적체 경고 (D-70)
-- ⬜ 5단계: 아카이브 로테이션
-  - ⬜ 시즌 백업 테이블 로테이션
-  - ⬜ 로그 DB 월 테이블 아카이브 (일 파티션 EXCHANGE, 복사 없음)
+- ✅ 5단계: 아카이브 로테이션
+  - ✅ 시즌 백업 테이블 로테이션 — SETTLED 시즌 파티션 분리(1시간 주기), 백업 COMMENT(코드·기간), `history_retention` 지난 백업 경고, 정체 감시 (D-73)
+  - ✅ 로그 DB 월 테이블 아카이브 — 일 파티션 EXCHANGE 두 번(복사 없음, 중단 후 이어서), `LOG_ARCHIVE_MONTHS` 후 월 테이블 삭제 (D-72)
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
 
 ---

@@ -518,19 +518,23 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 - 정상 종료 시 진행 중인 적재가 끝나기를 기다린 뒤 로그 DB 풀을 닫는다. 응답은 나갔지만 아직 커넥션을 받지 못한 적재가 풀 종료로 유실되지 않게 한다.
 - 인증 실패와 형식 오류는 남기지 않는다. 형식 오류는 NOT NULL 컬럼(`member_id`, `request_id` 등)을 채울 수 없는 경우가 있고, 인증 실패는 아직 제출로 볼 수 없다. 둘 다 앱 로그의 요청·응답 줄에 남는다.
 - 제출 바디는 16KB로 제한한다. `meta`가 해석 없이 그대로 쌓이므로 기본값(1MiB)보다 작게 둔다.
-- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 앞으로 며칠의 일 파티션을 `p_max`에서 떼어 미리 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 DROP한다(`SP_LOG_PARTITION_DROP`). 로그 DB는 서비스 경로가 아니므로 데이터가 찬 파티션을 DROP해도 된다. 날짜는 SP가 DB 시각으로 계산한다(`created_at`과 같은 기준). `LOG_RETENTION_DAYS`는 1 이상이어야 한다. 0을 "무제한"으로 넣으면 오늘을 뺀 로그가 모두 지워지므로 설정과 SP 양쪽에서 거부한다.
-  - 잡은 1시간마다 `GET_LOCK('podium:log-cleanup')`으로 한 워커에서만 돈다. 하루 한 번이면 되지만, 실패나 워커 정지 뒤에 하루를 기다리지 않고 따라잡기 위해서다. 할 일이 없으면 SP 두 번뿐이다.
+- 보관은 시즌과 무관하게 날짜 기준이다(`LOG_RETENTION_DAYS`). 워커의 로그 정리 잡이 앞으로 며칠의 일 파티션을 `p_max`에서 떼어 미리 만들고(`SP_LOG_PARTITION_ADD`), 보관 기간이 지난 일 파티션을 월 테이블로 옮긴다(`SP_LOG_PARTITION_ARCHIVE`). 날짜는 SP가 DB 시각으로 계산한다(`created_at`과 같은 기준). `LOG_RETENTION_DAYS`는 1 이상이어야 한다. 0을 "무제한"으로 넣으면 오늘을 뺀 로그가 모두 지워지므로 설정과 SP 양쪽에서 거부한다.
+  - 잡은 1시간마다 `GET_LOCK('podium:log-cleanup')`으로 한 워커에서만 돈다. 하루 한 번이면 되지만, 실패나 워커 정지 뒤에 하루를 기다리지 않고 따라잡기 위해서다. 할 일이 없으면 SP 세 번뿐이다.
   - 일 파티션은 오늘 + 7일까지 미리 만든다. 성공하면 `job_state`(`job_name = 'log_cleanup'`)의 `last_run_at`을 남긴다.
-  - 정체 감시는 별도 잡이 10분마다 `GET_LOCK('podium:log-cleanup-watch')`으로 돈다. 마지막 성공이 3시간(정리 주기의 3배)을 넘으면 한 번 경고하고, 풀리면 한 번 알린다. 성공 기록이 없으면 프로세스 가동 3시간 뒤부터 정체로 본다. 정리 잡 자신은 멈추면 경고를 남길 수 없기 때문이다.
+  - 첫 실행(일 파티션 없음)은 `p_max`의 가장 오래된 행 날짜부터 만든다. 맨 앞 파티션은 하한이 없어, 오늘부터 만들면 그 이전 행이 섞여 월 테이블에서 다른 날 파티션에 놓인다.
+  - 정체 감시는 별도 잡이 10분마다 `GET_LOCK('podium:stall-watch')`으로 돈다(백업 분리 잡과 함께 본다, 11.4). 마지막 성공이 3시간(정리 주기의 3배)을 넘으면 한 번 경고하고, 풀리면 한 번 알린다. 성공 기록이 없으면 프로세스 가동 3시간 뒤부터 정체로 본다. 정리 잡 자신은 멈추면 경고를 남길 수 없기 때문이다.
 - `p_max`는 안전망이다. 정리 잡이 멈춰도 INSERT가 실패하지 않는다. `p_max`에 행이 쌓이면 정리 잡 이상으로 보고 알린다 (11.4).
-- 장기 보관(월 테이블 아카이브)은 5단계 구현 예정이다. 보관 기간이 지난 일 파티션을 DROP하지 않고 월 테이블로 옮긴다.
+- 장기 보관: 보관 기간이 지난 일 파티션은 DROP하지 않고 월 테이블로 옮긴다.
   - 월 테이블 `log_ranking_submit_YYYYMM`은 운영 테이블과 구조와 일 경계가 같다. 그 달의 일 파티션을 처음 옮길 때 만든다.
-  - 옮기기는 EXCHANGE 두 번이다: 운영 일 파티션 → 빈 임시 테이블 → 월 테이블의 같은 날 파티션. 경계가 같으므로 `WITHOUT VALIDATION`을 쓴다. 행을 복사하지 않아 크기와 무관하게 바로 끝난다.
+  - 옮기기는 EXCHANGE 두 번이다: 운영 일 파티션 → 빈 교환 테이블(`log_ranking_submit_xchg`) → 월 테이블의 같은 날 파티션 → 빈 운영 파티션 DROP. 두 번째는 경계가 같으므로 `WITHOUT VALIDATION`을 쓴다. 행을 복사하지 않아 크기와 무관하게 바로 끝난다.
+  - 호출당 하루를 옮긴다. 교환 테이블은 쓸 때마다 운영 테이블에서 만들고 다 쓰면 지운다(남겨 두면 스키마 변경 뒤 첫 교환이 실패한다).
+  - 교환은 맞바꾸기라 다시 하면 되돌아간다. 상태를 보고 이어서 한다: 교환 테이블에 행이 있으면 월 테이블 교환부터, 비어 있으면 지우고 처음부터, 운영 파티션이 비었으면 DROP만.
+  - 월 테이블의 그날 파티션이 비어 있지 않았으면(사람이 건드림) 교환 테이블을 지우지 않고 오류로 멈춘다. 데이터는 남는다.
   - 일 파티션을 월 파티션 하나로 합치지 않는다. 합치려면 한 달 치를 복사해야 한다. 물리적으로는 하루 단위로 두고, 백업·삭제는 월 테이블 단위로 한다.
   - 이득: 백업(덤프, `.ibd` 복사)과 큰 파일 삭제가 월 테이블에만 락을 건다. 운영 테이블의 INSERT는 막히지 않는다.
-  - 월 테이블은 그 달이 `LOG_ARCHIVE_MONTHS`(기본 12개월)보다 오래되면 로그 정리 잡이 DROP한다. 기준은 데이터 날짜다(N=12, 오늘이 2026-10-16이면 `202509` 이전을 지운다). 월 단위라 데이터는 최대 한 달 더 남는다. 장기 보관이 필요하면 설치 환경의 백업 절차가 그 전에 덤프한다.
+  - 월 테이블은 그 달이 `LOG_ARCHIVE_MONTHS`(기본 12개월)보다 오래되면 로그 정리 잡이 DROP한다(`SP_LOG_ARCHIVE_DROP`, 호출당 하나). 기준은 데이터 날짜다(N=12, 오늘이 2026-10-16이면 `202509` 이전을 지운다). 이름이 `log_ranking_submit_` + `YYYYMM`(01~12월)인 테이블만 대상이다. 월 단위라 데이터는 최대 한 달 더 남는다. 장기 보관이 필요하면 설치 환경의 백업 절차가 그 전에 덤프한다.
   - `LOG_ARCHIVE_MONTHS`는 1 이상이어야 하고, 운영 보관 기간보다 짧으면(`× 28일 < LOG_RETENTION_DAYS`) 기동을 거부한다. 옮기자마자 지울 대상이 되는 설정 실수다.
-  - 운영 테이블 스키마를 바꾸면 구조가 달라져 EXCHANGE가 실패한다. 이후 달부터 새 구조로 월 테이블을 만든다.
+  - 운영 테이블 스키마를 바꾸면 그 달 월 테이블과 구조가 달라 두 번째 EXCHANGE가 실패하고(데이터는 교환 테이블에 남음) 잡이 멈춘다. 운영자가 그 월 테이블의 이름을 바꾸거나 구조를 맞추면 다음 실행이 이어서 하고, 새 월 테이블은 새 구조로 만들어진다 (05_TROUBLESHOOTING).
 - 조사 목적의 임의 조회는 이 테이블에서 한다. 메인 DB 운영 테이블에는 하지 않는다.
 - 로그 DB에는 자기 `SP_EXEC_DDL`의 감사 로그용으로 `log_ddl_audit`를 하나 더 둔다. 구조는 메인과 같다 (11.4). 감사 로그는 DDL을 실행한 DB에 기록해야 하고, 로그 DB는 별도 인스턴스일 수 있기 때문이다.
 
@@ -927,15 +931,20 @@ CREATE TABLE `ranking_exclusion` (
 - 마지막 시즌은 다음 시즌 행이 없고, 랭킹이 반복 없음(NONE)이거나 종료(ENDED)되었거나 랭킹 `end_at`이 그 시즌 `end_at` 이하인 시즌이다. 다음 시즌이 생기지 않으므로 기다리지 않고 분리한다. 다음 시즌 행이 아직 생성되지 않았을 뿐인 반복 랭킹은 기다린다 (D-52).
 - SETTLING에서 작업 테이블로 꺼냈다가 되돌리는 것(7.3)은 분리가 아니다. 파티션은 운영 테이블에 남는다.
 - 파티션이 없는 시즌(이미 끝난 채 생성된 빈 시즌, 3.3)은 분리할 것이 없다. `SP_PARTITION_EXCHANGE`는 교환하지 않고 성공을 돌려준다.
+- 분리는 워커의 백업 분리 잡이 1시간마다 `GET_LOCK('podium:archive')`으로 한다. SETTLED 시즌 중 파티션이 남은 시즌(`SP_LIST_ARCHIVE_TARGET`)마다 submit_key → entry 순으로 `SP_PARTITION_EXCHANGE`, `SP_PARTITION_DROP`을 부른다. entry가 1004(다음 시즌 미SETTLED)이면 다음 주기를 기다린다. 성공하면 `job_state`(`job_name = 'archive'`)의 `last_run_at`을 남긴다.
 
 백업 테이블 이름: `{원본}_r{rankingId}_s{seasonNo}`
+
+- 이름에 `ranking_code`를 넣지 않는다. 코드는 대소문자를 구분하는데 테이블 이름은 설치 환경(Windows 기본값 등)에 따라 대소문자를 구분하지 않아 겹칠 수 있고, 운영자 입력 문자열이 DDL 이름에 들어가게 된다 (D-73).
+- 대신 백업 테이블 COMMENT에 랭킹 코드와 시즌 기간(UTC)을 남긴다(`season backup: ranking 941 (DAILY) season 3, 2026-07-01 00:00 ~ 2026-07-02 00:00 UTC`). 오래된 백업 경고에도 코드와 종료일을 함께 찍는다.
 
 ```text
 EXCHANGE 절차 (entry, submit_key)
 1. CREATE TABLE {원본}_r{id}_s{n} LIKE {원본}
 2. ALTER TABLE {원본}_r{id}_s{n} REMOVE PARTITIONING   (빈 테이블, 즉시)
-3. ALTER TABLE {원본} EXCHANGE PARTITION p_r{id}_s{n} WITH TABLE {원본}_r{id}_s{n}
-4. ALTER TABLE {원본} DROP PARTITION p_r{id}_s{n}       (빈 파티션, 즉시)
+3. ALTER TABLE {원본}_r{id}_s{n} COMMENT = '...'        (랭킹 코드·시즌 기간, 메타데이터만)
+4. ALTER TABLE {원본} EXCHANGE PARTITION p_r{id}_s{n} WITH TABLE {원본}_r{id}_s{n}
+5. ALTER TABLE {원본} DROP PARTITION p_r{id}_s{n}       (빈 파티션, 즉시)
 ```
 
 ### 8.3 보관 방식
@@ -947,6 +956,7 @@ EXCHANGE 절차 (entry, submit_key)
 - 운영 테이블과의 스키마 동기화 부담이 없다.
 - 백업 테이블은 자동으로 지우지 않는다. 시즌 길이와 보관 필요는 랭킹마다 다르므로, 시즌 `end_at` + `history_retention`일이 지나면 경고만 하고 덤프·삭제(`DROP TABLE`, 필요하면 별도 스키마로 `RENAME`)는 운영자가 한다.
   - 경고는 상태가 바뀔 때만 남긴다: 기간이 지난 테이블이 생기면 한 번(수와 이름 일부), 모두 정리되면 한 번. `history_retention = 0`은 경고하지 않는다(무기한 보관).
+  - 백업 분리 잡이 주기마다 확인한다(`SP_LIST_BACKUP_EXPIRED`). 시즌 행으로 이름을 만들어 맞추므로, 운영자가 이름을 바꿔 둔 테이블은 대상에서 빠진다.
   - 테이블 수는 이 경고로 관리한다. 설치 시 `table_open_cache`, `table_definition_cache`, `open_files_limit`를 예상 보관 수에 맞춰 설정한다.
 
 ### 8.4 ranking_season_top
@@ -1137,7 +1147,8 @@ CREATE TABLE `api_credential` (
 | `SP_PARTITION_EXCHANGE(code, rid, sno)` | 분리 조건(8.2)을 다시 확인한 뒤 백업 테이블 생성 후 교환. 파티션이 비어 있으면 교환하지 않음 (재실행 시 되돌아감 방지) | 앱 |
 | `SP_PARTITION_DROP(code, rid, sno)` | 파티션이 비어 있고 시즌이 SETTLED(또는 시즌 행 없음)일 때만 삭제 | 앱 |
 | `SP_LOG_PARTITION_ADD(ahead_days)` | 로그 DB. `log_ranking_submit` 일 파티션을 DB 기준 오늘 + `ahead_days`(0~31)까지 생성 (호출당 최대 64일). 재구성 전 `p_max` 행 여부 반환 | 앱 |
-| `SP_LOG_PARTITION_DROP(retention_days)` | 로그 DB. DB 기준 오늘 - `retention_days`(1 이상)보다 앞선 일 파티션 삭제 (호출당 최대 31개) | 앱 |
+| `SP_LOG_PARTITION_ARCHIVE(retention_days)` | 로그 DB. DB 기준 오늘 - `retention_days`(1 이상)보다 앞선 가장 오래된 일 파티션을 월 테이블로 이동 (호출당 하루, 중단 지점부터 이어서) | 앱 |
+| `SP_LOG_ARCHIVE_DROP(archive_months)` | 로그 DB. 끝난 지 `archive_months`(1 이상)개월이 지난 가장 오래된 월 테이블 삭제 (호출당 하나) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
 - SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1016, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
@@ -1196,7 +1207,7 @@ CREATE TABLE `api_credential` (
 | `p_max`에 행이 있음 | 로그 DB 일 파티션 생성 실패 |
 
 - 디스크 사용률 알림은 설치 환경(인프라 모니터링)에 둔다.
-- `p_max` 감시는 로그 정리 잡이 재구성 전에 확인해 경고 로그로 남긴다. 잡 정체는 별도 감시 잡이 확인한다 (4.5). 오래된 백업 테이블과 백업 분리 잡(1시간 주기) 정체는 아카이브와 함께 5단계 구현 예정이다.
+- `p_max` 감시는 로그 정리 잡이 재구성 전에 확인해 경고 로그로 남긴다. 오래된 백업 테이블은 백업 분리 잡이 확인한다(8.3). 두 잡의 정체는 감시 잡 하나가 함께 확인한다 (4.5).
 - 로그 DB 기록 실패는 비율로 재지 않는다. 연결 장애는 `log db unreachable`/`recovered` 한 쌍으로, 개별 실패는 `submit log write failed` 한 줄씩으로 남는다 (05_TROUBLESHOOTING 1.4).
 - 감시는 경고 로그까지 남긴다. 메신저 등으로 전달하는 것과 워커 프로세스 자체의 정지 감지는 설치 환경(로그 수집·인프라 모니터링)의 몫이다.
 

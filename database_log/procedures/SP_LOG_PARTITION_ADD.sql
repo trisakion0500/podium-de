@@ -9,11 +9,15 @@ BEGIN
     -- 작성 : 2026.10.04 trisakion
     -- 수정 : 2026.10.14 trisakion 재구성 전 p_max 행 여부(pmax_had_rows) 반환
     -- 수정 : 2026.10.14 trisakion 날짜 대신 일수를 받아 DB 시각(UTC_DATE)으로 계산
+    -- 수정 : 2026.10.20 trisakion 첫 실행은 가장 오래된 행의 날짜부터 생성 (월 테이블 아카이브의 일 경계 보장)
     -- 내용 : 로그 정리 잡이 앞으로 며칠 치 일 파티션을 미리 만든다 (01_DESIGN 4.5).
     --        파티션 p_YYYYMMDD는 [그날 00:00, 다음날 00:00) UTC 범위다.
     --        - 파티션 이름과 경계는 DATE 값으로만 조립한다 (D-48). DATE_FORMAT 결과는 숫자와 '-'뿐이다.
     --        - 시작일은 마지막 일 파티션의 상한(= 다음 날)이다. 잡이 며칠 멈췄어도 빈 날짜 없이 이어서 만든다.
-    --          일 파티션이 하나도 없으면(첫 실행) UTC 오늘부터 만든다. 이때 첫 파티션에는 그 이전 행도 함께 들어간다.
+    --          일 파티션이 하나도 없으면(첫 실행) p_max에 있는 가장 오래된 행의 날짜부터 만든다(없으면 UTC 오늘).
+    --          맨 앞 파티션은 하한이 없어 오늘부터 만들면 그 이전 행이 오늘 파티션에 섞이고, 월 테이블로 옮길 때
+    --          (WITHOUT VALIDATION) 날짜와 다른 파티션에 놓인다. 첫 실행의 MIN은 p_max 전체를 읽지만 이어지는 재구성이
+    --          어차피 모든 행을 복사한다.
     --        - 여러 날을 REORGANIZE 한 번으로 만든다. p_max에 행이 있으면 재구성이 그 행을 복사하므로,
     --          날마다 따로 실행하면 같은 행을 여러 번 복사한다. p_max에 행이 있다는 것 자체가 잡 이상 신호다 (11.4 알림).
     --        - 끝 날짜는 DB 시각으로 계산한다. created_at이 로그 DB 시각이므로 호스트 시계가 어긋나도 같은 기준이다.
@@ -52,7 +56,7 @@ BEGIN
                       ORDER BY PARTITION_ORDINAL_POSITION DESC
                       LIMIT 1);
         IF v_day IS NULL THEN
-            SET v_day = UTC_DATE();
+            SET v_day = LEAST(COALESCE((SELECT DATE(MIN(created_at)) FROM `log_ranking_submit`), UTC_DATE()), UTC_DATE());
         ELSE
             SET v_pmax = EXISTS(SELECT 1 FROM `log_ranking_submit` PARTITION (`p_max`));
         END IF;

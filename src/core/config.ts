@@ -81,6 +81,7 @@ const mainDb = {
  * @modified 2026-10-14 trisakion LOG_RETENTION_DAYS 1 미만 거부
  * @modified 2026-10-14 trisakion 보상 전달 경고 기준 추가
  * @modified 2026-10-16 trisakion 처리 제한 기본 5초, API DB 호출 제한 시간 추가
+ * @modified 2026-10-20 trisakion 로그 월 테이블 보관 개월 수 추가
  */
 export const config = {
     db: mainDb,
@@ -96,6 +97,8 @@ export const config = {
     },
     /** 로그 DB 제출 이력 보관 일수 (01_DESIGN 4.5). 0을 "무제한"으로 넣으면 오늘을 뺀 로그가 모두 지워지므로 1 미만은 기동을 막는다 */
     logRetentionDays: int('LOG_RETENTION_DAYS', 90, 1),
+    /** 보관 기간이 지난 제출 이력을 옮긴 월 테이블의 보관 개월 수 (01_DESIGN 4.5). 지나면 월 테이블을 DROP한다 */
+    logArchiveMonths: int('LOG_ARCHIVE_MONTHS', 12, 1),
     apiPort: int('API_PORT', 3000),
     /**
      * 수신 주소. Fastify 기본값(localhost)은 로드밸런서에서 닿지 않아 '::'(IPv6+IPv4 겸용)을 쓴다.
@@ -158,3 +161,7 @@ export const config = {
     /** 패키지 버전 (package.json version). 마이그레이션 기록과 하트비트에 남긴다 */
     appVersion: JSON.parse(readFileSync(join(import.meta.dirname, '..', '..', 'package.json'), 'utf8')).version as string,
 } as const;
+
+// 월 테이블 보관이 운영 보관보다 짧으면 옮기자마자 지울 대상이 된다. 한 달을 가장 짧은 28일로 본다 (01_DESIGN 4.5).
+if (config.logArchiveMonths * 28 < config.logRetentionDays)
+    throw new Error(`환경 변수 LOG_ARCHIVE_MONTHS(${config.logArchiveMonths}) × 28일이 LOG_RETENTION_DAYS(${config.logRetentionDays})보다 짧습니다.`);

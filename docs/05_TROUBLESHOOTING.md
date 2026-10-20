@@ -21,6 +21,7 @@
 | `SP_xxx이(가) DB에 없습니다. npm run migrate가 필요합니다` | 미적용 DB | `npm run migrate` |
 | `로그 DB(...) 접속 설정이 잘못되었습니다` | `DB_LOG_*` 계정·DB 이름 오류(1044/1045/1049) | 환경 변수 확인. 네트워크 수준 실패면 경고만 남기고 기동한다 |
 | `환경 변수 LOG_RETENTION_DAYS은(는) 1 이상이어야 합니다` (기동 거부) | 보관 일수를 0 이하로 넣었다 | 1 이상으로 설정. 무제한 보관 설정은 없다 |
+| `환경 변수 LOG_ARCHIVE_MONTHS(N) × 28일이 LOG_RETENTION_DAYS(M)보다 짧습니다` (기동 거부) | 월 테이블 보관이 운영 보관보다 짧다 | `LOG_ARCHIVE_MONTHS`를 늘리거나 `LOG_RETENTION_DAYS`를 줄인다 |
 | `환경 변수 DELIVERY_INTERVAL_MS·DELIVERY_STALL_SEC·DELIVERY_BACKLOG_MAX은(는) 1 이상이어야 합니다` (기동 거부) | 보상 전달 잡 설정을 0 이하로 넣었다 | 1 이상으로 설정. 경고를 끄는 설정은 없다 |
 | `worker startup failed` | 워커가 기동 시 랭킹 정의를 읽지 못했다 | DB 연결과 `SP_LIST_RANKING_DEFINITION` 적용 여부 확인. 워커가 없으면 새 시즌 센티넬이 생기지 않아 조회가 계속 2007이다 |
 | `no active api credential — all requests will be rejected` | 활성 API 키가 없다 | `npm run credential -- create <이름> <권한>` |
@@ -85,8 +86,11 @@
 | `SP_PARTITION_DROP` 1006 | 비어 있지 않은 파티션 | 먼저 `SP_PARTITION_EXCHANGE`로 백업에 분리 |
 | `... refresh failed N times in a row` (error) | API 키·랭킹 정의 재조회 연속 실패 | 기존 목록으로 동작 중이다. 폐기한 키와 빈도 한도 변경이 반영되지 않으므로 DB 연결을 확인 |
 | `log_ranking_submit p_max had rows …` (warn) | 그날 일 파티션을 제때 만들지 못했다 (워커 정지, 로그 DB 장애) | 같은 주기에 파티션을 만들어 행을 옮겼으므로 조치는 필요 없다. 반복되면 워커와 로그 DB 연결을 확인 |
-| `log cleanup cycle failed` | 로그 DB 접속 실패, 파티션 DDL 실패 | 1시간 뒤 다시 시도한다. 반복되면 로그 DB 연결과 `log_ddl_audit`(로그 DB)을 확인 |
+| `log cleanup cycle failed` | 로그 DB 접속 실패, 파티션 DDL 실패. 메시지에 `different definitions`(1736)이 있으면 스키마 변경 뒤 그 달 월 테이블과 구조가 다르다. `month table partition was not empty`는 월 테이블을 사람이 건드린 것이다 | 1시간 뒤 다시 시도한다. 반복되면 로그 DB 연결과 `log_ddl_audit`(로그 DB)을 확인한다. 구조 불일치면 그 월 테이블 이름을 바꾸고(`RENAME TABLE log_ranking_submit_YYYYMM TO log_ranking_submit_YYYYMM_old`, 자동 삭제 대상에서 빠짐) 다음 실행을 기다린다. 데이터는 `log_ranking_submit_xchg`에 남아 있다 |
 | `log cleanup stalled: last success …` (warn) | 로그 정리 잡이 3시간 넘게 성공하지 못했다 (로그 DB 장애, 반복 실패, 정리 잡을 도는 워커 정지) | 앞의 `log cleanup cycle failed` 로그로 원인을 찾는다. 마지막 성공 후 7일 안에 풀리지 않으면 행이 `p_max`에 쌓인다. 풀리면 `log cleanup recovered`가 남는다 |
+| `archive cycle failed` | 백업 분리 DDL 실패(1205 MDL 대기 등), DB 오류 | 1시간 뒤 다시 시도한다. 관리 SP는 상태를 보고 이어서 하므로 조치가 필요 없다. 반복되면 `log_ddl_audit`와 긴 트랜잭션을 확인한다 |
+| `archive stalled: last success …` (warn) | 백업 분리 잡이 3시간 넘게 성공하지 못했다 | 앞의 `archive cycle failed`로 원인을 찾는다. SETTLED 시즌 파티션이 운영 테이블에 남아 상한(8192)에 다가간다. 풀리면 `archive recovered`가 남는다 |
+| `season backups past history_retention: N tables …` (warn) | 시즌 종료 후 `history_retention`일이 지난 백업 테이블이 있다 | 필요하면 덤프한 뒤 `DROP TABLE`(또는 별도 스키마로 `RENAME`). 모두 정리되면 `… none left`가 남는다. 무기한 보관이면 `history_retention = 0` |
 
 ---
 
@@ -188,3 +192,9 @@
 - **증상:** 무응답 동안 요청이 대기열에 계속 쌓이고, 2005 응답 뒤에도 지워지지 않았다. 회복 뒤에는 이미 포기한 요청부터 처리하느라 새 요청까지 2005를 받는다.
 - **원인:** 풀에 대기열 상한이 없었고(mysql2 기본 무제한), 쿼리 제한 시간도 없어 응답 없는 커넥션이 묶인 채 남았다.
 - **해결:** 대기열을 커넥션 수 × 20으로 제한하고, API의 DB 호출에 `DB_QUERY_TIMEOUT_MS`(20초)를 둬 넘으면 커넥션을 버린다. 처리 제한 기본값은 5초로 줄였다 (D-71, 장애 주입 X22).
+
+## 2.18 월 테이블 목록 조회가 1411로 실패함
+
+- **증상:** `SP_LOG_ARCHIVE_DROP`이 `Incorrect datetime value: '_audit01' for function str_to_date`(1411)로 실패했다(회귀 로그 정리 구간).
+- **원인:** `information_schema.TABLES`를 이름 REGEXP로 거르고 `STR_TO_DATE`로 날짜를 만들었는데, 옵티마이저가 변환식을 거르기보다 먼저 다른 테이블 이름(`log_ddl_audit`)에 적용했다. SP 안의 대입문이라 strict 모드에서 경고가 아니라 오류가 됐다.
+- **해결:** 목록 조회 안에서는 `YYYYMM` 문자열로 비교하고, 고른 값 하나만 따로 날짜로 바꾼다. 시즌 백업 쪽 SP는 이름을 읽지 않고 시즌 행에서 이름을 만들어 맞춘다.

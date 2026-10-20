@@ -1,17 +1,19 @@
 /**
  * 3단계 자가 복구 회귀 테스트 (01_DESIGN 6장, D-60). Redis를 강제로 MySQL과 어긋나게 만들고 복구되는지 본다.
  * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이와 정산(7.1~7.6), 결과 조회·보상 전달(7.7, 8.5),
- * 로그 DB 일 파티션 정리(4.5)와 장애 주입(요청 오류, 동시성, 의존 서비스 장애·무응답, 프로세스 강제 종료)도 함께 본다.
+ * 로그 DB 일 파티션 정리·월 테이블 이동(4.5), 시즌 백업 분리(8.2, 8.3)와 장애 주입(요청 오류, 동시성, 의존 서비스 장애·무응답, 프로세스 강제 종료)도 함께 본다.
  * 로컬 개발 DB·Redis 전용이다. 운영 DB에 실행하지 않는다.
  *
  * 순서 (프로젝트 루트에서):
  *   npm run build
  *   node tests/recovery.mjs [반복 수, 기본 3]
+ *   (KEEP_BACKUP_TABLES=1이면 테스트가 만든 시즌 백업 테이블을 남긴다. 확인한 뒤 지우고 다음 실행을 한다)
  *
  * - 워커와 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199)부터 6개. 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
- * - 테스트 랭킹 940~969를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
- * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 지운다.
+ * - 테스트 랭킹 940~971을 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션·시즌 백업 테이블, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
+ * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 월 테이블로 옮긴다.
+ *   테스트가 쓰는 달(100일 전 무렵, 12·13개월 전)의 월 테이블은 시작 전과 끝난 뒤에 지운다.
  * - API 키 원문은 메모리에만 두고 출력하지 않는다.
  * - 워커 로그는 logs/app.log.worker.t* 에 남는다. 로그 문구로 판정하는 항목이 있다.
  * - 진행 상황: 구간 시작·끝에 [경과 mm:ss], 30초마다 "... 진행 중: run N / 구간" 하트비트를 찍는다. 출력이 30초 넘게 멈추면
@@ -35,7 +37,9 @@ const { composite, startRankingRefresh } = await import(root + 'core/rankings.js
 const { startRecovery } = await import(root + 'worker/recovery.js');
 const { nextSeason } = await import(root + 'worker/scheduler.js');
 const { rewardGaps } = await import(root + 'worker/settle.js');
-const { checkLogCleanupStall, cleanupLogPartitions } = await import(root + 'worker/logcleanup.js');
+const { cleanupLogPartitions } = await import(root + 'worker/logcleanup.js');
+const { checkJobStall } = await import(root + 'worker/stall.js');
+const { expiredMessage, runArchive } = await import(root + 'worker/archive.js');
 const { createDeliveryWatch } = await import(root + 'worker/delivery.js');
 const { hashApiKey } = await import(root + 'api/auth.js');
 const { ApiScope } = await import(root + 'core/codes.js');
@@ -44,11 +48,13 @@ const { createClient } = await import('redis');
 /** 복구 시나리오(BEST·SUM), 락 대기, API 경유(BEST·SUM), 스케줄러(FIXED, 단일 시즌, 종료), 정산(DESC, ASC 이어받기, 빈 시즌), 보상 전달 */
 const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
     finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964,
-    fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969 };
+    fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969, arc: 970, arcLast: 971 };
 const ALL_IDS = Object.values(IDS);
 const N = 2500;
 const PORT = Number(process.env.TEST_PORT ?? 3199);
 const BASE = `http://localhost:${PORT}`;
+/** 1이면 테스트가 만든 시즌 백업 테이블을 지우지 않는다 (확인용, 1회 실행 전용 — 다음 실행 전에 지워야 B 구간이 맞는다) */
+const KEEP_BACKUP_TABLES = process.env.KEEP_BACKUP_TABLES === '1';
 
 const M = createPool('MIGRATE');
 const A = createPool('APP');
@@ -105,6 +111,9 @@ async function clean() {
         if ((await q("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ranking_entry_settling' AND COLUMN_NAME = 'settle_slot'")).length)
             await q('ALTER TABLE ranking_entry_settling DROP COLUMN settle_slot');
     }
+    for (const { n } of await q("SELECT TABLE_NAME n FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME REGEXP '^ranking_(entry|submit_key)_r[0-9]+_s[0-9]+$'"))
+        if (!KEEP_BACKUP_TABLES && ALL_IDS.includes(Number(/_r(\d+)_s/.exec(n)[1])))
+            await q(`DROP TABLE \`${n}\``);
     await q("DELETE FROM api_credential WHERE key_name LIKE 'rtest-%'");
     await LM.query('DELETE FROM log_ranking_submit WHERE ranking_id IN (?)', [ALL_IDS]);
     for (const id of ALL_IDS)
@@ -1377,46 +1386,114 @@ async function insertLogRow(requestId, day) {
 }
 
 /**
- * 로그 정리 잡: 오늘 + 7일까지 빈틈없이 생성, 보관 기간이 지난 파티션 삭제, p_max 행 감지, 워커가 job_state를 남김.
- * 개발 로그 DB의 실제 파티션에 하는 일이다 — 보관 90일이라 최근 파티션과 행은 건드리지 않는다.
+ * 로그 DB의 월 테이블 이름 목록 (log_ranking_submit_YYYYMM)
+ * @returns 테이블 이름 목록
+ */
+async function logMonthTables() {
+    return (await LM.query("SELECT TABLE_NAME n FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME REGEXP '^log_ranking_submit_[0-9]{6}$' ORDER BY n"))[0].map((x) => x.n);
+}
+
+/**
+ * 맨 앞 일 파티션에서 지난 날짜의 일 파티션들을 떼어 만든다 (오래된 것부터 차례로 생긴 상태)
+ * @param days 만들 날짜 'YYYY-MM-DD' 목록 (오름차순, 하루씩 이어짐)
+ * @returns 없음
+ */
+async function splitOldDays(days) {
+    const [first] = await logDayParts();
+    const [[{ d }]] = await LM.query("SELECT PARTITION_DESCRIPTION d FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_ranking_submit' AND PARTITION_NAME = ?", [first]);
+    const next = new Date(Date.parse(days.at(-1)) + 86_400_000).toISOString().slice(0, 10);
+    await LM.query(`ALTER TABLE log_ranking_submit REORGANIZE PARTITION \`${first}\` INTO (`
+        + days.map((day, i) => `PARTITION \`${dayPart(day)}\` VALUES LESS THAN ('${days[i + 1] ?? next} 00:00:00'), `).join('')
+        + `PARTITION \`${first}\` VALUES LESS THAN (${d}))`);
+}
+
+/**
+ * 월 테이블의 한 날짜 파티션에서 요청 ID로 행 수를 센다.
+ * @param day 날짜 'YYYY-MM-DD'
+ * @param requestId 요청 ID
+ * @returns 행 수
+ */
+async function monthRows(day, requestId) {
+    const [[{ n }]] = await LM.query(`SELECT COUNT(log_ranking_submit_id) n FROM \`log_ranking_submit_${day.slice(0, 7).replace('-', '')}\` PARTITION (\`${dayPart(day)}\`) WHERE request_id = ?`, [requestId]);
+    return Number(n);
+}
+
+/**
+ * 로그 정리 잡: 오늘 + 7일까지 빈틈없이 생성, 보관 기간이 지난 파티션을 월 테이블로 이동(중단 후 이어서 포함), 오래된 월 테이블 삭제,
+ * p_max 행 감지, 워커가 job_state를 남김.
+ * 개발 로그 DB의 실제 파티션에 하는 일이다 — 보관 90일이라 최근 파티션과 행은 건드리지 않는다. 테스트가 만든 월 테이블은 끝에 지운다.
  * @returns 없음
  */
 async function logCleanupScenarios() {
-    await cleanupLogPartitions(LA, 90);
+    const monthAgo = (n) => { const t = new Date(); t.setUTCDate(1); t.setUTCMonth(t.getUTCMonth() - n); return `log_ranking_submit_${t.toISOString().slice(0, 7).replace('-', '')}`; };
+    const [m13, m12] = [monthAgo(13), monthAgo(12)];
+    // 테스트가 쓰는 월 테이블(90일 넘은 날짜의 달, 12·13개월 전)과 교환 테이블. 중단된 이전 실행이 남긴 것도 지운다 — 개발 로그 DB 전용이다
+    const testTables = [...new Set([-100, -99, -98].map((d) => `log_ranking_submit_${utcDay(d).slice(0, 7).replace('-', '')}`)), m13, m12, 'log_ranking_submit_xchg'];
+    const dropTestTables = async () => { for (const t of testTables) await LM.query(`DROP TABLE IF EXISTS \`${t}\``); };
+    await dropTestTables();
+    await cleanupLogPartitions(LA, 90, 12);
     const parts = await logDayParts();
     const days = parts.map((n) => Date.UTC(+n.slice(2, 6), +n.slice(6, 8) - 1, +n.slice(8, 10)));
     check('L1 오늘 + 7일까지 일 파티션, 하루씩 빈틈없음', parts.includes(dayPart(utcDay(0))) && parts.at(-1) === dayPart(utcDay(7))
         && days.every((d, i) => i === 0 || d - days[i - 1] === 86_400_000), `(${parts[0]}..${parts.at(-1)}, ${parts.length}개)`);
-    const again = await cleanupLogPartitions(LA, 90);
-    check('L2 다시 돌면 할 일 없음', again.added === 0 && again.dropped === 0 && !again.pmaxHadRows, JSON.stringify(again));
+    const again = await cleanupLogPartitions(LA, 90, 12);
+    check('L2 다시 돌면 할 일 없음', again.added === 0 && again.archived === 0 && again.droppedMonths === 0 && !again.pmaxHadRows, JSON.stringify(again));
 
-    // 보관 기간이 지난 파티션 두 개를 맨 앞 파티션에서 떼어 만든다 (오래된 것부터 차례로 생긴 상태)
+    // 보관 기간이 지난 파티션 두 개(하나는 행 있음, 하나는 빈 날)를 월 테이블로 옮긴다
     const old = [utcDay(-100), utcDay(-99)];
-    const [[first]] = await LM.query("SELECT PARTITION_DESCRIPTION d FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_ranking_submit' AND PARTITION_NAME = ?", [parts[0]]);
-    await LM.query(`ALTER TABLE log_ranking_submit REORGANIZE PARTITION \`${parts[0]}\` INTO (`
-        + old.map((d, i) => `PARTITION \`${dayPart(d)}\` VALUES LESS THAN ('${old[i + 1] ?? utcDay(-98)} 00:00:00'), `).join('')
-        + `PARTITION \`${parts[0]}\` VALUES LESS THAN (${first.d}))`);
+    await splitOldDays(old);
     await insertLogRow('rt-log-old', old[0]);
     await insertLogRow('rt-log-today', utcDay(0));
-    const drop = await cleanupLogPartitions(LA, 90);
+    const moved = await cleanupLogPartitions(LA, 90, 12);
     const left = await logDayParts();
     const [[{ oldRows, todayRows }]] = await LM.query("SELECT SUM(request_id = 'rt-log-old') oldRows, SUM(request_id = 'rt-log-today') todayRows FROM log_ranking_submit WHERE ranking_id = ?", [IDS.broken]);
-    check('L3 보관 기간(90일)이 지난 파티션만 삭제, 오늘 행은 남음', drop.dropped === 2 && !left.some((n) => old.map(dayPart).includes(n)) && left.includes(dayPart(utcDay(0)))
-        && Number(oldRows) === 0 && Number(todayRows) === 1, `(dropped ${drop.dropped}, old ${oldRows}, today ${todayRows})`);
+    const archivedOld = await monthRows(old[0], 'rt-log-old');
+    const xchgLeft = (await LM.query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_ranking_submit_xchg'"))[0].length;
+    check('L3 보관 기간(90일)이 지난 파티션만 월 테이블의 같은 날 파티션으로 이동, 운영 테이블에서는 빠지고 오늘 행은 남음, 교환 테이블 없음',
+        moved.archived === 2 && !left.some((n) => old.map(dayPart).includes(n)) && left.includes(dayPart(utcDay(0)))
+        && Number(oldRows ?? 0) === 0 && Number(todayRows) === 1 && archivedOld === 1 && xchgLeft === 0,
+        `(archived ${moved.archived}, 운영 old ${oldRows}, 월 테이블 old ${archivedOld}, today ${todayRows}, xchg ${xchgLeft})`);
+
+    // 첫 교환(운영 → 교환 테이블) 직후 끊긴 상태를 만든다. 다음 실행이 월 테이블 교환부터 이어서 해야 한다
+    const cut = utcDay(-98);
+    await splitOldDays([cut]);
+    await insertLogRow('rt-log-cut', cut);
+    await LM.query('CREATE TABLE log_ranking_submit_xchg LIKE log_ranking_submit');
+    await LM.query('ALTER TABLE log_ranking_submit_xchg REMOVE PARTITIONING');
+    await LM.query(`ALTER TABLE log_ranking_submit EXCHANGE PARTITION \`${dayPart(cut)}\` WITH TABLE log_ranking_submit_xchg`);
+    const resumed = await cleanupLogPartitions(LA, 90, 12);
+    const cutLeft = (await logDayParts()).includes(dayPart(cut));
+    const cutXchg = (await LM.query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'log_ranking_submit_xchg'"))[0].length;
+    const cutArchived = await monthRows(cut, 'rt-log-cut');
+    check('L3b 첫 교환 뒤 끊긴 이동은 다음 실행이 이어서 끝냄 (월 테이블에 1행, 운영 파티션·교환 테이블 없음)',
+        resumed.archived === 1 && cutArchived === 1 && !cutLeft && cutXchg === 0, `(archived ${resumed.archived}, 월 테이블 ${cutArchived}, 운영 파티션 ${cutLeft}, xchg ${cutXchg})`);
+
+    // 월 테이블 보관 12개월: 끝난 지 12개월이 지난 달(13개월 전)은 지우고, 12개월 전 달은 남긴다
+    for (const t of [m13, m12])
+        await LM.query(`CREATE TABLE IF NOT EXISTS \`${t}\` LIKE log_ranking_submit`);
+    const expired = await cleanupLogPartitions(LA, 90, 12);
+    const monthsNow = await logMonthTables();
+    check('L3c 보관 12개월이 지난 월 테이블만 삭제 (13개월 전 삭제, 12개월 전 남음)',
+        expired.droppedMonths === 1 && !monthsNow.includes(m13) && monthsNow.includes(m12), `(dropped ${expired.droppedMonths}, ${monthsNow.join(', ')})`);
 
     // 파티션이 없는 날의 행은 p_max로 간다 — 그날 파티션을 제때 만들지 못한 상태
     await insertLogRow('rt-log-pmax', utcDay(30));
-    const warned = await cleanupLogPartitions(LA, 90);
+    const warned = await cleanupLogPartitions(LA, 90, 12);
     await LM.query("DELETE FROM log_ranking_submit WHERE request_id = 'rt-log-pmax'");
-    const clear = await cleanupLogPartitions(LA, 90);
+    const clear = await cleanupLogPartitions(LA, 90, 12);
     check('L4 p_max에 행이 있으면 알림 값, 없어지면 해제', warned.pmaxHadRows && !clear.pmaxHadRows);
 
-    // 보관 0일은 오늘을 뺀 전부를 지우므로 SP가 거부한다. 미리 만들기는 31일까지만
+    // 보관 0일·0개월은 옮기자마자(지우자마자) 되돌릴 수 없으므로 SP가 거부한다. 미리 만들기는 31일까지만
     const before = await logDayParts();
-    const zero = await callSp(LA, 'SP_LOG_PARTITION_DROP', [0]);
+    const zero = await callSp(LA, 'SP_LOG_PARTITION_ARCHIVE', [0]);
+    const zeroMonths = await callSp(LA, 'SP_LOG_ARCHIVE_DROP', [0]);
     const over = await callSp(LA, 'SP_LOG_PARTITION_ADD', [32]);
-    check('L4b 보관 0일·미리 만들기 32일은 1001, 파티션 그대로', zero.result === 1001 && over.result === 1001
-        && JSON.stringify(await logDayParts()) === JSON.stringify(before), `(${zero.result}, ${over.result})`);
+    check('L4b 보관 0일·월 보관 0개월·미리 만들기 32일은 1001, 파티션·월 테이블 그대로',
+        zero.result === 1001 && zeroMonths.result === 1001 && over.result === 1001
+        && JSON.stringify(await logDayParts()) === JSON.stringify(before) && (await logMonthTables()).includes(m12),
+        `(${zero.result}, ${zeroMonths.result}, ${over.result})`);
+
+    await dropTestTables();
 
     await q("DELETE FROM job_state WHERE job_name = 'log_cleanup'");
     startWorker('tL');
@@ -1424,15 +1501,107 @@ async function logCleanupScenarios() {
     check('L5 워커가 로그 정리 후 job_state(log_cleanup) 기록', recorded >= 0);
 
     // 정체 감시: 마지막 성공이 3시간 넘으면 정체, 기록이 없으면 프로세스 가동 3시간 뒤부터 정체
-    const fresh = await checkLogCleanupStall(A);
+    const fresh = await checkJobStall(A, 'log_cleanup');
     await q("UPDATE job_state SET last_run_at = UTC_TIMESTAMP(3) - INTERVAL 4 HOUR WHERE job_name = 'log_cleanup'");
-    const stale = await checkLogCleanupStall(A);
+    const stale = await checkJobStall(A, 'log_cleanup');
     await q("DELETE FROM job_state WHERE job_name = 'log_cleanup'");
-    const neverEarly = await checkLogCleanupStall(A, 60);
-    const neverLate = await checkLogCleanupStall(A, 4 * 3600);
+    const neverEarly = await checkJobStall(A, 'log_cleanup', 60);
+    const neverLate = await checkJobStall(A, 'log_cleanup', 4 * 3600);
     check('L6 정체 감시: 방금 성공은 정상, 4시간 전이면 정체, 기록 없음은 가동 3시간 뒤부터 정체',
         !fresh.stalled && stale.stalled && stale.ageSec >= 4 * 3600 && !neverEarly.stalled && neverLate.stalled && neverLate.ageSec === null,
         JSON.stringify({ fresh, stale, neverEarly, neverLate }));
+}
+
+// ------------------------------------------------------------------------------------------------ 7. 시즌 백업 분리 (01_DESIGN 8.2, 8.3)
+
+/**
+ * 운영 테이블의 시즌 파티션 존재 여부
+ * @param table 'ranking_entry' | 'ranking_submit_key'
+ * @param id 랭킹 ID
+ * @param no 시즌 번호
+ * @returns 있으면 true
+ */
+async function hasSeasonPart(table, id, no) {
+    return (await q('SELECT 1 FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND PARTITION_NAME = ?', [table, `p_r${id}_s${no}`])).length === 1;
+}
+
+/**
+ * 백업 테이블의 행 수 (없으면 -1)
+ * @param table 백업 테이블 이름
+ * @returns 행 수
+ */
+async function backupRows(table) {
+    if (!(await q('SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [table])).length)
+        return -1;
+    return Number((await q(`SELECT COUNT(member_id) n FROM \`${table}\``))[0].n);
+}
+
+/**
+ * 백업 분리 잡: SETTLED 시즌 파티션을 백업 테이블로 옮기고 빈 파티션을 지움, entry는 다음 시즌 SETTLED까지 기다림(D-52),
+ * 재실행 무변화(되돌아가지 않음), 백업 COMMENT, 보관 기간이 지난 백업 경고 대상(0일은 제외), 워커가 job_state를 남김.
+ * @returns 없음
+ */
+async function archiveScenarios() {
+    const { arc: id, arcLast: last } = IDS;
+    const day = 86_400;
+    // 반복 랭킹(FIXED): 시즌 1·2 SETTLED, 3 DELIVERING. 시즌 1은 45일 전에 끝나 보관 30일이 지났다
+    await createDefinition(id, { cycleType: 4, cycleValue: 3600, startSec: -50 * day });
+    await createSeason(id, 1, -50 * day, -45 * day, 8);
+    await createSeason(id, 2, -45 * day, -day, 8);
+    await createSeason(id, 3, -day, 3600, 7);
+    // 반복 없는 랭킹의 시즌 1: 다음 시즌이 생기지 않으므로 자기 시즌 SETTLED만으로 entry도 분리한다
+    await createDefinition(last, { startSec: -3 * day });
+    await createSeason(last, 1, -3 * day, -2 * day, 8);
+    for (const [rid, no] of [[id, 1], [id, 2], [id, 3], [last, 1]]) {
+        await q('INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at) VALUES (?, ?, ?, 1, NOW(3), 1, NOW(3))', [rid, no, `a${no}`]);
+        await q('INSERT INTO ranking_submit_key (ranking_id, season_no, request_id, member_id, input_value, rejected, created_at) VALUES (?, ?, ?, ?, 1, NULL, NOW(3))', [rid, no, `arc-${rid}-${no}`, `a${no}`]);
+    }
+
+    const r1 = await runArchive(A);
+    const parts = {
+        s1: await hasSeasonPart('ranking_entry', id, 1) || await hasSeasonPart('ranking_submit_key', id, 1),
+        s2Entry: await hasSeasonPart('ranking_entry', id, 2), s2Key: await hasSeasonPart('ranking_submit_key', id, 2),
+        s3: await hasSeasonPart('ranking_entry', id, 3) && await hasSeasonPart('ranking_submit_key', id, 3),
+        last: await hasSeasonPart('ranking_entry', last, 1) || await hasSeasonPart('ranking_submit_key', last, 1),
+    };
+    const rows = {
+        e1: await backupRows(`ranking_entry_r${id}_s1`), k1: await backupRows(`ranking_submit_key_r${id}_s1`),
+        e2: await backupRows(`ranking_entry_r${id}_s2`), k2: await backupRows(`ranking_submit_key_r${id}_s2`),
+        eL: await backupRows(`ranking_entry_r${last}_s1`), kL: await backupRows(`ranking_submit_key_r${last}_s1`),
+    };
+    check('B1 SETTLED 시즌을 백업 테이블로 분리·빈 파티션 삭제: submit_key는 바로, entry는 다음 시즌 SETTLED(또는 마지막 시즌)일 때만',
+        r1.exchanged === 5 && r1.dropped === 5 && r1.waiting === 1 && !parts.s1 && parts.s2Entry && !parts.s2Key && parts.s3 && !parts.last
+        && rows.e1 === 1 && rows.k1 === 1 && rows.e2 === -1 && rows.k2 === 1 && rows.eL === 1 && rows.kL === 1,
+        JSON.stringify({ ...r1, expired: r1.expired.length, parts, rows }));
+
+    const [{ c }] = await q('SELECT TABLE_COMMENT c FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [`ranking_entry_r${id}_s1`]);
+    check('B2 백업 COMMENT에 랭킹 코드·시즌 기간', c.includes(`RT${id}`) && c.includes('season 1') && c.includes('UTC'), `(${c})`);
+
+    const names = r1.expired.map((b) => b.tableName);
+    const msg = expiredMessage(r1.expired);
+    check('B3 보관 기간(30일)이 지난 백업만 경고 대상, 문구에 코드·종료일',
+        names.length === 2 && names.includes(`ranking_entry_r${id}_s1`) && names.includes(`ranking_submit_key_r${id}_s1`) && msg.includes(`RT${id}`) && msg.includes('ended '),
+        `(${msg})`);
+
+    const r2 = await runArchive(A);
+    check('B4 다시 돌면 할 일 없음, 백업 데이터는 되돌아가지 않음', r2.exchanged === 0 && r2.dropped === 0 && r2.waiting === 1
+        && await backupRows(`ranking_entry_r${id}_s1`) === 1 && await backupRows(`ranking_submit_key_r${id}_s2`) === 1, JSON.stringify({ ...r2, expired: r2.expired.length }));
+
+    await q('UPDATE ranking_season SET status = 8 WHERE ranking_id = ? AND season_no = 3', [id]);
+    const r3 = await runArchive(A);
+    check('B5 다음 시즌이 SETTLED가 되면 기다리던 entry도 분리 (시즌 3 entry는 다음 시즌 행이 없어 기다림)',
+        r3.exchanged === 2 && r3.waiting === 1 && !await hasSeasonPart('ranking_entry', id, 2) && await backupRows(`ranking_entry_r${id}_s2`) === 1
+        && await hasSeasonPart('ranking_entry', id, 3) && !await hasSeasonPart('ranking_submit_key', id, 3), JSON.stringify({ ...r3, expired: r3.expired.length }));
+
+    await q('UPDATE ranking_definition SET history_retention = 0 WHERE ranking_id = ?', [id]);
+    const r4 = await runArchive(A);
+    check('B6 history_retention 0(무기한)은 경고 대상 아님', r4.expired.length === 0, `(${r4.expired.length})`);
+
+    await q("DELETE FROM job_state WHERE job_name = 'archive'");
+    startWorker('tA');
+    const recorded = await until(async () => (await q("SELECT job_name FROM job_state WHERE job_name = 'archive'")).length === 1, 15000);
+    const watch = await checkJobStall(A, 'archive');
+    check('B7 워커가 백업 분리 후 job_state(archive) 기록, 정체 아님', recorded >= 0 && !watch.stalled, JSON.stringify(watch));
 }
 
 // ------------------------------------------------------------------------------------------------ 8. 장애 주입
@@ -1850,14 +2019,16 @@ async function apiFaults() {
     // 잘못된 설정과 포트 충돌. 포트 충돌은 하트비트를 기록한 뒤에 실패하므로 그 행을 지우고 끝나야 한다(migrate가 산 인스턴스로 보지 않게)
     const retentionExit = await runUntilExit('api', 'tx14', { API_PORT: String(PORT + 5), LOG_RETENTION_DAYS: '0' });
     const intExit = await runUntilExit('worker', 'tx15', { API_TIMEOUT_MS: 'abc' });
+    // 월 테이블 보관(3 × 28 = 84일)이 운영 보관(90일)보다 짧으면 옮기자마자 지울 대상이 된다
+    const archiveExit = await runUntilExit('worker', 'tx17', { LOG_RETENTION_DAYS: '90', LOG_ARCHIVE_MONTHS: '3' });
     const beats = async () => new Set((await q('SELECT instance_id FROM instance_heartbeat')).map((r) => r.instance_id));
     const beats0 = await beats();
     const busy0 = logCount('tx16', 'api startup failed', 'api');
     const busyExit = await runUntilExit('api', 'tx16', { API_PORT: String(PORT) });
     const leftover = [...await beats()].filter((x) => !beats0.has(x)).length;
-    check('X19 잘못된 설정(LOG_RETENTION_DAYS 0, 정수 아닌 값)·포트 충돌: 종료 코드 1, 포트 충돌은 시작 실패 로그·하트비트 행 남기지 않음',
-        retentionExit === 1 && intExit === 1 && busyExit === 1 && logCount('tx16', 'api startup failed', 'api') > busy0 && leftover === 0,
-        `(${retentionExit}, ${intExit}, ${busyExit}, 남은 하트비트 ${leftover})`);
+    check('X19 잘못된 설정(LOG_RETENTION_DAYS 0, 정수 아닌 값, 월 테이블 보관 < 운영 보관)·포트 충돌: 종료 코드 1, 포트 충돌은 시작 실패 로그·하트비트 행 남기지 않음',
+        retentionExit === 1 && intExit === 1 && archiveExit === 1 && busyExit === 1 && logCount('tx16', 'api startup failed', 'api') > busy0 && leftover === 0,
+        `(${retentionExit}, ${intExit}, ${archiveExit}, ${busyExit}, 남은 하트비트 ${leftover})`);
 
     // 인스턴스가 떠 있는 동안 migrate는 거부한다
     const mig = await new Promise((done) => {
@@ -1982,7 +2153,7 @@ try {
     const times = Number(process.argv[2] ?? 3);
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
-        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios],
+        for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios], ['시즌 백업 분리', archiveScenarios],
             ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]]) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();

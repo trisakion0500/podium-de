@@ -4,11 +4,13 @@ import { createPool } from './core/db.js';
 import { logger } from './core/logger.js';
 import { startRankingRefresh } from './core/rankings.js';
 import { closeRedis, createRedis } from './core/redis.js';
+import { ARCHIVE_STALL, startArchive } from './worker/archive.js';
 import { startDelivery } from './worker/delivery.js';
-import { startLogCleanup, startLogCleanupWatch } from './worker/logcleanup.js';
+import { LOG_CLEANUP_STALL, startLogCleanup } from './worker/logcleanup.js';
 import { startRecovery } from './worker/recovery.js';
 import { startScheduler } from './worker/scheduler.js';
 import { startSettlement } from './worker/settle.js';
+import { startStallWatch } from './worker/stall.js';
 
 const { pool, onShutdown } = await bootstrap('worker', ProcessType.WORKER);
 const redis = createRedis();
@@ -20,11 +22,12 @@ let stopScheduler: (() => Promise<void>) | undefined;
 let stopSettlement: (() => Promise<void>) | undefined;
 let stopDelivery: (() => Promise<void>) | undefined;
 let stopLogCleanup: (() => Promise<void>) | undefined;
-let stopLogCleanupWatch: (() => Promise<void>) | undefined;
+let stopArchive: (() => Promise<void>) | undefined;
+let stopStallWatch: (() => Promise<void>) | undefined;
 let stopRefresh: (() => void) | undefined;
 // 잡을 먼저 멈춘 뒤 정의 재조회, Redis, 로그 DB 풀 순으로 닫는다. 메인 DB 풀은 bootstrap이 마지막에 닫는다 (개발 컨벤션 5.2).
 const shutdown = onShutdown(async () => {
-    await Promise.all([stopRecovery?.(), stopScheduler?.(), stopSettlement?.(), stopDelivery?.(), stopLogCleanup?.(), stopLogCleanupWatch?.()]);
+    await Promise.all([stopRecovery?.(), stopScheduler?.(), stopSettlement?.(), stopDelivery?.(), stopArchive?.(), stopLogCleanup?.(), stopStallWatch?.()]);
     stopRefresh?.();
     await closeRedis(redis);
     await logPool.end();
@@ -42,8 +45,9 @@ stopRecovery = startRecovery(pool, redis);
 stopScheduler = startScheduler(pool);
 stopSettlement = startSettlement(pool, redis);
 stopDelivery = startDelivery(pool);
+stopArchive = startArchive(pool);
 stopLogCleanup = startLogCleanup(pool, logPool);
-stopLogCleanupWatch = startLogCleanupWatch(pool);
+stopStallWatch = startStallWatch(pool, [ARCHIVE_STALL, LOG_CLEANUP_STALL]);
 logger.info('worker started');
 // pm2 --wait-ready: 기동 확인을 통과한 뒤에만 준비 완료를 알린다.
 process.send?.('ready');

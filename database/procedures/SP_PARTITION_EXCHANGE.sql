@@ -9,7 +9,8 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_PARTITION_EXCHANGE
     -- 작성 : 2026.10.04 trisakion
-    -- 내용 : 01_DESIGN 8.2 EXCHANGE 절차의 1~3단계. 4단계(빈 파티션 DROP)는 SP_PARTITION_DROP이 한다.
+    -- 수정 : 2026.10.20 trisakion 백업 테이블 COMMENT에 랭킹 코드와 시즌 기간 기록
+    -- 내용 : 01_DESIGN 8.2 EXCHANGE 절차의 1~4단계. 5단계(빈 파티션 DROP)는 SP_PARTITION_DROP이 한다.
     --        - 분리 시점을 SP가 다시 확인한다(방어적 이중 체크). 잡의 판단 오류로 이른 분리가 일어나면 보상 API가
     --          PENDING을 읽지 못하거나(entry) 재전송 판정이 틀어진다(submit_key).
     --            ranking_submit_key: 자기 시즌 SETTLED
@@ -28,10 +29,15 @@ BEGIN
     --          만에 하나 백업에 행이 있었다면 검증이 다른 시즌 행을 막고, 같은 시즌 행이면 맞바꿔질 뿐 사라지지 않는다.
     --          이후 SP_PARTITION_DROP이 비어 있지 않은 파티션의 삭제를 거부하므로 데이터가 유실되지 않는다.
     --        - 운영 테이블에 걸리는 것은 메타데이터 수준의 배타 MDL뿐이다. 대기 제한은 SP_EXEC_DDL이 건다.
+    --        - 백업 이름은 ID 기반으로 두고(대소문자를 구분하는 ranking_code를 넣으면 대소문자를 구분하지 않는 설치에서
+    --          이름이 겹친다), 운영자가 덤프·삭제할 때 알아보도록 COMMENT에 랭킹 코드와 시즌 기간(UTC)을 남긴다.
+    --          교환 전 빈 테이블에 건다(메타데이터만 바뀐다). 코드는 영숫자·_.- 밖의 문자를 ?로 바꾸고 QUOTE로 감싼다 —
+    --          운영자 입력 문자열이 DDL 문자열에 들어가는 유일한 곳이다.
     -- ------------------------------------------------------------------------------------------------------------ --
     DECLARE v_table            VARCHAR(64);
     DECLARE v_backup           VARCHAR(64);
     DECLARE v_partition        VARCHAR(64);
+    DECLARE v_comment          VARCHAR(512);
     DECLARE v_status           TINYINT UNSIGNED;
     DECLARE v_next_status      TINYINT UNSIGNED;
     DECLARE v_has_rows         TINYINT(1)      DEFAULT 0;
@@ -111,6 +117,14 @@ BEGIN
                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = v_backup AND PARTITION_NAME IS NOT NULL) THEN
             CALL SP_EXEC_DDL(CONCAT('ALTER TABLE `', v_backup, '` REMOVE PARTITIONING'));
         END IF;
+        SELECT CONCAT('season backup: ranking ', d.ranking_id, ' (', REGEXP_REPLACE(d.ranking_code, '[^A-Za-z0-9_.-]', '?'),
+                      ') season ', s.season_no, ', ', DATE_FORMAT(s.start_at, '%Y-%m-%d %H:%i'), ' ~ ',
+                      DATE_FORMAT(s.end_at, '%Y-%m-%d %H:%i'), ' UTC')
+          INTO v_comment
+          FROM ranking_season s
+          JOIN ranking_definition d ON d.ranking_id = s.ranking_id
+         WHERE s.ranking_id = i_ranking_id AND s.season_no = i_season_no;
+        CALL SP_EXEC_DDL(CONCAT('ALTER TABLE `', v_backup, '` COMMENT = ', QUOTE(COALESCE(v_comment, 'season backup'))));
         CALL SP_EXEC_DDL(CONCAT('ALTER TABLE `', v_table, '` EXCHANGE PARTITION `', v_partition, '` WITH TABLE `', v_backup, '`'));
 
         SELECT 0 AS RESULT;

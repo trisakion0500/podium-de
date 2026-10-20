@@ -6,5 +6,6 @@
 | --- | --- | --- |
 | 1 | `log_ranking_submit` | 제출 이력. 단건 INSERT, 단독 자동 커밋 |
 | 2 | `log_ddl_audit` | `SP_EXEC_DDL` 전용 (단독 자동 커밋) |
+| 3 | `log_ranking_submit_xchg`, `log_ranking_submit_YYYYMM` | `SP_LOG_PARTITION_ARCHIVE`·`SP_LOG_ARCHIVE_DROP`의 DDL 전용 (트랜잭션 없음) |
 
 - 현재 두 테이블을 한 트랜잭션에서 함께 쓰는 SP는 없다. 새 SP가 함께 쓰게 되면 이 순서를 따른다.

@@ -41,11 +41,13 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 쓰는 주체 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- |
-| `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 일 파티션 DROP. 월 테이블로 옮겨 `LOG_ARCHIVE_MONTHS` 후 지우는 방식은 5단계 구현 예정 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
+| `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 월 테이블 `log_ranking_submit_YYYYMM`으로 이동, `LOG_ARCHIVE_MONTHS` 후 월 테이블 DROP | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
 | `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db), [11.4](01_DESIGN.md#114-운영-테이블) |
 | `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
 
 **메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`). 시즌마다 생기며 `history_retention`이 지나면 경고하고, 삭제는 운영자가 한다 ([8.3](01_DESIGN.md#83-보관-방식), [11.4](01_DESIGN.md#114-운영-테이블)).
+
+**로그 DB 월 테이블**: `log_ranking_submit_YYYYMM` 이름의 일 파티션 테이블이다(운영 테이블과 구조·일 경계가 같다). 그 달의 일 파티션을 처음 옮길 때 생기고 `LOG_ARCHIVE_MONTHS`가 지나면 로그 정리 잡이 DROP한다. `log_ranking_submit_xchg`는 옮기는 동안만 있는 교환 테이블이다 ([4.5](01_DESIGN.md#45-log_ranking_submit-로그-db)).
 
 **코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/core/codes.ts`에 있다 (D-46).
 
@@ -279,7 +281,7 @@ flowchart LR
     DEF -- "① 시즌 생성" --> SEA
     GS -- "② 제출" --> KEY & ENT
     GS -. "② 제출 이력 (모든 결과)" .-> SLOG
-    SLOG -. "LOG_RETENTION_DAYS 후 DROP" .-> SLOG
+    SLOG -. "LOG_RETENTION_DAYS 후 월 테이블로 이동, LOG_ARCHIVE_MONTHS 후 DROP" .-> SLOG
     ENT -- "② 즉시 반영 · 리컨실러" --> RD
     ENT -- "② 소프트 탐지" --> SUS
     GM -- "② 제재 (언제든)" --> EXC
