@@ -13,7 +13,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- |
-| `ranking_definition` | 랭킹 정의 (갱신 규칙, 정렬, 일정, 보관, 검증 설정). 순위 규칙은 등록 후 불변 | — | 영구 | [2.1](01_DESIGN.md#21-ranking_definition), [2.7](01_DESIGN.md#27-등록-검증) |
+| `ranking_definition` | 랭킹 정의 (갱신 규칙, 정렬, 일정, 보관, 검증 설정). 순위 규칙은 등록 후 불변 | — | 영구 | [2.1](01_DESIGN.md#21-ranking_definition), [2.7](01_DESIGN.md#27-등록-검증), [2.8](01_DESIGN.md#28-등록-후-수정-d-79) |
 | `ranking_reward_tier` | 랭킹별 보상 구간 (순위·백분율 → `reward_code`) | — | 영구. 정산 시 `tier_snapshot`에 고정 | [2.6](01_DESIGN.md#26-보상-구간) |
 | `ranking_exclusion` | 제재로 순위에서 제외할 멤버 (`season_no = 0`은 전 시즌) | — | 영구 | [7.8](01_DESIGN.md#78-제재-처리) |
 | `api_credential` | 서버 간 호출 API 키 (해시와 권한) | — | 폐기 후에도 보관 | [10.1](01_DESIGN.md#101-인증) |
@@ -24,11 +24,11 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 쓰는 주체 | 관리자 조작 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, OPEN·CLOSED), 정산 잡 (SETTLING~DELIVERING), 전달 잡 (SETTLED) | SCHEDULED 수정, OPEN `end_at` 변경, 검수 보류·조기 확정, DELIVERING 강제 종료 | — | 영구 | [3.1](01_DESIGN.md#31-ranking_season), [3.4](01_DESIGN.md#34-관리자-수정-범위), [7.5](01_DESIGN.md#75-review-검수), [7.7](01_DESIGN.md#77-delivering-보상-전달) |
-| `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | 보류(held) 건을 PENDING 또는 REJECTED로 전환 | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED(마지막 시즌은 자기 시즌)에 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [7.4](01_DESIGN.md#74-결과-컬럼), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
+| `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, OPEN·CLOSED), 정산 잡 (SETTLING~DELIVERING), 전달 잡 (SETTLED) | 검수 보류·조기 확정, DELIVERING 강제 종료 (일정은 랭킹 정의로 계산, D-79) | — | 영구 | [3.1](01_DESIGN.md#31-ranking_season), [3.4](01_DESIGN.md#34-관리자-수정-범위), [7.5](01_DESIGN.md#75-review-검수), [7.7](01_DESIGN.md#77-delivering-보상-전달) |
+| `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | — | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED(마지막 시즌은 자기 시즌)에 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [7.4](01_DESIGN.md#74-결과-컬럼), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
 | `ranking_submit_key` | 제출 멱등 키 (재전송 판별, 하드 검증 거부 사유) | 제출 API | — | 시즌 | 자기 시즌 SETTLED에 분리 | [4.4](01_DESIGN.md#44-ranking_submit_key), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
 | `ranking_entry_settling` | 정산 작업 테이블 (entry 시즌 파티션을 꺼내 가순위를 매긴 뒤 되돌림) | 정산 잡 | — | — | 평소 비어 있음 | [7.3](01_DESIGN.md#73-settling-가순위-생성) |
-| `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (지급 후 제재 시 `sanctioned`는 제재 처리가 갱신) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_season_top) |
+| `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (검수 후 제재 시 `sanctioned`는 제재 처리가 갱신, D-78) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_season_top) |
 | `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#92-소프트-탐지-받되-표시), [9.3](01_DESIGN.md#93-어뷰징-포인트) |
 | `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
 | `job_state` | 워커 잡별 동기화 시각 (리컨실러 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
@@ -215,12 +215,12 @@ sequenceDiagram
     W->>W: REVIEW, review_until 기록
 
     Note over GM,L: 검수와 확정 (7.5, 7.6)
-    GM->>API: 보류 / 조기 확정 / 제재 추가 (선택)
+    GM->>API: 검수 보류 / 조기 확정 / 제재 추가 (선택)
     Note right of API: ranking_season.review_hold, ranking_exclusion
-    W->>W: review_until 경과 (보류 없음) → FINALIZING
+    W->>W: review_until 경과 (검수 보류 없음) → FINALIZING
     Note right of W: 제재 제외·순위 재부여 (ranking_entry)<br/>participant_count, tier_snapshot (ranking_season)<br/>reward_code·reward_status 판정<br/>상위 top_size → ranking_season_top
     W->>W: DELIVERING
-    W-->>GS: 정산 완료 웹훅 (신호만, 6단계 구현 예정)
+    W-->>GS: 보상 준비 완료 웹훅 (신호만, 2차 이후 범위)
 
     Note over GM,L: 보상 전달 (7.7)
     GS->>API: 전달 대기 시즌 조회 (/v1/rewards/pending, 주기 확인)
@@ -231,8 +231,7 @@ sequenceDiagram
         GS->>API: ack (발송 성공 건만, 최대 1,000건)
         Note right of API: ranking_entry PENDING → DELIVERED (조건부, 멱등)<br/>반영 안 된 member_id는 notApplied
     end
-    GM->>API: 보류 건 PENDING/REJECTED 전환 (선택)
-    W->>W: 전달 잡: 남은 대상(PENDING, 보류 제외) 0 → SETTLED (D-70)
+    W->>W: 전달 잡: 남은 대상(PENDING) 0 → SETTLED (D-70)
     Note right of W: ranking_submit_key 파티션 → 백업<br/>이전 시즌 ranking_entry 파티션 → 백업 (8.2)
     GS->>API: 지난 시즌 결과·내 결과 (DELIVERING 이후, 백업 분리 전까지) / 시즌 Top N (영구)
 ```
@@ -291,7 +290,7 @@ flowchart LR
     TIER -- "④ tier_snapshot 고정" --> SEA
     EXC -- "④ 제외 · 순위 재부여" --> ENT
     SEA -- "④ 보상 구간 판정" --> ENT
-    SUS -- "④ 보류 임계치 → reward_held" --> ENT
+    SUS -- "④ 검수 목록 정렬 (포인트)" --> GM
     ENT -- "④ 상위 top_size" --> HALL
     ENT -- "⑤ PENDING 목록" --> GS
     GS -- "⑤ ack → DELIVERED" --> ENT
@@ -306,7 +305,7 @@ flowchart LR
 | ① | 등록 | 관리자 입력 → `ranking_definition`, `ranking_reward_tier`. 정의로부터 `ranking_season` 행과 시즌 파티션 생성 |
 | ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 인증·형식 검사를 통과한 제출의 결과는 모두 로그 DB `log_ranking_submit`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 근거를 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
 | ③ | 마감과 정산 | `ranking_entry` 파티션을 `ranking_entry_settling`으로 꺼내(EXCHANGE) `final_rank` 가순위를 매기고 같은 파티션으로 되돌린다(EXCHANGE). 행 복사 없음. Redis 시즌 키 삭제 |
-| ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트로 보류, 상위 N → `ranking_season_top` |
+| ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트순 검수 목록, 상위 N → `ranking_season_top` |
 | ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED. 남은 대상이 0이면 워커 전달 잡이 SETTLED로 넘긴다 (D-70). 결과는 `ranking_entry`, Top N은 `ranking_season_top`에서 조회한다 |
 | ⑥ | SETTLED 이후 | `ranking_submit_key`(자기 시즌 SETTLED), `ranking_entry`(자기·다음 시즌 SETTLED, 마지막 시즌은 자기 시즌) 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 경고(삭제는 운영자) |
 

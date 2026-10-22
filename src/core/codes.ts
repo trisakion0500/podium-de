@@ -226,7 +226,7 @@ export const SpResult = {
     REVIEW_NOT_DUE: 1014,
     /** 확정: 앞 단계가 끝나지 않음 (participant_count·tier_snapshot 없음, 또는 순위 재부여 미완료) */
     FINALIZE_INCOMPLETE: 1015,
-    /** SETTLED 전이: 남은 전달 대상(PENDING, 보류 제외)이 있음 */
+    /** SETTLED 전이: 남은 전달 대상(PENDING)이 있음 */
     REWARD_REMAINING: 1016,
     /** 제출: ranking_definition에 랭킹이 없음 */
     RANKING_NOT_FOUND: 1101,

@@ -22,7 +22,7 @@ const pageQuery = {
         size: { type: 'integer', minimum: 1, maximum: PAGE_SIZE_MAX, default: PAGE_SIZE_DEFAULT, description: `개수 (최대 ${PAGE_SIZE_MAX})`, example: PAGE_SIZE_DEFAULT },
     },
 };
-const sanctionedSchema = { type: 'boolean', description: 'true: 지급 후 제재됨. 표시 방식은 게임 서버가 정한다', example: false };
+const sanctionedSchema = { type: 'boolean', description: 'true: 검수가 끝난 뒤 제재됨(순위·보상은 그대로, 회수는 게임 서버). 표시 방식은 게임 서버가 정한다', example: false };
 const rewardCodeSchema = { type: ['string', 'null'], description: '판정된 보상 코드. 보상 구간 밖이거나 제재면 null', example: 'TOP10' };
 const ok = (data: object) => ({ type: 'object', properties: { result: { type: 'integer', description: '0: 성공', example: 0 }, data: { type: 'object', properties: data } } });
 const notFinalNote = '- 확정 전(DELIVERING 이전) 시즌은 1003/409, 없는 시즌은 1002/404다.';
@@ -59,7 +59,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
             description: [
                 '확정된 시즌의 최종 순위를 `offset`부터 `size`개 돌려준다. 권한: read.',
                 '',
-                '- 제재로 제외된 멤버는 순위가 없어 나오지 않는다. 지급 후 제재된 멤버는 순위를 유지하고 `sanctioned: true`다.',
+                '- 제재로 제외된 멤버는 순위가 없어 나오지 않는다. 검수가 끝난 뒤 제재된 멤버는 순위를 유지하고 `sanctioned: true`다.',
                 '- 백업으로 분리된 오래된 시즌은 빈 목록이다. 시즌별 상위는 `seasons/{n}/top`으로 영구 조회한다.',
                 notFinalNote,
             ].join('\n'),
@@ -192,7 +192,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
         schema: {
             summary: '보상 전달 대상 목록',
             description: [
-                '아직 전달하지 않은 보상(PENDING, 보류 제외)을 `memberId` 오름차순으로 돌려준다. 권한: reward.',
+                '아직 전달하지 않은 보상(PENDING)을 `memberId` 오름차순으로 돌려준다. 권한: reward.',
                 '',
                 '- 우편 발송에 성공한 건만 `rewards/ack`로 알린다. ack가 유실되면 다음 조회에 다시 나온다.',
                 '- 중복 발송은 게임 서버가 지급 멱등 키 `(rankingId, seasonNo, memberId)`로 거른다.',
@@ -251,7 +251,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
                 '',
                 '- 멱등이다. 이미 전달 완료인 멤버는 성공으로 본다. 실패·시간 초과(2005) 시 같은 목록으로 재시도한다.',
                 '- 발송 전에 ack하지 않는다. 발송이 실패하면 보상이 유실된다.',
-                '- 반영되지 않은 멤버(보류, 제재로 미지급, 보상 없음, 시즌에 없음)는 `notApplied`로 돌려준다.',
+                '- 반영되지 않은 멤버(제재로 미지급, 보상 없음, 시즌에 없음)는 `notApplied`로 돌려준다.',
                 '- 남은 대상이 모두 전달되면 워커가 시즌을 완료(SETTLED)로 넘긴다.',
             ].join('\n'),
             tags: ['rewards'],

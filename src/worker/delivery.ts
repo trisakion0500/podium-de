@@ -15,7 +15,7 @@ const DELIVERY_LOCK = 'podium:delivery';
 export interface PendingSeason {
     rankingId: number;
     seasonNo: number;
-    /** 남은 전달 대상 수 (PENDING, 보류 제외) */
+    /** 남은 전달 대상 수 (PENDING) */
     remaining: number;
 }
 
@@ -93,7 +93,7 @@ export function startDelivery(pool: Pool): () => Promise<void> {
             }
             await ctx.checkpoint();
             const settled = await callSp(ctx.conn, 'SP_UPDATE_SEASON_SETTLED', [s.rankingId, s.seasonNo]);
-            // 1016: 목록을 읽은 뒤 전달 대상이 다시 생김(6단계 보류 전환). 다음 주기에 다시 본다
+            // 1016: 목록을 읽은 뒤 전달 대상이 다시 생김. 보류 전환이 없어(D-77) 방어용이다. 다음 주기에 다시 본다
             if (settled.result === SpResult.OK)
                 logger.info(`rewards delivered ranking=${s.rankingId} season=${s.seasonNo} → SETTLED`);
             else if (settled.result !== SpResult.REWARD_REMAINING)

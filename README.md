@@ -388,6 +388,7 @@ migrate가 하트비트로 거부되면
   - ✅ 시즌 백업 테이블 로테이션 — SETTLED 시즌 파티션 분리(1시간 주기), 백업 COMMENT(코드·기간), `history_retention` 지난 백업 경고, 정체 감시 (D-73)
   - ✅ 로그 DB 월 테이블 아카이브 — 일 파티션 EXCHANGE 두 번(복사 없음, 중단 후 이어서), `LOG_ARCHIVE_MONTHS` 후 월 테이블 삭제 (D-72)
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
+- ⬜ 7단계: 운영 웹 프론트엔드
 
 ---
 
