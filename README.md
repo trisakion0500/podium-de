@@ -13,7 +13,7 @@
 
 - **핵심 기술**: Node.js 22 + TypeScript · MySQL 8.4(모든 DB 로직은 Stored Procedure,
   LIST COLUMNS 파티션) · Redis 7.4(실시간 순위표, MySQL의 투영)
-- **정량 현황**: 3단계(자가 복구)까지 완료, 4단계(시즌 스케줄러·정산)는 확정까지 완료. 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
+- **정량 현황**: 5단계(아카이브 로테이션)까지 완료. 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
 - **기술적 강조점**: 시즌 단위 파티션 EXCHANGE 아카이브 · composite score 동점 처리 ·
   동기화 시각 차분 리컨실러 기반 자가 복구 · 동적 SQL을 `SP_EXEC_DDL` 하나로 격리
 
@@ -388,6 +388,13 @@ migrate가 하트비트로 거부되면
   - ✅ 시즌 백업 테이블 로테이션 — SETTLED 시즌 파티션 분리(1시간 주기), 백업 COMMENT(코드·기간), `history_retention` 지난 백업 경고, 정체 감시 ([D-73](docs/02_DECISIONS.md#d-73))
   - ✅ 로그 DB 월 테이블 아카이브 — 일 파티션 EXCHANGE 두 번(복사 없음, 중단 후 이어서), `LOG_ARCHIVE_MONTHS` 후 월 테이블 삭제 ([D-72](docs/02_DECISIONS.md#d-72))
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
+  - ⬜ 관리 API 기반 — `start:admin` 프로세스, 계정·세션·감사 로그, 로그인·비밀번호 변경·잠금, 첫 admin CLI, 역할 확인 ([D-74](docs/02_DECISIONS.md#d-74))
+  - ⬜ 랭킹 등록·수정 — 등록 검증(보상 구간 값, 보상 공백 표시), 시즌 1 생성, 묶음별 수정, 늘리기·줄이기·조기 종료·ENDED·PAUSED ([D-69](docs/02_DECISIONS.md#d-69), [D-79](docs/02_DECISIONS.md#d-79))
+  - ⬜ 제재 — 반영 Lua 제외 집합, 등록·해제, 리컨실러 동기화, 재구축 때 다시 채우기, 검수 후 제재 표시 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
+  - ⬜ 검수·전달 조작 — 검수 보류·해제·조기 확정, 장기 보류 알림, 검수 목록, DELIVERING 강제 종료
+  - ⬜ Anti-cheat — 소프트 탐지 4규칙, 탐지 중복 방지, 검수 목록 포인트 정렬 ([D-76](docs/02_DECISIONS.md#d-76), [D-77](docs/02_DECISIONS.md#d-77))
+  - ⬜ 정리 — `reward_held` 조건 제거(SP, 회귀 테스트, 03_DEV_SETUP 문구)
+  - ⬜ 설치 패키징 — 배포 형태, 설치 절차, 설정 안내
 - ⬜ 7단계: 운영 웹 프론트엔드
 
 ---
