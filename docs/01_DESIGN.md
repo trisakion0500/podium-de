@@ -255,7 +255,7 @@ CREATE TABLE `ranking_reward_tier` (
 
   - **1위:** 앞 사람이 없어(0%) 참가자 수와 무관하게 첫 구간이다. 참가자가 적으면 중간 구간이 빌 수 있다(예: P=10이면 2~10% 구간은 0명 — 2위는 앞 사람이 10%다).
   - **인접 구간:** `[1,10] [11,50]`처럼 맞붙은 구간은 빈틈이나 겹침 없이 순위를 나눈다(P 1~5,000 전수 확인).
-- **권장 구성:** 정확한 인원이 필요한 상위권(1위, 2~3위, 4~10위)은 RANK로, 그 아래는 PERCENT를 1%부터 둔다. RANK가 먼저 판정되므로 상위 10% 구간과 겹쳐도 상위권은 RANK 보상을 받는다.
+- **권장 구성:** 정확한 인원이 필요한 상위권(1위, 2\~3위, 4\~10위)은 RANK로, 그 아래는 PERCENT를 1%부터 둔다. RANK가 먼저 판정되므로 상위 10% 구간과 겹쳐도 상위권은 RANK 보상을 받는다.
 - **보상 공백 경고:** 보상받는 순위 사이에 어느 구간에도 들지 않는 순위가 있으면 확정 때 경고 로그(`reward tiers leave ranks a..b without reward`)를 남긴다. 의도된 공백일 수 있어 막지는 않는다. 대표적인 실수는 RANK 1~10위 + PERCENT 11%부터로, 11위부터 상위 10% 경계까지가 빈다.
 - 백분율은 정수만 쓴다(0.1% 단위 불가). 구간 값 검증(`from ≤ to`, 1~100)은 등록 도구와 함께 6단계 구현 예정이다. 그전에는 `from = 0`이 1과 같고, `from > to`는 빈 구간이 된다.
 
@@ -450,7 +450,7 @@ PARTITION BY LIST COLUMNS (`ranking_id`, `season_no`) (
 ```
 
 - `reward_held`는 쓰지 않는다(항상 0, [D-77](02_DECISIONS.md#d-77)).
-- 시즌의 스코어와 정산 결과를 한 행에 둔다. 결과 컬럼(`final_rank`~`delivered_at`)은 진행 중에는 비어 있고, 정산 단계에서 채운다 (7.3~7.7, [D-49](02_DECISIONS.md#d-49)).
+- 시즌의 스코어와 정산 결과를 한 행에 둔다. 결과 컬럼(`final_rank`\~`delivered_at`)은 진행 중에는 비어 있고, 정산 단계에서 채운다 (7.3\~7.7, [D-49](02_DECISIONS.md#d-49)).
 - 시즌 데이터는 결과가 백업으로 분리될 때(자기 시즌과 다음 시즌 모두 SETTLED, 마지막 시즌은 자기 시즌 SETTLED)까지 보관한다 (8.2).
 - 제출이 결과 컬럼을 건드리지 않으므로 결과 인덱스(`ix_final_rank`, `ix_reward_status`)는 신규 멤버 INSERT 때만 비용이 든다.
 - LIST 파티션 테이블은 생성 시 파티션이 최소 하나 필요하므로 `p_init ((0,0))`을 둔다. `ranking_id`는 1부터 시작한다. `ranking_submit_key`도 동일하다.
@@ -1192,7 +1192,7 @@ CREATE TABLE `api_credential` (
 | `SP_LOG_ARCHIVE_DROP(archive_months)` | 로그 DB. 끝난 지 `archive_months`(1 이상)개월이 지난 가장 오래된 월 테이블 삭제 (호출당 하나) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
-- SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001~1016, `SP_SUBMIT_SCORE`는 1101~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105~1107), API 키 SP는 1201~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
+- SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다(10.3). 관리 SP는 1001\~1016, `SP_SUBMIT_SCORE`는 1101\~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105\~1107), API 키 SP는 1201\~1202, 조회 SP는 1301이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
 - 관리 SP는 상태를 관측해 다음 단계만 실행하므로 같은 인자로 다시 호출해도 안전하다.
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상은 코드로만 받아 이름을 조립한다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.
