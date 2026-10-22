@@ -1097,7 +1097,7 @@ CREATE TABLE `ranking_suspicion` (
 
 - `x-api-key` 헤더. 서버 간 호출 전용이며 클라이언트에 배포하지 않는다.
 - TLS 필수. 가능하면 IP 허용 목록.
-- 권한 분리: `write`(제출), `read`(조회), `reward`(보상 수신). 관리 API는 별도 프로세스에서 GM 계정·세션 쿠키로 인증한다(6단계 구현 예정, [D-74](02_DECISIONS.md#d-74)).
+- 권한 분리: `write`(제출), `read`(조회), `reward`(보상 수신). 관리 API는 별도 프로세스에서 GM 계정·세션 쿠키로 인증한다([10.4](#s-10-4), 6단계 구현 예정).
 - 복수 키 동시 활성 (무중단 교체). DB에는 해시만 저장한다.
 - 키는 32바이트 난수(base64url 43자)이며 발급 시 한 번만 보여준다. 저장은 SHA-256 해시다. 엔트로피가 충분한 난수라 느린 해시(bcrypt 등)가 필요 없고, 요청마다 드는 비용을 피한다.
 - API는 기동 시 활성 키 목록을 메모리에 올리고 30초마다 다시 읽는다. 요청마다 DB를 조회하지 않는다. 기동 시 읽기에 실패하면 기동을 거부하고, 재조회 실패 시 기존 목록을 유지하고 경고한다. 이전 재조회가 끝나지 않았으면(DB 정지 등) 이번 차례는 건너뛴다. 겹쳐 쌓이면 호출 제한 시간(`DB_QUERY_TIMEOUT_MS`)까지 풀 커넥션을 잡기 때문이다. 랭킹 정의 캐시([D-56](02_DECISIONS.md#d-56))도 같다.
@@ -1159,6 +1159,162 @@ CREATE TABLE `api_credential` (
 - 처리 제한 시간(`API_TIMEOUT_MS`, 기본 5초)을 넘으면 2005를 응답하지만 진행 중인 SP는 취소되지 않아 반영될 수 있다. 제출은 같은 `requestId`로 재시도한다.
 - DB가 응답하지 않을 때 요청이 끝없이 쌓이지 않게 한다 ([D-71](02_DECISIONS.md#d-71)). 풀 대기열은 커넥션 수 × 20까지이고, 넘으면 기다리지 않고 50001이다. API의 DB 호출은 `DB_QUERY_TIMEOUT_MS`(기본 20초)를 넘으면 커넥션을 버리고 50001이다. 버린 커넥션의 SP도 취소되지 않으므로 2005와 같이 재시도로 맞춘다.
 - Swagger UI(`/docs`)는 `API_DOCS=1`일 때만 연다.
+
+### <a id="s-10-4"></a>10.4 관리 API
+
+운영 도구의 HTTP API다([D-74](02_DECISIONS.md#d-74)). 7단계 웹 프론트엔드가 이 API를 쓴다.
+
+**프로세스와 설정**
+
+- `npm run start:admin`(`dist/admin.js`)으로 S2S API와 따로 띄운다. 경로 접두어는 `/admin/v1`이다.
+- 조회도 메인 DB(마스터)에서 한다. 관리 트래픽은 적고, 목록은 작은 페이지로 나눠 읽는다.
+- TLS는 앞단(리버스 프록시)이 맡는다. 쿠키에 `Secure`를 붙이므로 HTTPS가 아니면 브라우저가 쿠키를 보내지 않는다(`localhost`는 예외).
+
+| 환경 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `ADMIN_PORT` | 3200 | 수신 포트 |
+| `ADMIN_HOST` | `::` | 수신 주소 (`API_HOST`와 같은 이유) |
+| `ADMIN_ORIGINS` | (없음) | 허용 Origin 목록, 쉼표 구분 (예: `https://gm.example.com`) |
+| `ADMIN_SESSION_IDLE_MIN` | 30 | 요청이 없으면 세션이 끝나는 시간(분) |
+| `ADMIN_SESSION_MAX_HOURS` | 12 | 로그인 후 세션 최대 수명(시간) |
+
+**계정과 역할**
+
+- 역할은 1:viewer(조회), 2:operator(GM 조작), 3:admin(operator 권한과 계정 관리)이다. 숫자가 클수록 권한이 크다. 알 수 없는 값은 viewer로 본다.
+- 계정 상태는 1:활성, 2:사용중지다. 계정을 지우지 않는다. 감사 로그의 `admin_account_id`를 추적하기 위해서다.
+- 자기 계정의 역할 변경과 사용중지는 거부한다(1406). admin이 한 명도 남지 않는 실수를 막는다.
+- 첫 admin은 CLI로 만든다: `npm run admin -- create --login-id <id> --name <이름>`. 초기 비밀번호는 CLI가 난수로 만들어 stdout에 한 번만 출력한다. 모든 admin이 비밀번호를 잃으면 같은 CLI의 `reset-password --login-id <id>`로 초기화한다. CLI 조작은 감사 로그에 SYSTEM(0)으로 남는다.
+
+**비밀번호**
+
+- 12\~128자이며, 문자 조합 규칙은 두지 않는다. 아이디와 같으면 거부한다(2008). 상한은 아주 긴 입력으로 해시 비용을 키우는 공격을 막는다.
+- 해시는 `crypto.scrypt`(N=2^14, r=8, p=5, 솔트 16바이트, 출력 32바이트, OWASP 권장 조합 중 메모리 16MB)다. 저장 형식은 `scrypt$N$r$p$솔트$해시`(base64url)다. 파라미터를 함께 저장해, 나중에 올려도 기존 해시를 검증할 수 있다.
+- 초기 비밀번호(생성, 초기화)는 `must_change_password = 1`이다. 바꾸기 전에는 `me`, 비밀번호 변경, 로그아웃만 된다(1403).
+- 비밀번호를 바꾸거나 초기화하면 그 계정의 세션을 모두 지운다. 본인이 바꾼 경우에는 새 세션을 하나 발급해, 그 화면에서 계속 쓸 수 있게 한다.
+
+**로그인과 세션**
+
+```text
+1. SP가 login_id로 계정(해시, 상태, 잠금)을 반환 (없으면 빈 결과)
+2. 앱이 scrypt로 비교 (계정이 없어도 더미 해시로 비교해 응답 시간을 맞춘다)
+3. 실패: SP가 fail_count를 올리고, 5회째에 locked_until = 지금 + 15분 → 1401
+   성공: SP가 잠금·상태를 다시 확인하고, fail_count를 0으로, 세션 행을 추가 → 쿠키
+```
+
+- 응답은 "아이디 또는 비밀번호가 틀림"(1401) 하나다. 아이디 존재 여부를 알려 주지 않는다. 잠긴 계정은 비밀번호가 맞아도 1402다.
+- 쿠키는 `__Host-podium_admin`, `HttpOnly; Secure; SameSite=Strict; Path=/`이다. `__Host-` 접두어가 있으면 브라우저가 Domain 지정과 Secure 누락을 거부한다.
+- 토큰은 32바이트 난수(base64url)이며 DB에는 SHA-256 해시만 둔다.
+- 요청마다 SP가 해시로 세션을 찾는다. 다음 중 하나면 세션을 지우고 2002를 응답한다.
+  - `last_seen_at`이 유휴 시간을 넘김
+  - `expires_at`이 지남
+  - 계정이 사용중지됨
+- `last_seen_at`은 1분이 지났을 때만 갱신해, 요청마다 쓰지 않는다. 그래서 유휴 만료는 최대 1분 늦다.
+- 역할은 세션에 복사하지 않고 매번 계정 행에서 읽는다. 역할 변경이 다음 요청부터 바로 적용된다.
+- 로그인할 때 그 계정의 만료된 세션을 지운다. 정리 잡은 두지 않는다. 다시 로그인하지 않는 계정의 만료 행만 남으며, 계정 수 이상으로 늘지 않는다.
+
+**CSRF**
+
+- 쿠키가 `SameSite=Strict`라 다른 사이트에서 보낸 요청에는 쿠키가 붙지 않는다.
+- 상태를 바꾸는 요청(POST, PATCH, DELETE)에 `Origin` 헤더가 있으면 `ADMIN_ORIGINS`에 있어야 한다. 없으면 2003이다. `Origin`이 없는 요청(curl, 테스트)은 통과한다. 브라우저는 이런 요청에 항상 `Origin`을 붙인다.
+
+**권한 확인**
+
+- 앱이 경로별 최소 역할을 확인한다(2003).
+- 상태를 바꾸는 SP는 `i_requester_id`를 받아 `FN_GET_ADMIN_ROLE`로 다시 확인한다(1405). 사용중지된 계정은 0이 나와 모두 거부된다.
+
+**감사 로그**
+
+- 로그인(성공·실패), 로그아웃, 비밀번호 변경, 계정 조작, 이후의 GM 조작은 모두 로그 DB `log_admin_audit`에 남긴다.
+- 메인 SP가 커밋된 뒤 따로 적는다. 감사 로그 적재에 실패해도 조작은 되돌리지 않고 앱 로그에 오류로 남긴다(개발 컨벤션 7장).
+- 변경 전·후는 JSON이다. 비밀 필드(`password`, `currentPassword`, `newPassword`, `initialPassword`, `password_hash`)는 `***`다. 요청 로그 마스킹 목록에도 같은 키와 `cookie`, `set-cookie`를 넣는다.
+- 적재 SP만 있고 고치거나 지우는 SP는 없다. 앱 계정은 EXECUTE 권한만 있어 테이블을 직접 바꿀 수 없다. 건수가 적어 파티션과 자동 삭제를 두지 않는다.
+
+**엔드포인트**
+
+| 메서드 | 경로 | 역할 | 설명 |
+| --- | --- | --- | --- |
+| POST | `/admin/v1/auth/login` | (없음) | 로그인 (`loginId`, `password`) → 쿠키, 계정 정보 |
+| POST | `/admin/v1/auth/logout` | 로그인 | 현재 세션 삭제 |
+| GET | `/admin/v1/auth/me` | 로그인 | 내 계정 (역할, `mustChangePassword`) |
+| POST | `/admin/v1/auth/password` | 로그인 | 비밀번호 변경 (`currentPassword`, `newPassword`) |
+| GET | `/admin/v1/accounts?offset&size` | admin | 계정 목록 |
+| POST | `/admin/v1/accounts` | admin | 계정 생성 (`loginId`, `name`, `role`) → 초기 비밀번호 한 번 반환 |
+| PATCH | `/admin/v1/accounts/{id}` | admin | 이름, 역할, 상태 변경 |
+| POST | `/admin/v1/accounts/{id}/password-reset` | admin | 초기화 → 새 초기 비밀번호 한 번 반환, 세션 모두 삭제 |
+| POST | `/admin/v1/accounts/{id}/unlock` | admin | 잠금 해제 |
+| GET | `/admin/v1/audit?offset&size&accountId&action` | admin | 감사 로그 조회 (최신순) |
+
+- 초기 비밀번호는 admin이 정하지 않고 서버가 난수(16자)로 만든다. 응답에 한 번만 담고, 응답 로그에서는 가린다.
+- API 키 발급·폐기는 CLI(`npm run credential`)를 그대로 쓴다.
+
+**결과 코드 (14xx: SP 관리 계정)**
+
+| 코드 | 의미 | HTTP |
+| --- | --- | --- |
+| 1401 | 아이디 또는 비밀번호가 틀림 | 401 |
+| 1402 | 계정이 잠김 (15분) | 423 |
+| 1403 | 비밀번호를 먼저 바꿔야 함 | 403 |
+| 1404 | 계정 없음 | 404 |
+| 1405 | 권한 부족 (SP 재확인) | 403 |
+| 1406 | 자기 계정의 역할·상태는 바꿀 수 없음 | 400 |
+| 1407 | `login_id` 중복 | 409 |
+| 2008 | 비밀번호 규칙 위반 (API 계층) | 400 |
+
+```sql
+CREATE TABLE `admin_account` (
+    `admin_account_id`        INT            UNSIGNED    NOT NULL    AUTO_INCREMENT    COMMENT 'GM 계정 ID',
+    `login_id`                VARCHAR(64)                NOT NULL                      COMMENT '로그인 아이디',
+    `display_name`            VARCHAR(64)                NOT NULL                      COMMENT '표시 이름 (감사 로그 스냅샷)',
+    `role`                    TINYINT        UNSIGNED    NOT NULL                      COMMENT '역할 (1:VIEWER 조회, 2:OPERATOR GM 조작, 3:ADMIN 계정 관리 포함) [codes.AdminRole]',
+    `status`                  TINYINT        UNSIGNED    NOT NULL                      COMMENT '상태 (1:ACTIVE 활성, 2:DISABLED 사용중지) [codes.AdminStatus]',
+    `password_hash`           VARCHAR(160)               NOT NULL                      COMMENT '비밀번호 해시 (scrypt$N$r$p$솔트$해시)',
+    `must_change_password`    TINYINT        UNSIGNED    NOT NULL                      COMMENT '비밀번호 변경 필요 (1:초기 비밀번호)',
+    `fail_count`              TINYINT        UNSIGNED    NOT NULL                      COMMENT '연속 로그인 실패 횟수',
+    `locked_until`            DATETIME(3)                            DEFAULT NULL      COMMENT '잠금 해제 시각 (UTC, NULL:잠금 없음)',
+    `password_changed_at`     DATETIME(3)                NOT NULL                      COMMENT '비밀번호 설정 시각 (UTC)',
+    `created_at`              DATETIME(3)                NOT NULL                      COMMENT '생성 시각 (UTC)',
+    `created_by`              INT            UNSIGNED    NOT NULL                      COMMENT '생성자 계정 ID (0:SYSTEM CLI)',
+    `updated_at`              DATETIME(3)                NOT NULL                      COMMENT '최종 수정 시각 (UTC)',
+    `updated_by`              INT            UNSIGNED                DEFAULT NULL      COMMENT '최종 수정자 계정 ID',
+    PRIMARY KEY (`admin_account_id`),
+    UNIQUE KEY `ux_login_id` (`login_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='GM 계정';
+
+CREATE TABLE `admin_session` (
+    `admin_session_id`    BIGINT         UNSIGNED    NOT NULL    AUTO_INCREMENT    COMMENT '세션 ID',
+    `admin_account_id`    INT            UNSIGNED    NOT NULL                      COMMENT 'GM 계정 ID',
+    `token_hash`          BINARY(32)                 NOT NULL                      COMMENT '세션 토큰 SHA-256 해시',
+    `created_at`          DATETIME(3)                NOT NULL                      COMMENT '로그인 시각 (UTC)',
+    `last_seen_at`        DATETIME(3)                NOT NULL                      COMMENT '마지막 요청 시각 (UTC, 1분 단위 갱신)',
+    `expires_at`          DATETIME(3)                NOT NULL                      COMMENT '최대 수명 만료 시각 (UTC)',
+    `client_ip`           VARCHAR(45)                NOT NULL                      COMMENT '로그인 IP',
+    PRIMARY KEY (`admin_session_id`),
+    UNIQUE KEY `ux_token_hash` (`token_hash`),
+    KEY `ix_admin_account_id` (`admin_account_id`),
+    CONSTRAINT `fk_admin_session_account` FOREIGN KEY (`admin_account_id`) REFERENCES `admin_account` (`admin_account_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='GM 로그인 세션';
+
+-- 로그 DB
+CREATE TABLE `log_admin_audit` (
+    `log_admin_audit_id`    BIGINT         UNSIGNED    NOT NULL    AUTO_INCREMENT    COMMENT '감사 로그 ID',
+    `admin_account_id`      INT            UNSIGNED    NOT NULL                      COMMENT '실행자 계정 ID (0:SYSTEM CLI, 로그인 실패는 대상 계정 또는 0)',
+    `login_id`              VARCHAR(64)                NOT NULL                      COMMENT '실행자 아이디 스냅샷 (로그인 실패는 입력값)',
+    `role`                  TINYINT        UNSIGNED    NOT NULL                      COMMENT '실행 시 역할 스냅샷 (0:미인증) [codes.AdminRole]',
+    `action`                VARCHAR(64)                NOT NULL                      COMMENT '조작 (예: auth.login, account.create)',
+    `target_type`           VARCHAR(32)                            DEFAULT NULL      COMMENT '대상 종류 (account, ranking, season 등)',
+    `target_id`             VARCHAR(64)                            DEFAULT NULL      COMMENT '대상 ID',
+    `result_code`           INT            UNSIGNED    NOT NULL                      COMMENT '결과 코드 (0:성공)',
+    `before_json`           JSON                                   DEFAULT NULL      COMMENT '변경 전 (비밀 필드 가림)',
+    `after_json`            JSON                                   DEFAULT NULL      COMMENT '변경 후 (비밀 필드 가림)',
+    `request_id`            VARCHAR(36)                NOT NULL                      COMMENT '요청 ID (x-request-id, CLI는 실행마다 새로)',
+    `client_ip`             VARCHAR(45)                NOT NULL                      COMMENT '요청 IP (CLI는 빈 문자열)',
+    `created_at`            DATETIME(3)                NOT NULL                      COMMENT '기록 시각 (UTC)',
+    PRIMARY KEY (`log_admin_audit_id`),
+    KEY `ix_created_at` (`created_at`),
+    KEY `ix_admin_account_id_created_at` (`admin_account_id`, `created_at`),
+    KEY `ix_target` (`target_type`, `target_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='GM 조작 감사 로그 (추가 전용)';
+```
 
 ---
 
