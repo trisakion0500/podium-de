@@ -97,6 +97,7 @@ graph LR
     subgraph podium["podium-de"]
         api["API 프로세스"]
         worker["워커 프로세스\n(스케줄러·리컨실러·정산)"]
+        admin["관리 API 프로세스\n(GM)"]
     end
 
     mysql[("MySQL\npodium_de\n(원장, Stored Procedure)")]
@@ -109,9 +110,12 @@ graph LR
     api --> redis
     worker --> mysql
     worker --> redis
+    gm["GM (브라우저·curl)"] -->|"세션 쿠키"| admin
+    admin --> mysql
+    admin -.->|"감사 로그"| logdb
 ```
 
-API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP 상세는
+API, 워커, 관리 API는 같은 코드베이스의 별도 엔트리다. 테이블·SP 상세는
 [`docs/01_DESIGN.md`](docs/01_DESIGN.md) 2\~4장, 7\~8장, 11장 참고.
 
 ---
@@ -226,30 +230,40 @@ podiumDE/
 
 ## 실행 방법
 
+최초 설치
+
 ```bash
 npm install
 cp .env.example .env    # DB 접속 정보(앱·migrate 계정) 채우기
 npm run build           # TypeScript 컴파일(dist/)
 npm run migrate         # 테이블·SP 적용
-npm run start:api       # API 실행
-npm run start:worker    # 워커 실행
-npm run start:admin     # 관리 API 실행
+npm run admin -- create --login-id <아이디> --name <이름>   # 첫 관리 계정
+npm run credential -- create <이름> write,read,reward      # 게임 서버용 API 키
 ```
 
 MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 먼저 만들어 둔다. 상세 절차는
 [`docs/03_DEV_SETUP.md`](docs/03_DEV_SETUP.md).
 
+상시 실행 프로세스 — 운영 중 계속 떠 있어야 하는 것은 이 세 가지다.
+
+| 명령 | 프로세스 | 역할 | 권장 대수 |
+|---|---|---|---|
+| `npm run start:api` | API | 게임 서버의 S2S 요청(제출, 순위 조회) | 2 (목표 피크 460건/초 기준 N+1, [07_K6_LOAD_TEST 1.2](docs/07_K6_LOAD_TEST.md)) |
+| `npm run start:worker` | 워커 | 스케줄러, 리컨실러, 정산, 보상 전달, 아카이브 | 2 (장애 대비, 아래 배포 절 참고) |
+| `npm run start:admin` | 관리 API | GM 계정·세션 쿠키 인증 관리 기능 | 1 |
+
+MySQL 메인, MySQL 로그 DB, Redis는 이 저장소 밖에서 따로 운영하는 인프라다.
+
 API·워커·관리 API는 기동 시 하트비트를 기록한 뒤
 migrate와 같은 락을 잡고 DB 스키마가 패키지와 같은지 확인만 하며, 다르면 하트비트를 지우고 기동하지 않는다.
 적용은 `npm run migrate`로만 한다.
+
+필요할 때 실행하는 명령 — 실행하고 끝나는 명령이며, 상시 프로세스가 아니다.
 
 | 명령 | 설명 |
 |---|---|
 | `npm run build` | TypeScript 컴파일(`dist/`) |
 | `npm run migrate` | 대기 중인 테이블·SP 마이그레이션 적용 |
-| `npm run start:api` | API 프로세스 실행 |
-| `npm run start:worker` | 워커 프로세스 실행 |
-| `npm run start:admin` | 관리 API 프로세스 실행 (GM 계정·세션 쿠키 인증) |
 | `npm run upgrade` | 중단 패치 일괄 실행(중지 → migrate → 기동 → 새 버전 확인) |
 | `npm run credential` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
 | `npm run admin` | 관리 계정 CLI (`create --login-id <아이디> --name <이름>` / `reset-password --login-id <아이디>`). migrate 계정 사용, 초기 비밀번호는 한 번만 표시 |
@@ -329,7 +343,7 @@ upgrade 없이 수동으로 할 때는 전체 프로세스 중지 → `npm run m
 API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 워커는 잡마다 한 곳에서만 돌아
 늘려도 빨라지지 않으므로 장애 대비로 2대를 둔다. 한 대가 죽으면 다른 워커가 다음 차례에 락을
 잡고 이어서 돌린다([01_DESIGN 11.3](docs/01_DESIGN.md#s-11-3)). 인스턴스마다 커넥션
-풀(`DB_POOL_SIZE`)을 따로 가지므로, (API 수 + 워커 수) × `DB_POOL_SIZE`가 MySQL
+풀(`DB_POOL_SIZE`)을 따로 가지므로, (API 수 + 워커 수 + 관리 API 수) × `DB_POOL_SIZE`가 MySQL
 `max_connections`를 넘지 않게 한다.
 
 API·워커는 실행 중 10초마다 `instance_heartbeat`에 하트비트를 남기고, 정상 종료 시 자기 행을
