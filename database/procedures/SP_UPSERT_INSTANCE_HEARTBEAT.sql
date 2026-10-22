@@ -2,7 +2,7 @@ DROP PROCEDURE IF EXISTS `SP_UPSERT_INSTANCE_HEARTBEAT`;
 DELIMITER $$
 CREATE PROCEDURE `SP_UPSERT_INSTANCE_HEARTBEAT` (
     IN i_instance_id     CHAR(36),            -- 인스턴스 ID (기동마다 생성한 UUID)
-    IN i_process_type    TINYINT UNSIGNED,    -- 프로세스 유형 (1:API, 2:WORKER) [codes.ProcessType]
+    IN i_process_type    TINYINT UNSIGNED,    -- 프로세스 유형 (1:API, 2:WORKER, 3:ADMIN) [codes.ProcessType]
     IN i_app_version     VARCHAR(32)          -- 실행 중인 패키지 버전 (package.json version)
 ) COMMENT '인스턴스 하트비트 기록(DB 시각)과 1시간 넘게 갱신 없는 행 정리'
 BEGIN
@@ -11,7 +11,8 @@ BEGIN
     -- 작성 : 2026.10.04 trisakion
     -- 수정 : 2026.10.07 trisakion 정리 DELETE에 ORDER BY 추가 (STATEMENT binlog 안전)
     -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
-    -- 내용 : API·워커가 기동 시와 10초마다 호출한다 (01_DESIGN 11.4, heartbeat.ts).
+    -- 수정 : 2026.10.22 trisakion 프로세스 유형 3:ADMIN(관리 API) 허용
+    -- 내용 : API·워커·관리 API가 기동 시와 10초마다 호출한다 (01_DESIGN 11.4, heartbeat.ts).
     --        - last_seen_at은 DB 시각이다. migrate가 같은 DB 시각으로 "최근 30초"를 비교하므로 호스트 시계 차이와 무관하다.
     --        - 같은 instance_id는 같은 프로세스이므로 last_seen_at만 갱신한다.
     --        - 비정상 종료로 남은 행(1시간 경과)을 함께 지운다. 정리 전용 잡을 따로 두지 않기 위해서다.
@@ -33,7 +34,7 @@ BEGIN
 
     proc_block: BEGIN
         IF i_instance_id IS NULL OR CHAR_LENGTH(i_instance_id) <> 36
-           OR i_process_type IS NULL OR i_process_type NOT IN (1, 2)
+           OR i_process_type IS NULL OR i_process_type NOT IN (1, 2, 3)
            OR i_app_version IS NULL OR i_app_version = '' THEN
             SELECT 1001 AS RESULT;
             LEAVE proc_block;

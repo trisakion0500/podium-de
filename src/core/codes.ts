@@ -147,12 +147,40 @@ export const DdlAuditStatus = {
 /**
  * 프로세스 유형 (instance_heartbeat.process_type)
  * @author trisakion
+ * @modified 2026-10-22 trisakion 관리 API(ADMIN) 추가
  */
 export const ProcessType = {
     /** API 서버 */
     API: 1,
     /** 워커 (스케줄 잡) */
     WORKER: 2,
+    /** 관리 API (01_DESIGN 10.4) */
+    ADMIN: 3,
+} as const;
+
+/**
+ * GM 역할 (admin_account.role, 01_DESIGN 10.4, D-74). 숫자가 클수록 권한이 크다 — "역할 ≥ 필요 역할"로 판단한다.
+ * 알 수 없는 값은 VIEWER로 본다 (SP와 FN_GET_ADMIN_ROLE도 같은 규칙). 0은 감사 로그의 미인증(로그인 실패)이다
+ * @author trisakion
+ */
+export const AdminRole = {
+    /** 조회 */
+    VIEWER: 1,
+    /** GM 조작 (검수·제재·랭킹 수정 등) */
+    OPERATOR: 2,
+    /** OPERATOR 권한과 계정 관리 */
+    ADMIN: 3,
+} as const;
+
+/**
+ * GM 계정 상태 (admin_account.status). 계정은 지우지 않고 사용중지한다
+ * @author trisakion
+ */
+export const AdminStatus = {
+    /** 활성 */
+    ACTIVE: 1,
+    /** 사용중지. 세션이 모두 지워지고 로그인할 수 없다 */
+    DISABLED: 2,
 } as const;
 
 /**
@@ -183,7 +211,7 @@ export const PartitionTarget = {
 /**
  * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
  * SP는 같은 숫자를 리터럴로 쓴다. API 응답 result로 그대로 나가며, API 계층 코드(ApiResult 20xx)와 겹치지 않게
- * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회). 도메인당 99개, 넘치면 예비 대역을 준다.
+ * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회, 1400번대 관리 계정). 도메인당 99개, 넘치면 예비 대역을 준다.
  * @author trisakion
  * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
  * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
@@ -192,6 +220,7 @@ export const PartitionTarget = {
  * @modified 2026-10-10 trisakion 정산 SP 코드(1009~1013) 추가
  * @modified 2026-10-11 trisakion 확정 SP 코드(1014~1015) 추가
  * @modified 2026-10-14 trisakion SETTLED 전이 코드(1016) 추가
+ * @modified 2026-10-22 trisakion 관리 계정 SP 코드(1401~1407) 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -248,6 +277,20 @@ export const SpResult = {
     CREDENTIAL_ALREADY_REVOKED: 1202,
     /** 조회: 지금 시각이 [start_at, end_at)에 드는 시즌 행이 없음 (시즌 사이 공백, 종료된 랭킹) */
     CURRENT_SEASON_NOT_FOUND: 1301,
+    /** 관리 계정: 아이디 또는 비밀번호가 틀림. 없는 아이디·사용중지 계정도 같은 코드다 — 아이디 존재를 알리지 않는다 */
+    ADMIN_LOGIN_FAILED: 1401,
+    /** 관리 계정: 연속 5회 실패로 15분 잠김. 비밀번호가 맞아도 잠긴 동안은 이 코드다 */
+    ADMIN_LOCKED: 1402,
+    /** 관리 계정: 초기 비밀번호라 먼저 바꿔야 함 (me·비밀번호 변경·로그아웃만 허용) */
+    ADMIN_PASSWORD_CHANGE_REQUIRED: 1403,
+    /** 관리 계정: 대상 계정 없음 */
+    ADMIN_NOT_FOUND: 1404,
+    /** 관리 계정: SP가 요청자 역할을 다시 확인해 권한 부족 (FN_GET_ADMIN_ROLE) */
+    ADMIN_FORBIDDEN: 1405,
+    /** 관리 계정: 자기 계정의 역할 변경·사용중지 */
+    ADMIN_SELF_CHANGE: 1406,
+    /** 관리 계정: login_id 중복 (대소문자 무시) */
+    ADMIN_LOGIN_ID_TAKEN: 1407,
 } as const;
 
 /**
@@ -257,13 +300,14 @@ export const SpResult = {
  * @author trisakion
  * @modified 2026-10-07 trisakion 제출 빈도 초과(2006) 추가
  * @modified 2026-10-07 trisakion 순위 집계 중(2007) 추가
+ * @modified 2026-10-22 trisakion 관리 API 세션·역할·Origin을 2002·2003에 포함, 비밀번호 규칙 위반(2008) 추가
  */
 export const ApiResult = {
     /** 요청 형식 오류 (스키마 검증 실패, JSON 파싱 실패 등) */
     VALIDATION_FAILED: 2001,
-    /** API 키가 없거나 등록되지 않음 */
+    /** API 키가 없거나 등록되지 않음. 관리 API는 세션 쿠키가 없거나 만료됨 */
     UNAUTHORIZED: 2002,
-    /** API 키에 이 요청의 권한 비트가 없음 */
+    /** API 키에 이 요청의 권한 비트가 없음. 관리 API는 역할 부족 또는 허용되지 않은 Origin */
     FORBIDDEN: 2003,
     /** 없는 경로 */
     NOT_FOUND: 2004,
@@ -273,6 +317,8 @@ export const ApiResult = {
     TOO_MANY_REQUESTS: 2006,
     /** 순위 조회 불가: 센티넬 없음(준비 전 — 워커 정지·시즌 행 지연, 재구축 중, 01_DESIGN 5.3·6.3) 또는 Redis 연결 끊김·시간 초과. 잠시 후 재시도한다 */
     RANKING_UNAVAILABLE: 2007,
+    /** 관리 API: 비밀번호 규칙 위반 (12~128자, 아이디와 같으면 안 됨) */
+    PASSWORD_POLICY: 2008,
     /** 분류되지 않은 앱 예외 */
     INTERNAL_ERROR: 5000,
     /** SP 내부 시스템 오류 (SP RESULT 50001, db.ts callSp가 던짐) */

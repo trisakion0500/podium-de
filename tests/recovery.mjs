@@ -1,17 +1,19 @@
 /**
  * 3단계 자가 복구 회귀 테스트 (01_DESIGN 6장, D-60). Redis를 강제로 MySQL과 어긋나게 만들고 복구되는지 본다.
  * 4단계 시즌 스케줄러(01_DESIGN 3.3, 3.5)의 시즌 계산·선행 생성·상태 전이와 정산(7.1~7.6), 결과 조회·보상 전달(7.7, 8.5),
- * 로그 DB 일 파티션 정리·월 테이블 이동(4.5), 시즌 백업 분리(8.2, 8.3)와 장애 주입(요청 오류, 동시성, 의존 서비스 장애·무응답, 프로세스 강제 종료)도 함께 본다.
+ * 로그 DB 일 파티션 정리·월 테이블 이동(4.5), 시즌 백업 분리(8.2, 8.3), 관리 API·GM 인증(10.4)과 장애 주입(요청 오류, 동시성, 의존 서비스 장애·무응답, 프로세스 강제 종료)도 함께 본다.
  * 로컬 개발 DB·Redis 전용이다. 운영 DB에 실행하지 않는다.
  *
  * 순서 (프로젝트 루트에서):
  *   npm run build
  *   node tests/recovery.mjs [반복 수, 기본 3]
+ *   (ONLY=관리처럼 주면 이름에 그 문자열이 든 구간만 돈다)
  *   (KEEP_BACKUP_TABLES=1이면 테스트가 만든 시즌 백업 테이블을 남긴다. 확인한 뒤 지우고 다음 실행을 한다)
  *
- * - 워커와 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199)부터 6개. 강제 종료라 하트비트가 남아,
+ * - 워커와 API·관리 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199)부터 6개, 관리 API는 그다음 1개. 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
- * - 테스트 랭킹 940~971을 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션·시즌 백업 테이블, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키).
+ * - 테스트 랭킹 940~971을 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션·시즌 백업 테이블, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키,
+ *   rtest- 관리 계정·세션·감사 로그).
  * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 월 테이블로 옮긴다.
  *   테스트가 쓰는 달(100일 전 무렵, 12·13개월 전)의 월 테이블은 시작 전과 끝난 뒤에 지운다.
  * - API 키 원문은 메모리에만 두고 출력하지 않는다.
@@ -55,6 +57,8 @@ const PORT = Number(process.env.TEST_PORT ?? 3199);
 const BASE = `http://localhost:${PORT}`;
 /** 1이면 테스트가 만든 시즌 백업 테이블을 지우지 않는다 (확인용, 1회 실행 전용 — 다음 실행 전에 지워야 B 구간이 맞는다) */
 const KEEP_BACKUP_TABLES = process.env.KEEP_BACKUP_TABLES === '1';
+/** 구간 이름에 이 문자열이 든 구간만 돌린다 (고치는 중 빠른 확인용, 예: ONLY=관리). 커밋 전에는 전체를 돌린다 */
+const ONLY = process.env.ONLY ?? '';
 
 const M = createPool('MIGRATE');
 const A = createPool('APP');
@@ -115,6 +119,14 @@ async function clean() {
         if (!KEEP_BACKUP_TABLES && ALL_IDS.includes(Number(/_r(\d+)_s/.exec(n)[1])))
             await q(`DROP TABLE \`${n}\``);
     await q("DELETE FROM api_credential WHERE key_name LIKE 'rtest-%'");
+    // 관리 계정은 지우지 않는 설계지만 테스트 계정은 픽스처라 지운다. 감사 로그도 그 계정·대상 행만 지운다.
+    const adminIds = (await q("SELECT admin_account_id id FROM admin_account WHERE login_id LIKE 'rtest-%'")).map((r) => r.id);
+    if (adminIds.length) {
+        await LM.query("DELETE FROM log_admin_audit WHERE admin_account_id IN (?) OR (target_type = 'account' AND target_id IN (?))", [adminIds, adminIds.map(String)]);
+        await q('DELETE FROM admin_session WHERE admin_account_id IN (?)', [adminIds]);
+        await q('DELETE FROM admin_account WHERE admin_account_id IN (?)', [adminIds]);
+    }
+    await LM.query("DELETE FROM log_admin_audit WHERE login_id LIKE 'rtest-%'");
     await LM.query('DELETE FROM log_ranking_submit WHERE ranking_id IN (?)', [ALL_IDS]);
     for (const id of ALL_IDS)
         for await (const keys of R.scanIterator({ MATCH: `${config.redis.keyPrefix}rk:{${id}}*`, COUNT: 1000 }))
@@ -1977,9 +1989,10 @@ async function apiFaults() {
     const cut = hbRes.filter((r) => r.result === 50001 && r.ms >= 6500).length;
     const hbOk = hbRes.filter((r) => r.result === 0).length;
     const [{ n: hbRows }] = await q('SELECT COUNT(member_id) n FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id LIKE ?', [IDS.fxSum, `${hb}-%`]);
-    // 하트비트·재조회가 같은 풀을 쓰므로 바로 실패하는 수는 몇 개 더 많을 수 있다
+    // 하트비트·재조회가 같은 풀을 쓰므로 바로 실패하는 수는 몇 개 더 많을 수 있다.
+    // 7초에 잘린 호출은 버린 커넥션의 SP가 재개 뒤 커밋될 수 있다(10.3, D-71 — 같은 requestId 재시도로 맞춘다). 그래서 행 수는 잘린 수만큼 더 많을 수 있다.
     check(`X22 메인 DB 무응답에 ${burstN}건 동시: 대기열 초과 ~50건 즉시 50001, DB에 보낸 호출은 7초에 50001·unreachable 1줄, 나머지는 재개 뒤 반영, 새 제출 즉시 성공·recovered 1줄`,
-        fast >= 50 && fast <= 53 && cut >= 1 && fast + cut + hbOk === burstN && Number(hbRows) === hbOk + 1 && hbAfter.result === 0 && hbAfterMs < 1000
+        fast >= 50 && fast <= 53 && cut >= 1 && fast + cut + hbOk === burstN && Number(hbRows) >= hbOk + 1 && Number(hbRows) <= hbOk + 1 + cut && hbAfter.result === 0 && hbAfterMs < 1000
         && hungWarn >= 6500 && hs1[0] - hs0[0] === 1 && hs1[1] - hs0[1] === 1,
         `(즉시 ${fast}, 7초 ${cut}, 반영 ${hbOk}/${hbRows}행, 경고 ${hungWarn}ms, 재개 뒤 ${hbAfter.result} ${hbAfterMs}ms, 상태 로그 +${hs1[0] - hs0[0]}/+${hs1[1] - hs0[1]}, 기타 ${hbRes.filter((r) => r.result !== 0 && r.result !== 50001).map((r) => r.result)})`);
 
@@ -2131,6 +2144,227 @@ async function workerFaults() {
         `(종료 시점 PENDING ${midFinal}, 종료 후 상태 ${stuck}, ${delivering}ms)`);
 }
 
+// ------------------------------------------------------------------------------------------------ 관리 API
+
+/** 관리 API 포트. API 구간이 TEST_PORT ~ TEST_PORT+5를 쓴다 */
+const ADMIN_PORT = PORT + 6;
+const ADMIN_BASE = `http://localhost:${ADMIN_PORT}`;
+const ADMIN_ORIGIN = 'https://gm.test';
+
+/**
+ * 관리 CLI를 실행한다. 초기 비밀번호는 표준 출력에서 읽어 메모리에만 둔다.
+ * @param args CLI 인자
+ * @returns 종료 코드와 출력된 초기 비밀번호 (없으면 null)
+ */
+async function adminCli(args) {
+    const p = spawn(process.execPath, ['dist/adminctl.js', ...args], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, INSTANCE_ID: 'tcli' } });
+    let out = '';
+    p.stdout.on('data', (d) => (out += d));
+    const code = await new Promise((ok) => p.on('exit', ok));
+    return { code, password: /초기 비밀번호[^\n]*\n(\S+)/.exec(out)?.[1] ?? null };
+}
+
+/**
+ * 관리 API를 부른다.
+ * @param method HTTP 메서드
+ * @param path 경로 (/admin/v1 뒤)
+ * @param o 바디, 세션 토큰, Origin
+ * @returns { status, body, token(새 세션 쿠키 값, 지우기면 ''), setCookie }
+ */
+async function adm(method, path, { body, token, origin } = {}) {
+    const headers = {};
+    if (body !== undefined)
+        headers['content-type'] = 'application/json';
+    if (token)
+        headers.cookie = `__Host-podium_admin=${token}`;
+    if (origin)
+        headers.origin = origin;
+    const res = await fetch(`${ADMIN_BASE}/admin/v1${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const setCookie = res.headers.getSetCookie()[0] ?? '';
+    const m = /^__Host-podium_admin=([^;]*)/.exec(setCookie);
+    return { status: res.status, body: await res.json(), token: m ? m[1] : undefined, setCookie };
+}
+
+/**
+ * 로그인하고 세션 토큰을 돌려준다.
+ * @param loginId 아이디
+ * @param password 비밀번호
+ * @returns { token, body }
+ */
+async function admLogin(loginId, password) {
+    const r = await adm('POST', '/auth/login', { body: { loginId, password } });
+    return { token: r.token, body: r.body, status: r.status };
+}
+
+/**
+ * 관리 API 회귀 (01_DESIGN 10.4, D-74): 첫 admin CLI, 로그인·쿠키 속성, 초기 비밀번호 변경 강제, 비밀번호 규칙·변경과 세션 종료,
+ * 역할, 계정 생성·중복·수정·사용중지·초기화·잠금 해제, 연속 실패 잠금(동시 실패 포함), 잠금 중 비밀번호 대입 차단, Origin 검사,
+ * 유휴·최대 수명 만료, SP 역할 재확인, 감사 로그와 비밀번호 마스킹.
+ * 포트: TEST_PORT+6.
+ * @returns 없음
+ */
+async function adminScenarios() {
+    const created = await adminCli(['create', '--login-id', 'rtest-root', '--name', 'Root']);
+    const dup = await adminCli(['create', '--login-id', 'RTEST-ROOT', '--name', 'Root2']);
+    const [rootRow] = await q("SELECT admin_account_id id, role, status, must_change_password mc FROM admin_account WHERE login_id = 'rtest-root'");
+    check('G1 CLI 첫 admin 생성·대소문자 무시 중복 거부', created.code === 0 && created.password?.length === 16 && rootRow?.role === 3 && rootRow.mc === 1 && dup.code === 1,
+        `(code ${created.code}/${dup.code})`);
+    const rootId = rootRow.id;
+
+    spawnTracked('tadm', 'admin', { ADMIN_PORT: String(ADMIN_PORT), ADMIN_ORIGINS: ADMIN_ORIGIN });
+    const t0 = Date.now();
+    let first;
+    while (Date.now() - t0 < 20000) {
+        try {
+            first = await adm('POST', '/auth/login', { body: { loginId: 'rtest-root', password: created.password } });
+            break;
+        } catch {
+            await sleep(200);
+        }
+    }
+    const attrs = first?.setCookie ?? '';
+    check('G2 로그인·쿠키 속성', first?.status === 200 && first.body.data?.mustChangePassword === true && first.token?.length === 43
+        && ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/'].every((a) => attrs.includes(a)) && !/Domain=/i.test(attrs), attrs.replace(/=[^;]*/, '=***'));
+
+    const blocked = await adm('GET', '/accounts', { token: first.token });
+    const me = await adm('GET', '/auth/me', { token: first.token });
+    check('G3 초기 비밀번호면 계정 목록 1403, me는 허용', blocked.body.result === 1403 && me.status === 200 && me.body.data?.role === 3, `(${blocked.body.result}, ${me.status})`);
+
+    const short = await adm('POST', '/auth/password', { token: first.token, body: { currentPassword: created.password, newPassword: 'short' } });
+    const wrong = await adm('POST', '/auth/password', { token: first.token, body: { currentPassword: 'not-the-password', newPassword: 'root-password-0001' } });
+    const second = await admLogin('rtest-root', created.password);
+    const changed = await adm('POST', '/auth/password', { token: first.token, body: { currentPassword: created.password, newPassword: 'root-password-0001' } });
+    const oldSession = await adm('GET', '/auth/me', { token: first.token });
+    const otherSession = await adm('GET', '/auth/me', { token: second.token });
+    const root = changed.token;
+    const list = await adm('GET', '/accounts', { token: root });
+    const [{ fc }] = await q('SELECT fail_count fc FROM admin_account WHERE admin_account_id = ?', [rootId]);
+    check('G4 비밀번호 규칙 2008·현재 비밀번호 틀림 1401·변경 후 기존 세션 모두 종료·새 세션 발급',
+        short.body.result === 2008 && wrong.body.result === 1401 && changed.status === 200 && changed.body.data?.mustChangePassword === false
+        && oldSession.body.result === 2002 && otherSession.body.result === 2002 && list.status === 200 && list.body.data.total >= 1 && fc === 0,
+        `(${short.body.result}, ${wrong.body.result}, ${changed.status}, ${oldSession.body.result}/${otherSession.body.result}, ${list.status})`);
+
+    const op = await adm('POST', '/accounts', { token: root, body: { loginId: 'rtest-op', name: 'Op', role: 2 } });
+    const opDup = await adm('POST', '/accounts', { token: root, body: { loginId: 'RTEST-OP', name: 'Op2', role: 2 } });
+    const badId = await adm('POST', '/accounts', { token: root, body: { loginId: 'rtest op', name: 'Op3', role: 2 } });
+    const opId = op.body.data?.accountId;
+    const opInitial = op.body.data?.initialPassword;
+    await sleep(300);
+    const adminLog = existsSync('logs/app.log.admin.tadm') ? readFileSync('logs/app.log.admin.tadm', 'utf8') : '';
+    check('G5 계정 생성·중복 1407·아이디 형식 2001·응답 로그에 초기 비밀번호 없음',
+        op.status === 200 && opInitial?.length === 16 && opDup.body.result === 1407 && badId.body.result === 2001
+        && adminLog.includes('"initialPassword":"***"') && !adminLog.includes(opInitial) && !adminLog.includes(created.password) && !adminLog.includes('root-password-0001'),
+        `(${op.status}, ${opDup.body.result}, ${badId.body.result})`);
+
+    const opFirst = await admLogin('rtest-op', opInitial);
+    const opSet = await adm('POST', '/auth/password', { token: opFirst.token, body: { currentPassword: opInitial, newPassword: 'op-password-00001' } });
+    const opToken = opSet.token;
+    const opList = await adm('GET', '/accounts', { token: opToken });
+    const opAudit = await adm('GET', '/audit', { token: opToken });
+    check('G6 operator는 계정·감사 API 2003', opList.body.result === 2003 && opAudit.body.result === 2003, `(${opList.body.result}, ${opAudit.body.result})`);
+
+    // 연속 실패 잠금: 4번은 1401, 5번째에 1402. 잠긴 동안은 맞는 비밀번호도 1402
+    const fails = [];
+    for (let i = 0; i < 5; i++)
+        fails.push((await admLogin('rtest-op', `wrong-password-${i}`)).body.result);
+    const lockedRight = await admLogin('rtest-op', 'op-password-00001');
+    // 잠긴 동안 세션으로 현재 비밀번호를 대입해도 비교하지 않는다 (맞는 값도 1402)
+    const lockedChange = await adm('POST', '/auth/password', { token: opToken, body: { currentPassword: 'op-password-00001', newPassword: 'op-password-00002' } });
+    const unlock = await adm('POST', `/accounts/${opId}/unlock`, { token: root, body: {} });
+    const afterUnlock = await admLogin('rtest-op', 'op-password-00001');
+    check('G7 5회 실패 잠금·잠금 중 로그인과 비밀번호 대입 1402·admin 잠금 해제',
+        fails.join() === '1401,1401,1401,1401,1402' && lockedRight.body.result === 1402 && lockedChange.body.result === 1402 && unlock.status === 200 && afterUnlock.status === 200,
+        `(${fails.join()}, ${lockedRight.body.result}, ${lockedChange.body.result}, ${unlock.status}, ${afterUnlock.status})`);
+
+    // 동시 실패 5건: 계정 행 조건부 UPDATE라 횟수가 빠지지 않고 정확히 잠긴다
+    await q('UPDATE admin_account SET fail_count = 0, locked_until = NULL WHERE admin_account_id = ?', [opId]);
+    const parallel = await Promise.all(Array.from({ length: 5 }, (_, i) => admLogin('rtest-op', `parallel-wrong-${i}`)));
+    const [lockState] = await q('SELECT fail_count fc, locked_until > UTC_TIMESTAMP(3) locked FROM admin_account WHERE admin_account_id = ?', [opId]);
+    check('G8 동시 실패 5건 → 잠김', lockState.locked === 1 && lockState.fc === 0 && parallel.every((r) => [1401, 1402].includes(r.body.result)),
+        `(locked ${lockState.locked}, fc ${lockState.fc})`);
+    await adm('POST', `/accounts/${opId}/unlock`, { token: root, body: {} });
+
+    const nobody = await admLogin('rtest-nobody', 'whatever-password');
+    const opLive = (await admLogin('rtest-op', 'op-password-00001')).token;
+    const disable = await adm('PATCH', `/accounts/${opId}`, { token: root, body: { status: 2 } });
+    const afterDisable = await adm('GET', '/auth/me', { token: opLive });
+    const disabledLogin = await admLogin('rtest-op', 'op-password-00001');
+    const selfRole = await adm('PATCH', `/accounts/${rootId}`, { token: root, body: { role: 1 } });
+    const selfStatus = await adm('PATCH', `/accounts/${rootId}`, { token: root, body: { status: 2 } });
+    const selfName = await adm('PATCH', `/accounts/${rootId}`, { token: root, body: { name: 'Root Renamed', role: 3 } });
+    check('G9 없는 아이디·사용중지 1401·사용중지 즉시 세션 종료·자기 역할/상태 1406(같은 값·이름은 허용)',
+        nobody.body.result === 1401 && disable.status === 200 && afterDisable.body.result === 2002 && disabledLogin.body.result === 1401
+        && selfRole.body.result === 1406 && selfStatus.body.result === 1406 && selfName.status === 200,
+        `(${nobody.body.result}, ${afterDisable.body.result}, ${disabledLogin.body.result}, ${selfRole.body.result}/${selfStatus.body.result}/${selfName.status})`);
+
+    await adm('PATCH', `/accounts/${opId}`, { token: root, body: { status: 1 } });
+    const opAgain = (await admLogin('rtest-op', 'op-password-00001')).token;
+    const before = await adm('GET', '/accounts', { token: opAgain });
+    await adm('PATCH', `/accounts/${opId}`, { token: root, body: { role: 3 } });
+    const promoted = await adm('GET', '/accounts', { token: opAgain });
+    check('G10 역할 변경이 다음 요청부터 적용', before.body.result === 2003 && promoted.status === 200, `(${before.body.result} → ${promoted.status})`);
+
+    const evil = await adm('POST', '/auth/login', { origin: 'https://evil.test', body: { loginId: 'rtest-root', password: 'root-password-0001' } });
+    const good = await adm('POST', '/auth/login', { origin: ADMIN_ORIGIN, body: { loginId: 'rtest-root', password: 'root-password-0001' } });
+    const evilGet = await adm('GET', '/auth/me', { origin: 'https://evil.test', token: root });
+    check('G11 Origin 검사 (쓰기만, 허용 목록)', evil.body.result === 2003 && good.status === 200 && evilGet.status === 200, `(${evil.body.result}, ${good.status}, ${evilGet.status})`);
+
+    const reset = await adm('POST', `/accounts/${opId}/password-reset`, { token: root, body: {} });
+    const afterReset = await adm('GET', '/auth/me', { token: opAgain });
+    const resetLogin = await admLogin('rtest-op', reset.body.data?.initialPassword);
+    const cliReset = await adminCli(['reset-password', '--login-id', 'rtest-op']);
+    const cliLogin = await admLogin('rtest-op', cliReset.password);
+    check('G12 admin 초기화·CLI 초기화: 기존 세션 종료, 새 초기 비밀번호로 로그인, 변경 요구',
+        reset.status === 200 && afterReset.body.result === 2002 && resetLogin.body.data?.mustChangePassword === true
+        && cliReset.code === 0 && cliLogin.body.data?.mustChangePassword === true && resetLogin.token !== undefined,
+        `(${reset.status}, ${afterReset.body.result}, cli ${cliReset.code})`);
+
+    const idle = (await admLogin('rtest-root', 'root-password-0001')).token;
+    const maxed = (await admLogin('rtest-root', 'root-password-0001')).token;
+    await q("UPDATE admin_session SET last_seen_at = UTC_TIMESTAMP(3) - INTERVAL 31 MINUTE WHERE token_hash = UNHEX(SHA2(?, 256))", [idle]);
+    await q("UPDATE admin_session SET expires_at = UTC_TIMESTAMP(3) - INTERVAL 1 SECOND WHERE token_hash = UNHEX(SHA2(?, 256))", [maxed]);
+    const idleRes = await adm('GET', '/auth/me', { token: idle });
+    const maxRes = await adm('GET', '/auth/me', { token: maxed });
+    const [{ n: left }] = await q('SELECT COUNT(admin_session_id) n FROM admin_session WHERE token_hash IN (UNHEX(SHA2(?, 256)), UNHEX(SHA2(?, 256)))', [idle, maxed]);
+    const fresh = (await admLogin('rtest-root', 'root-password-0001')).token;
+    await q("UPDATE admin_session SET last_seen_at = UTC_TIMESTAMP(3) - INTERVAL 2 MINUTE WHERE token_hash = UNHEX(SHA2(?, 256))", [fresh]);
+    await adm('GET', '/auth/me', { token: fresh });
+    const [{ age }] = await q('SELECT TIMESTAMPDIFF(SECOND, last_seen_at, UTC_TIMESTAMP(3)) age FROM admin_session WHERE token_hash = UNHEX(SHA2(?, 256))', [fresh]);
+    const logout = await adm('POST', '/auth/logout', { token: fresh, body: {} });
+    const afterLogout = await adm('GET', '/auth/me', { token: fresh });
+    check('G13 유휴·최대 수명 만료 2002와 행 삭제, last_seen 갱신, 로그아웃',
+        idleRes.body.result === 2002 && maxRes.body.result === 2002 && left === 0 && age < 5 && logout.status === 200 && logout.setCookie.includes('Max-Age=0') && afterLogout.body.result === 2002,
+        `(${idleRes.body.result}, ${maxRes.body.result}, 남은 ${left}, age ${age}, ${afterLogout.body.result})`);
+
+    // SP 역할 재확인: 앱을 거치지 않고 operator·사용중지 계정을 요청자로 넘긴다
+    await q('UPDATE admin_account SET role = 2 WHERE admin_account_id = ?', [opId]);
+    const spOp = await callSp(A, 'SP_UPDATE_ADMIN_ACCOUNT', [opId, rootId, 'hijack', null, null]);
+    await q('UPDATE admin_account SET role = 3, status = 2 WHERE admin_account_id = ?', [opId]);
+    const spDisabled = await callSp(A, 'SP_RESET_ADMIN_PASSWORD', [opId, rootId, 'scrypt$x']);
+    const spUnknownRole = await (async () => {
+        await q('UPDATE admin_account SET role = 9, status = 1 WHERE admin_account_id = ?', [opId]);
+        return callSp(A, 'SP_UNLOCK_ADMIN_ACCOUNT', [opId, rootId]);
+    })();
+    const [{ name: rootName }] = await q('SELECT display_name name FROM admin_account WHERE admin_account_id = ?', [rootId]);
+    check('G14 SP 역할 재확인: operator·사용중지·알 수 없는 역할 1405',
+        spOp.result === 1405 && spDisabled.result === 1405 && spUnknownRole.result === 1405 && rootName === 'Root Renamed',
+        `(${spOp.result}, ${spDisabled.result}, ${spUnknownRole.result})`);
+
+    const rootToken = (await admLogin('rtest-root', 'root-password-0001')).token;
+    await sleep(300);
+    const audit = await adm('GET', `/audit?accountId=${rootId}&size=100`, { token: rootToken });
+    const actions = new Set(audit.body.data?.items.map((r) => r.action));
+    const [{ n: failRows }] = (await LM.query("SELECT COUNT(log_admin_audit_id) n FROM log_admin_audit WHERE action = 'auth.login' AND role = 0 AND result_code IN (1401, 1402) AND login_id IN ('rtest-op', 'rtest-nobody')"))[0];
+    const [{ n: cliRows }] = (await LM.query("SELECT COUNT(log_admin_audit_id) n FROM log_admin_audit WHERE admin_account_id = 0 AND login_id = 'SYSTEM' AND target_id IN (?, ?)", [String(rootId), String(opId)]))[0];
+    const [updateRow] = (await LM.query("SELECT before_json b, after_json a FROM log_admin_audit WHERE action = 'account.update' AND target_id = ? AND result_code = 0 ORDER BY log_admin_audit_id LIMIT 1", [String(opId)]))[0];
+    const auditText = JSON.stringify(audit.body);
+    check('G15 감사 로그: 조작 기록, 로그인 실패(역할 0), CLI(SYSTEM), 변경 전·후, 비밀번호 없음',
+        ['auth.login', 'auth.password', 'auth.logout', 'account.create', 'account.update', 'account.unlock', 'account.password_reset'].every((a) => actions.has(a))
+        && failRows >= 10 && cliRows >= 2 && updateRow?.b?.status === 1 && updateRow?.a?.status === 2
+        && !auditText.includes('root-password-0001') && !auditText.includes(opInitial),
+        `(${[...actions].join(',')}, 실패 ${failRows}, CLI ${cliRows})`);
+}
+
 // ------------------------------------------------------------------------------------------------ 실행
 
 /** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
@@ -2154,7 +2388,7 @@ try {
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
         for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios], ['시즌 백업 분리', archiveScenarios],
-            ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]]) {
+            ['관리 API', adminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);

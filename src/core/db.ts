@@ -2,7 +2,7 @@ import mysql from 'mysql2/promise';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
 import { ApiResult } from './codes.js';
 import { config, dbCredential, type DbAccount, type DbTarget } from './config.js';
-import { BusinessException } from './errors.js';
+import { BusinessException, ERROR_MAP, type ErrorCode } from './errors.js';
 import { logger } from './logger.js';
 
 const ER_SP_DOES_NOT_EXIST = 1305;
@@ -176,6 +176,25 @@ export async function callSp(db: Pool | PoolConnection, name: string, params: un
             errorNo: failed.ERROR_NO,
         });
     return { result: head.RESULT, rows };
+}
+
+/**
+ * SP를 부르고 실패 RESULT를 응답 코드(BusinessException)로 던진다. 결과·보상 API와 관리 API가 함께 쓴다.
+ * ERROR_MAP에 없는 코드는 SP와 앱이 어긋난 것이라 앱 오류(5000)로 던진다.
+ * @param db 풀 또는 전용 커넥션
+ * @param name SP 이름
+ * @param params IN 파라미터
+ * @returns 데이터 행
+ * @author trisakion
+ */
+export async function callSpRows(db: Pool | PoolConnection, name: string, params: unknown[]): Promise<RowDataPacket[]> {
+    const { result, rows } = await callSp(db, name, params);
+    if (result !== 0) {
+        if (!(result in ERROR_MAP))
+            throw new Error(`${name}: unmapped result ${result}`);
+        throw new BusinessException(result as ErrorCode);
+    }
+    return rows;
 }
 
 /**

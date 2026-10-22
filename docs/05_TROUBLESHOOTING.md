@@ -3,7 +3,7 @@
 # 장애 대응과 문제 해결 기록
 
 1장은 운영 중 증상에서 원인과 조치를 찾는 표, 2장은 개발 중 실제로 겪은 문제와 해결 기록이다.
-로그는 `logs/app.log.<실행 파일 이름>`(오류만 `logs/err.log.<...>`)에 남는다. 실행 파일 이름은 `api`, `worker`, `migrate`, `upgrade`, `apikey` 중 하나다. 여러 인스턴스면 뒤에 인스턴스 번호가 붙는다(예: `logs/app.log.api.1`). 경로는 `config/log4js.json`의 `filename`이다. 요청 하나는 응답 헤더 `x-request-id` 값으로 두 줄(`-->` 요청, `<--` 응답)을 찾는다.
+로그는 `logs/app.log.<실행 파일 이름>`(오류만 `logs/err.log.<...>`)에 남는다. 실행 파일 이름은 `api`, `worker`, `admin`, `migrate`, `upgrade`, `apikey`, `adminctl` 중 하나다. 여러 인스턴스면 뒤에 인스턴스 번호가 붙는다(예: `logs/app.log.api.1`). 경로는 `config/log4js.json`의 `filename`이다. 요청 하나는 응답 헤더 `x-request-id` 값으로 두 줄(`-->` 요청, `<--` 응답)을 찾는다.
 
 ---
 
@@ -25,6 +25,8 @@
 | `환경 변수 DELIVERY_INTERVAL_MS·DELIVERY_STALL_SEC·DELIVERY_BACKLOG_MAX은(는) 1 이상이어야 합니다` (기동 거부) | 보상 전달 잡 설정을 0 이하로 넣었다 | 1 이상으로 설정. 경고를 끄는 설정은 없다 |
 | `worker startup failed` | 워커가 기동 시 랭킹 정의를 읽지 못했다 | DB 연결과 `SP_LIST_RANKING_DEFINITION` 적용 여부 확인. 워커가 없으면 새 시즌 센티넬이 생기지 않아 조회가 계속 2007이다 |
 | `no active api credential — all requests will be rejected` | 활성 API 키가 없다 | `npm run credential -- create <이름> <권한>` |
+| `ER_BINLOG_CREATE_ROUTINE_NEED_SUPER` (1419, migrate가 `CREATE FUNCTION`에서 멈춤) | binlog가 켜진 MySQL에서 `log_bin_trust_function_creators = 0` | root로 `SET PERSIST log_bin_trust_function_creators = 1;` 후 다시 migrate ([D-80](02_DECISIONS.md#d-80)) |
+| `admin listening ... (ADMIN_ORIGINS empty: browser writes are rejected)` | 허용 Origin이 비어 있다 | 운영 화면 주소를 `ADMIN_ORIGINS`에 넣는다. curl·CLI처럼 Origin이 없는 호출은 그대로 된다 |
 | upgrade `[2/5 wait stop] ... 멈추지 않았습니다` | 중지 명령 후에도 하트비트가 남았다 | 남은 인스턴스를 확인해 중지. 비정상 종료면 30초 뒤 재실행 |
 
 ## 1.2 API 응답
@@ -93,6 +95,23 @@
 | `season backups past history_retention: N tables …` (warn) | 시즌 종료 후 `history_retention`일이 지난 백업 테이블이 있다 | 필요하면 덤프한 뒤 `DROP TABLE`(또는 별도 스키마로 `RENAME`). 모두 정리되면 `… none left`가 남는다. 무기한 보관이면 `history_retention = 0` |
 
 ---
+
+## 1.5 관리 API 응답
+
+관리 API(`npm run start:admin`, [01_DESIGN 10.4](01_DESIGN.md#s-10-4))의 결과 코드다. 응답 형식은 S2S API와 같다.
+
+| result / HTTP | 의미 | GM 조치 |
+|---|---|---|
+| 1401 / 401 | 아이디 또는 비밀번호가 틀림. 없는 아이디·사용중지 계정도 같다. 비밀번호 변경에서는 현재 비밀번호가 틀림 | 다시 입력. 연속 5회면 잠긴다 |
+| 1402 / 423 | 연속 5회 실패로 15분 잠김. 잠긴 동안은 맞는 비밀번호도 거부(비밀번호 변경 포함) | 15분 뒤 재시도, 또는 admin이 `unlock`. 모든 admin이 잠기면 `npm run admin -- reset-password --login-id <아이디>` |
+| 1403 / 403 | 초기 비밀번호 상태 | `POST /admin/v1/auth/password`로 먼저 바꾼다 |
+| 1404 / 404 | 없는 계정 ID | ID 확인 |
+| 1405 / 403 | SP가 요청자 역할을 다시 확인해 거부 (사용중지·역할 부족) | 정상 경로에서는 2003이 먼저 난다. 이 코드가 보이면 앱의 역할 확인 누락을 조사 |
+| 1406 / 400 | 자기 계정의 역할 변경·사용중지 | 다른 admin이 한다 |
+| 1407 / 409 | 이미 있는 아이디 (대소문자 무시) | 다른 아이디 |
+| 2002 / 401 | 세션 쿠키가 없거나, 만료(30분 유휴·12시간)·로그아웃·비밀번호 변경·사용중지로 끝남 | 다시 로그인 |
+| 2003 / 403 | 역할 부족(계정·감사는 admin), 또는 허용되지 않은 `Origin` | 역할 확인. 브라우저면 `ADMIN_ORIGINS`에 화면 주소가 있는지 확인 |
+| 2008 / 400 | 비밀번호 규칙 위반 (12\~128자, 아이디와 같으면 안 됨) | 규칙에 맞게 다시 입력 |
 
 # 2. 개발 중 겪은 문제
 

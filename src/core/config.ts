@@ -82,6 +82,7 @@ const mainDb = {
  * @modified 2026-10-14 trisakion 보상 전달 경고 기준 추가
  * @modified 2026-10-16 trisakion 처리 제한 기본 5초, API DB 호출 제한 시간 추가
  * @modified 2026-10-20 trisakion 로그 월 테이블 보관 개월 수 추가
+ * @modified 2026-10-22 trisakion 관리 API 설정 추가
  */
 export const config = {
     db: mainDb,
@@ -150,17 +151,40 @@ export const config = {
         /** DELIVERING 시즌 수가 이보다 많으면 적체로 경고한다. 시즌마다 파티션이 남아 테이블당 상한(8192)에 다가간다 */
         backlogMax: int('DELIVERY_BACKLOG_MAX', 100, 1),
     },
+    /** 관리 API (01_DESIGN 10.4, D-74) */
+    admin: {
+        port: int('ADMIN_PORT', 3200),
+        /** 수신 주소 (apiHost와 같은 이유로 '::') */
+        host: process.env.ADMIN_HOST || '::',
+        /**
+         * 상태를 바꾸는 요청의 허용 Origin (쉼표 구분, 예: https://gm.example.com). Origin 헤더가 있는데 목록에 없으면 거부한다.
+         * 비어 있으면 브라우저 요청은 모두 거부되고 curl처럼 Origin이 없는 호출만 통과한다
+         */
+        origins: (process.env.ADMIN_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+        /** 요청이 없으면 세션이 끝나는 시간(분). SP 파라미터가 SMALLINT라 상한을 둔다 */
+        sessionIdleMin: int('ADMIN_SESSION_IDLE_MIN', 30, 1),
+        /** 로그인 후 세션 최대 수명(시간) */
+        sessionMaxHours: int('ADMIN_SESSION_MAX_HOURS', 12, 1),
+        /** 1이면 앞단 프록시의 X-Forwarded-For로 요청 IP를 정한다(감사 로그). 프록시 뒤에서만 켠다 — 아니면 클라이언트가 IP를 속인다 */
+        trustProxy: int('ADMIN_TRUST_PROXY', 0) === 1,
+    },
     /** npm run upgrade 설정. 명령이 없으면 upgrade가 1단계 전에 중단한다 */
     upgrade: {
         stopCmd: process.env.UPGRADE_STOP_CMD ?? '',
         startCmd: process.env.UPGRADE_START_CMD ?? '',
         expectApi: int('UPGRADE_EXPECT_API', 1),
         expectWorker: int('UPGRADE_EXPECT_WORKER', 1),
+        /** 관리 API 기대 대수. 기본 0 — 관리 API를 띄우지 않는 설치도 있어 확인하지 않는다 */
+        expectAdmin: int('UPGRADE_EXPECT_ADMIN', 0, 0),
         timeoutSec: int('UPGRADE_TIMEOUT_SEC', 120),
     },
     /** 패키지 버전 (package.json version). 마이그레이션 기록과 하트비트에 남긴다 */
     appVersion: JSON.parse(readFileSync(join(import.meta.dirname, '..', '..', 'package.json'), 'utf8')).version as string,
 } as const;
+
+// SP 파라미터(SMALLINT UNSIGNED) 범위를 넘으면 SP가 값을 잘라 엉뚱한 만료가 된다.
+if (config.admin.sessionIdleMin > 65535 || config.admin.sessionMaxHours > 65535)
+    throw new Error('환경 변수 ADMIN_SESSION_IDLE_MIN, ADMIN_SESSION_MAX_HOURS는 65535 이하여야 합니다.');
 
 // 월 테이블 보관이 운영 보관보다 짧으면 옮기자마자 지울 대상이 된다. 한 달을 가장 짧은 28일로 본다 (01_DESIGN 4.5).
 if (config.logArchiveMonths * 28 < config.logRetentionDays)

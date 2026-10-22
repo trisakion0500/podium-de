@@ -76,7 +76,7 @@
 | 검수 | 순위 확정 전에 GM이 어뷰징을 확인하는 기간(`review_period`) | [7.5](#s-7-5) |
 | GM | Game Master, 게임 운영자. 제재 등록, 검수 보류 같은 사람의 조작을 한다 | [7.5](#s-7-5) |
 | ack | 게임 서버가 "이 보상을 지급했다"고 알리는 호출. 받은 행은 DELIVERED가 된다 | [7.7](#s-7-7) |
-| 하트비트 | API·워커가 10초마다 "살아 있다"고 DB에 남기는 행. migrate는 이것이 있으면 실행을 거부한다 | [11.4](#s-11-4) |
+| 하트비트 | API·워커·관리 API가 10초마다 "살아 있다"고 DB에 남기는 행. migrate는 이것이 있으면 실행을 거부한다 | [11.4](#s-11-4) |
 | 중단 패치 / 롤링 | 중단 패치: 전체 중지 → migrate → 기동(DB 변경이 있을 때). 롤링: 서버를 하나씩 교체(DB 변경이 없을 때) | [11.6](#s-11-6) |
 | p50·p95·p99 | 응답 시간을 빠른 순으로 줄 세웠을 때 50%·95%·99% 지점의 값. p99 100ms는 "100건 중 99건이 100ms 안에 끝났다"는 뜻 | — |
 | N+1 (서버 대수) | 필요한 대수 N에 장애·배포 대비 1대를 더 두는 것. ORM의 "N+1 쿼리 문제"와 무관하다 | — |
@@ -1097,13 +1097,13 @@ CREATE TABLE `ranking_suspicion` (
 
 - `x-api-key` 헤더. 서버 간 호출 전용이며 클라이언트에 배포하지 않는다.
 - TLS 필수. 가능하면 IP 허용 목록.
-- 권한 분리: `write`(제출), `read`(조회), `reward`(보상 수신). 관리 API는 별도 프로세스에서 GM 계정·세션 쿠키로 인증한다([10.4](#s-10-4), 6단계 구현 예정).
+- 권한 분리: `write`(제출), `read`(조회), `reward`(보상 수신). 관리 API는 별도 프로세스에서 GM 계정·세션 쿠키로 인증한다([10.4](#s-10-4)).
 - 복수 키 동시 활성 (무중단 교체). DB에는 해시만 저장한다.
 - 키는 32바이트 난수(base64url 43자)이며 발급 시 한 번만 보여준다. 저장은 SHA-256 해시다. 엔트로피가 충분한 난수라 느린 해시(bcrypt 등)가 필요 없고, 요청마다 드는 비용을 피한다.
 - API는 기동 시 활성 키 목록을 메모리에 올리고 30초마다 다시 읽는다. 요청마다 DB를 조회하지 않는다. 기동 시 읽기에 실패하면 기동을 거부하고, 재조회 실패 시 기존 목록을 유지하고 경고한다. 이전 재조회가 끝나지 않았으면(DB 정지 등) 이번 차례는 건너뛴다. 겹쳐 쌓이면 호출 제한 시간(`DB_QUERY_TIMEOUT_MS`)까지 풀 커넥션을 잡기 때문이다. 랭킹 정의 캐시([D-56](02_DECISIONS.md#d-56))도 같다.
 - 새 키는 발급 후 30초가 지나야 모든 인스턴스에서 통과한다. 교체는 발급 → 30초 대기 → 게임 서버 설정 변경 → 옛 키 폐기 순으로 한다.
 - 유출 대응처럼 폐기를 즉시 반영해야 하면 폐기 후 API를 재시작한다. 재조회가 연속으로 실패하면(DB 장애 등) 폐기가 반영되지 않으므로 알린다.
-- 발급과 폐기는 CLI(`npm run credential`)로 한다. 관리 API가 생기면 같은 SP를 쓴다.
+- 발급과 폐기는 CLI(`npm run credential`)로 한다. 관리 API에는 API 키 엔드포인트를 두지 않는다([10.4](#s-10-4)).
 - 로그에는 키 대신 `api_credential_id`를 남긴다.
 
 ```sql
@@ -1177,6 +1177,7 @@ CREATE TABLE `api_credential` (
 | `ADMIN_ORIGINS` | (없음) | 허용 Origin 목록, 쉼표 구분 (예: `https://gm.example.com`) |
 | `ADMIN_SESSION_IDLE_MIN` | 30 | 요청이 없으면 세션이 끝나는 시간(분) |
 | `ADMIN_SESSION_MAX_HOURS` | 12 | 로그인 후 세션 최대 수명(시간) |
+| `ADMIN_TRUST_PROXY` | 0 | 1이면 앞단 프록시의 `X-Forwarded-For`로 요청 IP를 정한다(감사 로그). 프록시 뒤에서만 켠다 |
 
 **계정과 역할**
 
@@ -1184,6 +1185,7 @@ CREATE TABLE `api_credential` (
 - 계정 상태는 1:활성, 2:사용중지다. 계정을 지우지 않는다. 감사 로그의 `admin_account_id`를 추적하기 위해서다.
 - 자기 계정의 역할 변경과 사용중지는 거부한다(1406). admin이 한 명도 남지 않는 실수를 막는다.
 - 첫 admin은 CLI로 만든다: `npm run admin -- create --login-id <id> --name <이름>`. 초기 비밀번호는 CLI가 난수로 만들어 stdout에 한 번만 출력한다. 모든 admin이 비밀번호를 잃으면 같은 CLI의 `reset-password --login-id <id>`로 초기화한다. CLI 조작은 감사 로그에 SYSTEM(0)으로 남는다.
+- SP의 역할 재확인(`FN_GET_ADMIN_ROLE`)은 요청자 0을 SYSTEM(ADMIN)으로 본다. 세션의 계정 ID는 1부터라 관리 API 경로는 0을 넘길 수 없다.
 
 **비밀번호**
 
@@ -1197,11 +1199,12 @@ CREATE TABLE `api_credential` (
 ```text
 1. SP가 login_id로 계정(해시, 상태, 잠금)을 반환 (없으면 빈 결과)
 2. 앱이 scrypt로 비교 (계정이 없어도 더미 해시로 비교해 응답 시간을 맞춘다)
-3. 실패: SP가 fail_count를 올리고, 5회째에 locked_until = 지금 + 15분 → 1401
+3. 실패: SP가 fail_count를 올린다 → 1401. 5회째는 locked_until = 지금 + 15분 → 1402
    성공: SP가 잠금·상태를 다시 확인하고, fail_count를 0으로, 세션 행을 추가 → 쿠키
 ```
 
 - 응답은 "아이디 또는 비밀번호가 틀림"(1401) 하나다. 아이디 존재 여부를 알려 주지 않는다. 잠긴 계정은 비밀번호가 맞아도 1402다.
+- 비밀번호 변경도 잠긴 동안은 현재 비밀번호를 비교하지 않고 1402다(앱과 SP 모두 확인). 현재 비밀번호가 틀리면 로그인 실패 횟수에 들어간다. 잠긴 동안 비교를 허용하면 세션을 가진 사람이 제한 없이 대입할 수 있다.
 - 쿠키는 `__Host-podium_admin`, `HttpOnly; Secure; SameSite=Strict; Path=/`이다. `__Host-` 접두어가 있으면 브라우저가 Domain 지정과 Secure 누락을 거부한다.
 - 토큰은 32바이트 난수(base64url)이며 DB에는 SHA-256 해시만 둔다.
 - 요청마다 SP가 해시로 세션을 찾는다. 다음 중 하나면 세션을 지우고 2002를 응답한다.
@@ -1220,7 +1223,7 @@ CREATE TABLE `api_credential` (
 **권한 확인**
 
 - 앱이 경로별 최소 역할을 확인한다(2003).
-- 상태를 바꾸는 SP는 `i_requester_id`를 받아 `FN_GET_ADMIN_ROLE`로 다시 확인한다(1405). 사용중지된 계정은 0이 나와 모두 거부된다.
+- 계정 관리 SP(생성·수정·초기화·잠금 해제)와 이후의 GM 조작 SP는 `i_requester_id`를 받아 `FN_GET_ADMIN_ROLE`로 다시 확인한다(1405). 사용중지된 계정은 0이 나와 모두 거부된다. 로그인·세션 SP는 역할이 아니라 계정 상태와 잠금을 잠근 뒤 다시 본다.
 
 **감사 로그**
 
@@ -1282,7 +1285,7 @@ CREATE TABLE `admin_account` (
 
 CREATE TABLE `admin_session` (
     `admin_session_id`    BIGINT         UNSIGNED    NOT NULL    AUTO_INCREMENT    COMMENT '세션 ID',
-    `admin_account_id`    INT            UNSIGNED    NOT NULL                      COMMENT 'GM 계정 ID',
+    `admin_account_id`    INT            UNSIGNED    NOT NULL                      COMMENT 'GM 계정 ID (admin_account, FK 없음)',
     `token_hash`          BINARY(32)                 NOT NULL                      COMMENT '세션 토큰 SHA-256 해시',
     `created_at`          DATETIME(3)                NOT NULL                      COMMENT '로그인 시각 (UTC)',
     `last_seen_at`        DATETIME(3)                NOT NULL                      COMMENT '마지막 요청 시각 (UTC, 1분 단위 갱신)',
@@ -1290,8 +1293,7 @@ CREATE TABLE `admin_session` (
     `client_ip`           VARCHAR(45)                NOT NULL                      COMMENT '로그인 IP',
     PRIMARY KEY (`admin_session_id`),
     UNIQUE KEY `ux_token_hash` (`token_hash`),
-    KEY `ix_admin_account_id` (`admin_account_id`),
-    CONSTRAINT `fk_admin_session_account` FOREIGN KEY (`admin_account_id`) REFERENCES `admin_account` (`admin_account_id`)
+    KEY `ix_admin_account_id` (`admin_account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='GM 로그인 세션';
 
 -- 로그 DB
@@ -1381,7 +1383,7 @@ CREATE TABLE `log_admin_audit` (
 | --- | --- |
 | `log_ddl_audit` | `SP_EXEC_DDL` 실행 SQL, 시작·종료 시각, 오류 정보 |
 | `job_state` | 잡별 동기화 시각(리컨실러 등), 마지막 실행 시각 |
-| `instance_heartbeat` | 실행 중인 API·워커 인스턴스 (`instance_id`, `process_type`, `app_version`, `last_seen_at`) |
+| `instance_heartbeat` | 실행 중인 API·워커·관리 API 인스턴스 (`instance_id`, `process_type`, `app_version`, `last_seen_at`) |
 
 - 인스턴스는 기동 후 주기적으로(예: 10초) 하트비트를 갱신하고(`SP_UPSERT_INSTANCE_HEARTBEAT`), 정상 종료 시 자기 행을 삭제한다(`SP_DELETE_INSTANCE_HEARTBEAT`). 최근 30초 안의 하트비트를 살아 있는 인스턴스로 본다.
   30초는 주기의 3배다. 한두 번의 누락(네트워크 지연 등)은 살아 있는 것으로 본다.
@@ -1442,7 +1444,7 @@ CREATE TABLE `job_state` (
 ```sql
 CREATE TABLE `instance_heartbeat` (
     `instance_id`     CHAR(36)       CHARACTER SET ascii COLLATE ascii_bin    NOT NULL        COMMENT '인스턴스 ID (기동마다 생성하는 UUID)',
-    `process_type`    TINYINT        UNSIGNED                                 NOT NULL        COMMENT '프로세스 유형 (1:API, 2:WORKER 워커) [codes.ProcessType]',
+    `process_type`    TINYINT        UNSIGNED                                 NOT NULL        COMMENT '프로세스 유형 (1:API, 2:WORKER 워커, 3:ADMIN 관리 API) [codes.ProcessType]',
     `app_version`     VARCHAR(32)                                             NOT NULL        COMMENT '실행 중인 패키지 버전 (package.json version)',
     `last_seen_at`    DATETIME(3)                                             NOT NULL        COMMENT '마지막 하트비트 시각 (UTC, DB 시각)',
     PRIMARY KEY (`instance_id`),
@@ -1454,11 +1456,12 @@ CREATE TABLE `instance_heartbeat` (
 
 - **테이블:** 버전 마이그레이션. 버전 테이블과 체크섬으로 관리한다. 적용 후 내용이 바뀐 버전 파일은 오류로 처리한다. 파일 하나에는 DDL 구문 하나만 둔다 (DDL은 암묵적 커밋이라 여러 구문이면 일부만 적용된 채 남을 수 있다).
 - **SP:** 반복 마이그레이션. 체크섬이 바뀌면 DROP 후 CREATE한다.
+- **Function:** SP와 같은 반복 마이그레이션이다. SP가 부르므로 테이블 → Function → SP 순으로 적용한다. binlog가 켜진 MySQL은 `log_bin_trust_function_creators = 1`이어야 migrate 계정이 Function을 만들 수 있다 ([D-80](02_DECISIONS.md#d-80)).
 - 통합 SQL 파일은 두지 않는다. 같은 내용을 두 곳에서 관리하지 않기 위해서다.
 - 상태·구분값은 ENUM 대신 `TINYINT UNSIGNED` 코드로 저장한다. 값의 의미는 `src/core/codes.ts`의 const에서만 관리하고, 컬럼 COMMENT에 코드→의미 매핑과 const 이름을 함께 적는다 ([D-46](02_DECISIONS.md#d-46)). 이 문서 본문의 상태 이름(OPEN, PENDING 등)은 해당 const 키를 가리킨다.
 - 이 문서의 DDL은 `database/tables/`의 최종 스키마와 같게 유지한다. 테이블 변경 마이그레이션을 추가하면 해당 절의 DDL도 함께 고친다. 테이블 추가나 관계 변경은 [04_SCHEMA](04_SCHEMA.md)의 목록과 ERD에도 반영한다.
 - **적용은 `npm run migrate`로만 한다.** API와 워커는 기동 시 적용하지 않고 확인만 한다.
-- **DB별 디렉터리:** 메인은 `database/{tables,procedures}`, 로그 DB는 `database_log/{tables,procedures}`. 각 DB에 자기 `schema_migration`을 둔다.
+- **DB별 디렉터리:** 메인은 `database/{tables,functions,procedures}`, 로그 DB는 `database_log/{tables,procedures}`. 각 DB에 자기 `schema_migration`을 둔다.
 - `npm run migrate`는 `podium:migrate` 락(메인 DB) 하나 안에서 메인 → 로그 DB 순으로 적용한다. 하트비트 검사는 메인 DB에서 한 번, 역행 검사는 DB마다 한다.
 - 기동 시 확인: 메인 불일치는 기동 거부. 로그 DB는 접속되면 확인해 불일치 시 기동 거부, 네트워크 문제로 접속 불가면 경고 후 기동(로그는 유실 허용). 계정·DB 이름 오류(1044, 1045, 1049)는 설정 실수라 기동 거부.
 - 로그 DB 접속 정보와 계정은 메인과 별도이며 필수다. 비었을 때 메인 값으로 대체하지 않는다 ([D-48](02_DECISIONS.md#d-48)).

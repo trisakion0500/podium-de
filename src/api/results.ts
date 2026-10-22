@@ -2,9 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'mysql2/promise';
 import { requireScope } from './auth.js';
 import { errorRef, memberIdSchema, rankingIdParam, rankingOrThrow, readErrors } from './ranks.js';
-import { ApiScope, SpResult } from '../core/codes.js';
-import { callSp } from '../core/db.js';
-import { BusinessException, ERROR_MAP, type ErrorCode } from '../core/errors.js';
+import { ApiScope } from '../core/codes.js';
+import { callSpRows } from '../core/db.js';
 
 /** 결과·Top N 페이지 기본·최대 크기 */
 const PAGE_SIZE_DEFAULT = 20;
@@ -26,23 +25,6 @@ const sanctionedSchema = { type: 'boolean', description: 'true: 검수가 끝난
 const rewardCodeSchema = { type: ['string', 'null'], description: '판정된 보상 코드. 보상 구간 밖이거나 제재면 null', example: 'TOP10' };
 const ok = (data: object) => ({ type: 'object', properties: { result: { type: 'integer', description: '0: 성공', example: 0 }, data: { type: 'object', properties: data } } });
 const notFinalNote = '- 확정 전(DELIVERING 이전) 시즌은 1003/409, 없는 시즌은 1002/404다.';
-
-/**
- * SP를 부르고 실패 RESULT를 응답 코드로 던진다. ERROR_MAP에 없는 코드는 앱 오류다.
- * @param db 메인 DB 풀
- * @param name SP 이름
- * @param params IN 파라미터
- * @returns 데이터 행
- */
-async function rowsOf(db: Pool, name: string, params: unknown[]) {
-    const { result, rows } = await callSp(db, name, params);
-    if (result !== SpResult.OK) {
-        if (!(result in ERROR_MAP))
-            throw new Error(`${name}: unmapped result ${result}`);
-        throw new BusinessException(result as ErrorCode);
-    }
-    return rows;
-}
 
 /**
  * 지난 시즌 결과와 보상 전달 라우트를 등록한다 (01_DESIGN 7.7, 8.5, 10.2).
@@ -91,7 +73,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
         },
     }, async (req) => {
         rankingOrThrow(req.params.id);
-        const rows = await rowsOf(deps.pool, 'SP_LIST_SEASON_RESULT', [req.params.id, req.params.n, req.query.offset, req.query.size]);
+        const rows = await callSpRows(deps.pool, 'SP_LIST_SEASON_RESULT', [req.params.id, req.params.n, req.query.offset, req.query.size]);
         return {
             result: 0,
             data: {
@@ -135,7 +117,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
         },
     }, async (req) => {
         rankingOrThrow(req.params.id);
-        const [r] = await rowsOf(deps.pool, 'SP_GET_SEASON_RESULT_MEMBER', [req.params.id, req.params.n, req.params.memberId]);
+        const [r] = await callSpRows(deps.pool, 'SP_GET_SEASON_RESULT_MEMBER', [req.params.id, req.params.n, req.params.memberId]);
         return {
             result: 0,
             data: {
@@ -183,7 +165,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
         },
     }, async (req) => {
         rankingOrThrow(req.params.id);
-        const rows = await rowsOf(deps.pool, 'SP_LIST_SEASON_TOP', [req.params.id, req.params.n, req.query.offset, req.query.size]);
+        const rows = await callSpRows(deps.pool, 'SP_LIST_SEASON_TOP', [req.params.id, req.params.n, req.query.offset, req.query.size]);
         return { result: 0, data: { items: rows.map((r) => ({ rank: r.final_rank, memberId: r.member_id, score: Number(r.score), sanctioned: r.sanctioned === 1 })) } };
     });
 
@@ -232,7 +214,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
     }, async (req) => {
         rankingOrThrow(req.params.id);
         const { cursor, size } = req.query;
-        const rows = await rowsOf(deps.pool, 'SP_LIST_REWARD', [req.params.id, req.params.n, cursor, size]);
+        const rows = await callSpRows(deps.pool, 'SP_LIST_REWARD', [req.params.id, req.params.n, cursor, size]);
         return {
             result: 0,
             data: {
@@ -274,7 +256,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
         },
     }, async (req) => {
         rankingOrThrow(req.params.id);
-        const rows = await rowsOf(deps.pool, 'SP_UPDATE_REWARD_DELIVERED', [req.params.id, req.params.n, JSON.stringify(req.body.memberIds)]);
+        const rows = await callSpRows(deps.pool, 'SP_UPDATE_REWARD_DELIVERED', [req.params.id, req.params.n, JSON.stringify(req.body.memberIds)]);
         return { result: 0, data: { notApplied: rows.map((r) => r.member_id as string) } };
     });
 
@@ -309,7 +291,7 @@ export function registerResultRoutes(app: FastifyInstance, deps: { pool: Pool })
             },
         },
     }, async () => {
-        const rows = await rowsOf(deps.pool, 'SP_LIST_REWARD_PENDING', []);
+        const rows = await callSpRows(deps.pool, 'SP_LIST_REWARD_PENDING', []);
         return { result: 0, data: { seasons: rows.map((r) => ({ rankingId: r.ranking_id, seasonNo: r.season_no, endAt: r.end_at, remaining: Number(r.remaining) })) } };
     });
 }

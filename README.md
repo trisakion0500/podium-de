@@ -170,6 +170,8 @@ podiumDE/
 │   ├── migrate.ts       # 마이그레이션 적용 CLI(npm run migrate)
 │   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
 │   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
+│   ├── admin.ts         # 관리 API 프로세스 엔트리(npm run start:admin)
+│   ├── adminctl.ts      # 관리 CLI: 첫 admin 생성, 비밀번호 초기화(npm run admin)
 │   ├── core/            # API·워커·CLI 공통 기반
 │   │   ├── bootstrap.ts # API·워커 공통 기동(스키마 확인, 하트비트)과 정상 종료 순서
 │   │   ├── migration.ts # 마이그레이션 적용·기동 시 스키마 확인
@@ -189,6 +191,12 @@ podiumDE/
 │   │   ├── ranks.ts     # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
 │   │   ├── results.ts   # 지난 시즌 결과·Top N 조회, 보상 목록·ack·대기 시즌 API
 │   │   └── seasons.ts   # 현재 시즌 메모리 캐시(end_at까지)
+│   ├── admin/           # 관리 API (01_DESIGN 10.4)
+│   │   ├── session.ts   # 세션 쿠키·토큰 해시, 세션·역할 가드, Origin 검사
+│   │   ├── password.ts  # scrypt 해시·비교, 비밀번호 규칙, 초기 비밀번호 생성
+│   │   ├── auth.ts      # 로그인·로그아웃·내 계정·비밀번호 변경
+│   │   ├── accounts.ts  # 계정 목록·생성·수정·초기화·잠금 해제
+│   │   └── audit.ts     # 감사 로그 적재(로그 DB, 별도 풀)·조회
 │   └── worker/          # 워커 잡
 │       ├── loop.ts      # 잡 주기 실행(GET_LOCK 단일 실행, 정상 종료 대기)
 │       ├── recovery.ts  # 자가 복구 잡(L2 리컨실러, L3 재구축, 보조 점검)
@@ -200,6 +208,7 @@ podiumDE/
 │       └── stall.ts     # 정리 잡 정체 감시(백업 분리, 로그 정리)
 ├── database/
 │   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
+│   ├── functions/       # Function(반복 마이그레이션, SP보다 먼저 적용)
 │   ├── procedures/      # Stored Procedure(반복 마이그레이션)
 │   └── TABLE_LOCK_ORDER.md
 ├── database_log/        # 로그 DB(podium_de_log), database/와 같은 규칙
@@ -209,7 +218,7 @@ podiumDE/
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
 ├── loadtest/load.mjs    # 부하 테스트 스크립트(로컬 전용, docs/06_LOAD_TEST.md)
 ├── loadtest/k6-submit.js # k6 제출 부하 스크립트(로컬 전용, docs/07_K6_LOAD_TEST.md)
-├── tests/recovery.mjs   # 회귀 테스트(로컬 전용, 자가 복구·시즌 스케줄러·정산. npm run build 후 실행)
+├── tests/recovery.mjs   # 회귀 테스트(로컬 전용, 자가 복구·시즌 스케줄러·정산·관리 API. npm run build 후 실행)
 └── docs/                # 설계 문서(위 목록)
 ```
 
@@ -224,12 +233,13 @@ npm run build           # TypeScript 컴파일(dist/)
 npm run migrate         # 테이블·SP 적용
 npm run start:api       # API 실행
 npm run start:worker    # 워커 실행
+npm run start:admin     # 관리 API 실행
 ```
 
 MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 먼저 만들어 둔다. 상세 절차는
 [`docs/03_DEV_SETUP.md`](docs/03_DEV_SETUP.md).
 
-API·워커는 기동 시 하트비트를 기록한 뒤
+API·워커·관리 API는 기동 시 하트비트를 기록한 뒤
 migrate와 같은 락을 잡고 DB 스키마가 패키지와 같은지 확인만 하며, 다르면 하트비트를 지우고 기동하지 않는다.
 적용은 `npm run migrate`로만 한다.
 
@@ -239,8 +249,10 @@ migrate와 같은 락을 잡고 DB 스키마가 패키지와 같은지 확인만
 | `npm run migrate` | 대기 중인 테이블·SP 마이그레이션 적용 |
 | `npm run start:api` | API 프로세스 실행 |
 | `npm run start:worker` | 워커 프로세스 실행 |
+| `npm run start:admin` | 관리 API 프로세스 실행 (GM 계정·세션 쿠키 인증) |
 | `npm run upgrade` | 중단 패치 일괄 실행(중지 → migrate → 기동 → 새 버전 확인) |
 | `npm run credential` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
+| `npm run admin` | 관리 계정 CLI (`create --login-id <아이디> --name <이름>` / `reset-password --login-id <아이디>`). migrate 계정 사용, 초기 비밀번호는 한 번만 표시 |
 
 ### 배포
 
@@ -277,7 +289,7 @@ API·워커는 기동 확인(하트비트 기록, 스키마 확인)을 통과한
 | 2 wait stop | 살아 있는 인스턴스가 없어질 때까지 대기 | `UPGRADE_TIMEOUT_SEC` 초과 — 남은 인스턴스 출력 |
 | 3 migrate | `npm run migrate`와 같은 규칙(하트비트·버전 검사 포함) | migrate 거부·실패 |
 | 4 start | `UPGRADE_START_CMD` 실행 | 종료 코드 ≠ 0 |
-| 5 wait start | 새 `version`의 하트비트가 API `UPGRADE_EXPECT_API`개, 워커 `UPGRADE_EXPECT_WORKER`개 이상 | `UPGRADE_TIMEOUT_SEC` 초과 — 현재 인스턴스 출력 |
+| 5 wait start | 새 `version`의 하트비트가 API `UPGRADE_EXPECT_API`개, 워커 `UPGRADE_EXPECT_WORKER`개, 관리 API `UPGRADE_EXPECT_ADMIN`개(기본 0) 이상 | `UPGRADE_TIMEOUT_SEC` 초과 — 현재 인스턴스 출력 |
 
 `UPGRADE_STOP_CMD`, `UPGRADE_START_CMD`가 없으면 1단계 전에 중단한다(아무것도 멈추지 않음).
 명령 실행·중지 대기·기동 대기는 각각 `UPGRADE_TIMEOUT_SEC`(기본 120초)를 넘으면 실패다.
@@ -388,7 +400,7 @@ migrate가 하트비트로 거부되면
   - ✅ 시즌 백업 테이블 로테이션 — SETTLED 시즌 파티션 분리(1시간 주기), 백업 COMMENT(코드·기간), `history_retention` 지난 백업 경고, 정체 감시 ([D-73](docs/02_DECISIONS.md#d-73))
   - ✅ 로그 DB 월 테이블 아카이브 — 일 파티션 EXCHANGE 두 번(복사 없음, 중단 후 이어서), `LOG_ARCHIVE_MONTHS` 후 월 테이블 삭제 ([D-72](docs/02_DECISIONS.md#d-72))
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
-  - ⬜ 관리 API 기반 — `start:admin` 프로세스, 계정·세션·감사 로그, 로그인·비밀번호 변경·잠금, 첫 admin CLI, 역할 확인 ([D-74](docs/02_DECISIONS.md#d-74))
+  - ✅ 관리 API 기반 — `start:admin` 프로세스, 계정·세션·감사 로그, 로그인·비밀번호 변경·잠금, 첫 admin CLI, 역할 확인 ([D-74](docs/02_DECISIONS.md#d-74), [D-80](docs/02_DECISIONS.md#d-80))
   - ⬜ 랭킹 등록·수정 — 등록 검증(보상 구간 값, 보상 공백 표시), 시즌 1 생성, 묶음별 수정, 늘리기·줄이기·조기 종료·ENDED·PAUSED ([D-69](docs/02_DECISIONS.md#d-69), [D-79](docs/02_DECISIONS.md#d-79))
   - ⬜ 제재 — 반영 Lua 제외 집합, 등록·해제, 리컨실러 동기화, 재구축 때 다시 채우기, 검수 후 제재 표시 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
   - ⬜ 검수·전달 조작 — 검수 보류·해제·조기 확정, 장기 보류 알림, 검수 목록, DELIVERING 강제 종료

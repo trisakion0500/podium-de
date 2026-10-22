@@ -108,12 +108,17 @@ function readScripts(target: DbTarget, dir: string, kind: Kind): Script[] {
 }
 
 /**
- * 패키지에 포함된 한 DB의 전체 스크립트를 적용 순서대로 읽는다(테이블 → SP).
+ * 패키지에 포함된 한 DB의 전체 스크립트를 적용 순서대로 읽는다(테이블 → Function → SP).
+ * Function은 SP가 부르므로 먼저 둔다. 개발 컨벤션 4.1에 따라 폴더를 나눈다.
  * @param target 대상 DB
  * @returns 스크립트 목록
  */
 function readAllScripts(target: DbTarget): Script[] {
-    return [...readScripts(target, 'tables', Kind.Versioned), ...readScripts(target, 'procedures', Kind.Repeatable)];
+    return [
+        ...readScripts(target, 'tables', Kind.Versioned),
+        ...readScripts(target, 'functions', Kind.Repeatable),
+        ...readScripts(target, 'procedures', Kind.Repeatable),
+    ];
 }
 
 /**

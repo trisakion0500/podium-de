@@ -9,7 +9,7 @@
 
 ### 1.1 관리자 등록
 
-GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생기기 전까지 CLI로 만든다.
+GM 도구(관리 API)로 행을 만든다. `api_credential`은 CLI로 만든다. 첫 `admin_account`도 관리 CLI(`npm run admin`)로 만든다.
 
 | 테이블 | 용도 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- |
@@ -17,6 +17,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 | `ranking_reward_tier` | 랭킹별 보상 구간 (순위·백분율 → `reward_code`) | — | 영구. 정산 시 `tier_snapshot`에 고정 | [2.6](01_DESIGN.md#s-2-6) |
 | `ranking_exclusion` | 제재로 순위에서 제외할 멤버 (`season_no = 0`은 전 시즌) | — | 영구 | [7.8](01_DESIGN.md#s-7-8) |
 | `api_credential` | 서버 간 호출 API 키 (해시와 권한) | — | 폐기 후에도 보관 | [10.1](01_DESIGN.md#s-10-1) |
+| `admin_account` | GM 계정 (역할, scrypt 해시, 실패 횟수·잠금) | — | 지우지 않음(사용중지) | [10.4](01_DESIGN.md#s-10-4) |
 
 ### 1.2 시스템 관리
 
@@ -32,7 +33,8 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 | `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#s-9-2), [9.3](01_DESIGN.md#s-9-3) |
 | `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#s-11-4) |
 | `job_state` | 워커 잡별 동기화 시각 (리컨실러 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#s-11-4) |
-| `instance_heartbeat` | 실행 중인 API·워커 인스턴스 | API·워커 하트비트 | — | — | 정상 종료 시 삭제, 1시간 경과 행 정리 | [11.4](01_DESIGN.md#s-11-4) |
+| `instance_heartbeat` | 실행 중인 API·워커·관리 API 인스턴스 | API·워커·관리 API 하트비트 | — | — | 정상 종료 시 삭제, 1시간 경과 행 정리 | [11.4](01_DESIGN.md#s-11-4) |
+| `admin_session` | GM 로그인 세션 (토큰 해시, 유휴·최대 만료) | 관리 API (로그인, 요청마다 확인) | — | — | 로그아웃·만료·비밀번호 변경·사용중지 때 삭제 | [10.4](01_DESIGN.md#s-10-4) |
 | `schema_migration` | 마이그레이션 적용 이력 | 러너 (테이블도 러너가 직접 생성) | — | — | 영구 | [11.5](01_DESIGN.md#s-11-5) |
 
 ### 1.3 로그 DB (`podium_de_log`)
@@ -42,6 +44,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 | 테이블 | 용도 | 쓰는 주체 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- |
 | `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 월 테이블 `log_ranking_submit_YYYYMM`으로 이동, `LOG_ARCHIVE_MONTHS` 후 월 테이블 DROP | [4.5](01_DESIGN.md#s-4-5) |
+| `log_admin_audit` | GM 조작 감사 로그 (변경 전·후, 비밀 필드 가림) | 관리 API·관리 CLI (조작 후, 별도 풀) | — | 영구, 추가 전용 | [10.4](01_DESIGN.md#s-10-4) |
 | `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#s-4-5), [11.4](01_DESIGN.md#s-11-4) |
 | `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#s-11-5) |
 
@@ -130,6 +133,8 @@ erDiagram
 
 ```mermaid
 erDiagram
+    admin_account ||--o{ admin_session : "세션"
+
     log_ddl_audit {
         bigint log_ddl_audit_id PK
         tinyint status "DdlAuditStatus"
@@ -154,6 +159,18 @@ erDiagram
         binary key_hash UK
         tinyint scopes "ApiScope"
     }
+    admin_account {
+        int admin_account_id PK
+        varchar login_id UK
+        tinyint role "AdminRole"
+        tinyint status "AdminStatus"
+    }
+    admin_session {
+        bigint admin_session_id PK
+        binary token_hash UK
+        int admin_account_id
+        datetime expires_at
+    }
 ```
 
 로그 DB(`podium_de_log`)는 메인 DB와 관계를 맺지 않는다. `ranking_id`, `request_id`, `member_id`는 조사용 값으로만 담는다.
@@ -168,6 +185,12 @@ erDiagram
         varchar member_id
         int result_code
         json meta
+    }
+    log_admin_audit {
+        bigint log_admin_audit_id PK
+        int admin_account_id
+        varchar action
+        int result_code
     }
     log_ddl_audit {
         bigint log_ddl_audit_id PK

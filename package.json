@@ -12,6 +12,8 @@
         "migrate": "node dist/migrate.js",
         "start:api": "node dist/api.js",
         "start:worker": "node dist/worker.js",
+        "start:admin": "node dist/admin.js",
+        "admin": "node dist/adminctl.js",
         "upgrade": "node dist/upgrade.js",
         "credential": "node dist/apikey.js"
     },

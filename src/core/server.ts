@@ -13,17 +13,21 @@ declare module 'fastify' {
     interface FastifyRequest {
         /** 인증 가드를 통과한 키의 api_credential_id (인증 없는 경로·인증 실패는 null). 로그에는 키 대신 이 값을 남긴다 */
         credentialId: number | null;
+        /** 관리 API 세션 가드를 통과한 GM 계정 ID (S2S API·인증 실패는 null). 응답 로그에 남긴다 */
+        adminAccountId: number | null;
     }
 }
 
 /**
  * 로그에서 값을 가리는 키 (소문자, 개발 컨벤션 7.1). 새 비밀값 필드가 생기면 여기에 추가한다.
- * x-api-key는 헤더라 지금은 로그에 남기지 않지만, 바디나 헤더 로그가 추가돼도 새지 않게 둔다.
+ * x-api-key·cookie는 헤더라 지금은 로그에 남기지 않지만, 바디나 헤더 로그가 추가돼도 새지 않게 둔다.
+ * 관리 API 비밀번호 필드는 camelCase라 소문자로 적는다(비교가 소문자다). initialpassword는 계정 생성·초기화 응답에 담긴다.
  */
 const SENSITIVE_KEYS = new Set([
     'password', 'new_password', 'old_password', 'password_hash', 'phone_number',
     'access_token', 'refresh_token', 'api_secret', 'api_secret_prev',
     'authorization', 'x-api-signature', 'x-api-key',
+    'currentpassword', 'newpassword', 'initialpassword', 'cookie', 'set-cookie',
 ]);
 
 /** 로그 한 줄의 바디 최대 길이 */
@@ -82,7 +86,7 @@ function errorBody(result: ErrorCode, detail?: string): { result: number; messag
 function resultCodeTable(): string {
     const rows = Object.entries(ERROR_MAP).map(([code, e]) => `| ${code} | ${e.httpStatus} | ${e.message} |`);
     return [
-        '성공은 `{ result: 0, data }`, 실패는 `{ result, message }`이다. 대역: 10xx~13xx SP, 20xx API 계층, 5000 앱 미분류, 50001 DB.',
+        '성공은 `{ result: 0, data }`, 실패는 `{ result, message }`이다. 대역: 10xx~14xx SP, 20xx API 계층, 5000 앱 미분류, 50001 DB.',
         '',
         '| result | HTTP | 의미 |',
         '| --- | --- | --- |',
@@ -91,16 +95,31 @@ function resultCodeTable(): string {
 }
 
 /**
+ * 서버마다 다른 설정. S2S API는 기본값을 쓴다.
+ * @author trisakion
+ */
+export interface ServerOptions {
+    /** Swagger 문서 제목 */
+    title?: string;
+    /** Swagger 인증 방식 (OpenAPI securitySchemes) */
+    securitySchemes?: Record<string, { type: 'apiKey'; in: 'header' | 'cookie'; name: string }>;
+    /** 앞단 프록시의 X-Forwarded-For를 믿고 req.ip를 정할지. 프록시 없이 열린 서버에서 켜면 클라이언트가 IP를 속일 수 있다 */
+    trustProxy?: boolean;
+}
+
+/**
  * Fastify 인스턴스를 만들고 공통 처리를 붙인다: 요청 ID, 요청/응답 로그(마스킹), 처리 제한 시간,
  * 전역 오류 변환, Swagger(설정 시), /health. 도메인 라우트는 반환된 인스턴스에 등록한 뒤 listen한다.
  * Fastify 자체 로거(pino)는 끈다 — 로그는 log4js 하나로만 남긴다.
+ * @param options 문서 제목·인증 방식·프록시 신뢰 (관리 API용, 생략하면 S2S API 기본값)
  * @returns 라우트 등록 전 Fastify 인스턴스
  * @author trisakion
  * @modified 2026-10-06 trisakion 인증 키 ID(credentialId)를 요청에 선언하고 응답 로그에 추가
  * @modified 2026-10-07 trisakion 순위 집계 중(2007)은 오류 로그에서 제외
  * @modified 2026-10-14 trisakion 바디 검증은 타입 변환을 끔 (쿼리·경로는 유지)
+ * @modified 2026-10-22 trisakion 관리 API용 옵션(문서 제목, 인증 방식, 프록시 신뢰)과 GM 계정 ID 로그 추가
  */
-export async function buildServer(): Promise<FastifyInstance> {
+export async function buildServer(options: ServerOptions = {}): Promise<FastifyInstance> {
     // Fastify 요청 처리 순서(아래 훅·핸들러가 끼어드는 위치):
     //   onRequest → (바디 파싱) → preValidation → (스키마 검증) → preHandler → 라우트 핸들러 → (응답 직렬화) → onSend → 전송
     //   중간에 예외가 나면 setErrorHandler, 맞는 라우트가 없으면 setNotFoundHandler가 응답을 만들고, 그 응답도 onSend를 거친다.
@@ -111,6 +130,7 @@ export async function buildServer(): Promise<FastifyInstance> {
         genReqId: () => randomUUID(),
         // 클라이언트가 보낸 ID를 믿지 않는다 — 인스턴스 로그 안에서 유일해야 짝짓기가 된다.
         requestIdHeader: false,
+        trustProxy: options.trustProxy ?? false,
     });
 
     // 검증기를 요청 부위별로 나눈다. 쿼리·경로는 원래 문자열이라 숫자 변환(coerceTypes)이 필요하지만, JSON 바디는 타입이 그대로 오므로
@@ -122,8 +142,9 @@ export async function buildServer(): Promise<FastifyInstance> {
     app.setValidatorCompiler(({ schema, httpPart }) => (httpPart === 'body' ? bodyAjv : partAjv).compile(schema));
 
     // decorateRequest: 요청 객체에 필드를 미리 선언한다. 요청마다 필드를 새로 붙이면 객체 형태가 달라져 V8 최적화가 깨지므로
-    // Fastify는 미리 선언하게 한다. 인증 가드(auth.ts)가 채운다.
+    // Fastify는 미리 선언하게 한다. 인증 가드(api/auth.ts, admin/session.ts)가 채운다.
     app.decorateRequest('credentialId', null);
+    app.decorateRequest('adminAccountId', null);
 
     // addSchema: 여러 라우트가 함께 쓰는 JSON 스키마를 이름($id)으로 등록한다. 라우트는 { $ref: 'ErrorResponse#' }로
     // 참조해 실패 응답 형식을 한 곳에서만 정의한다. Swagger 문서에는 components.schemas.ErrorResponse로 나온다.
@@ -167,7 +188,8 @@ export async function buildServer(): Promise<FastifyInstance> {
     app.addHook('onSend', async (req, reply, payload) => {
         const body = typeof payload === 'string' ? ` body=${bodyForLog(payload)}` : '';
         const cred = req.credentialId === null ? '' : ` cred=${req.credentialId}`;
-        logger.info(`[${req.id}] <-- ${reply.statusCode} ${Math.round(reply.elapsedTime)}ms${cred}${body}`);
+        const gm = req.adminAccountId === null ? '' : ` gm=${req.adminAccountId}`;
+        logger.info(`[${req.id}] <-- ${reply.statusCode} ${Math.round(reply.elapsedTime)}ms${cred}${gm}${body}`);
         return payload;
     });
 
@@ -203,8 +225,8 @@ export async function buildServer(): Promise<FastifyInstance> {
     if (config.apiDocs) {
         await app.register(swagger, {
             openapi: {
-                info: { title: 'Podium DE API', version: config.appVersion, description: resultCodeTable() },
-                components: { securitySchemes: { apiKey: { type: 'apiKey', in: 'header', name: 'x-api-key' } } },
+                info: { title: options.title ?? 'Podium DE API', version: config.appVersion, description: resultCodeTable() },
+                components: { securitySchemes: options.securitySchemes ?? { apiKey: { type: 'apiKey', in: 'header', name: 'x-api-key' } } },
             },
             // addSchema의 $id를 문서 스키마 이름으로 쓴다 (기본은 def-0 같은 일련번호).
             refResolver: { buildLocalReference: (json, _baseUri, _fragment, i) => (json.$id as string | undefined) ?? `def-${i}` },

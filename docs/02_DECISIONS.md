@@ -1014,6 +1014,7 @@ SP와 앱의 직접 쿼리는 `NOW(3)` 대신 `UTC_TIMESTAMP(3)`을 쓴다. 풀�
 
 **결정:** 6단계 운영 도구는 S2S API와 다른 프로세스·포트의 관리 HTTP API(`start:admin`)로 만든다. 웹 프론트엔드는 7단계 구현 예정이며 이 API 위에 올린다.
 - **계정:** admin이 만든다. 본인 가입 신청은 없다. 첫 admin 계정은 CLI로 만든다. admin이 정한 초기 비밀번호는 첫 로그인 때 바꿔야 한다.
+  > [01_DESIGN 10.4](01_DESIGN.md#s-10-4)로 구체화: 초기 비밀번호는 admin이 정하지 않고 서버가 난수로 만들어 한 번만 보여 준다.
 - **역할:** viewer(조회), operator(GM 조작), admin(operator 권한과 계정 관리) 셋이다. 역할 값이 불분명하면 viewer로 취급한다.
 - **세션:** 로그인하면 32바이트 난수 토큰을 httpOnly·Secure·SameSite=Strict 쿠키로 준다. DB `admin_session`에는 SHA-256 해시만 저장한다. 요청마다 DB로 검증한다. JWT와 refresh 토큰은 쓰지 않는다.
 - **세션 종료:** 비밀번호를 바꾸거나 초기화하면 그 계정의 세션을 모두 끝낸다. 계정을 사용중지할 때도 같다.
@@ -1155,3 +1156,19 @@ SP와 앱의 직접 쿼리는 `NOW(3)` 대신 `UTC_TIMESTAMP(3)`을 쓴다. 풀�
 **감수할 것:**
 - 반복 랭킹에서 "이번 시즌만 일찍 끝내고 랭킹은 계속"은 할 수 없다. 조기 종료하면 랭킹도 끝난다.
 - 조기 종료는 게임 서버가 다시 조회해야 안다. 그 전의 제출은 1103으로 거부된다(원장은 안전).
+
+### <a id="d-80"></a>D-80. Function을 쓰고, 설치 요구사항에 `log_bin_trust_function_creators = 1`을 둔다 — 확정
+
+**결정:** 요청자 역할 재확인은 `FN_GET_ADMIN_ROLE` 하나로 둔다(개발 컨벤션 4.2). MySQL 서버는 `log_bin_trust_function_creators = 1`이어야 한다. 설치 안내와 03_DEV_SETUP에 적는다.
+
+**배경:** MySQL 8은 binlog가 기본으로 켜져 있다. 이때 Function을 만들려면 SUPER급 권한이나 이 설정이 필요하다. migrate 계정은 DB 단위 전체 권한만 있어 1419로 거부된다. SP는 이 제한이 없다.
+
+**이유:**
+- 이 제한은 문장 기반 복제에서 복제 서버가 Function을 다시 실행해 결과가 달라지는 것을 막기 위한 것이다. `binlog_format = ROW`(MySQL 8 기본값)는 변경된 행을 기록하므로 Function을 다시 실행하지 않는다.
+- `FN_GET_ADMIN_ROLE`은 읽기만 한다(`READS SQL DATA`).
+
+**검토한 대안:**
+- SP마다 같은 SELECT를 인라인: 설치 설정은 필요 없지만, 권한 규칙이 SP 여러 곳에 복사된다.
+- migrate 계정에 `SET_USER_ID` 등 전역 권한: 마이그레이션 계정이 지나치게 강해진다.
+
+**감수할 것:** 설치마다 DBA가 서버 전역 설정을 한 번 바꿔야 한다. 빠뜨리면 `npm run migrate`가 1419로 멈춘다(05_TROUBLESHOOTING 1.1).

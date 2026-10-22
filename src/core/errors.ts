@@ -19,6 +19,7 @@ export interface ErrorEntry {
  * @modified 2026-10-07 trisakion 제출 SP 코드(1001, 1101~1107)와 빈도 초과(2006) 추가
  * @modified 2026-10-07 trisakion 현재 시즌 없음(1301)과 순위 집계 중(2007) 추가
  * @modified 2026-10-14 trisakion 시즌 없음(1002)과 확정 전(1003) 추가 (결과·보상 API)
+ * @modified 2026-10-22 trisakion 관리 API 코드(1401~1407, 2008) 추가, 2002·2003 메시지를 관리 API와 공용으로
  */
 export const ERROR_MAP = {
     [SpResult.INVALID_PARAM]: { message: '요청 값이 허용 범위를 벗어났습니다.', httpStatus: 400 },
@@ -32,9 +33,17 @@ export const ERROR_MAP = {
     [SpResult.DELTA_EXCEEDED]: { message: '1회 증분이 허용 한도를 넘었습니다.', httpStatus: 400 },
     [SpResult.SCORE_MAX_EXCEEDED]: { message: '누적 스코어가 상한을 넘습니다.', httpStatus: 400 },
     [SpResult.CURRENT_SEASON_NOT_FOUND]: { message: '진행 중인 시즌이 없습니다.', httpStatus: 404 },
+    [SpResult.ADMIN_LOGIN_FAILED]: { message: '아이디 또는 비밀번호가 틀립니다.', httpStatus: 401 },
+    [SpResult.ADMIN_LOCKED]: { message: '로그인 실패가 반복되어 계정이 잠겼습니다. 15분 뒤 다시 시도하거나 관리자에게 해제를 요청하세요.', httpStatus: 423 },
+    [SpResult.ADMIN_PASSWORD_CHANGE_REQUIRED]: { message: '초기 비밀번호입니다. 비밀번호를 먼저 바꾸세요.', httpStatus: 403 },
+    [SpResult.ADMIN_NOT_FOUND]: { message: '존재하지 않는 계정입니다.', httpStatus: 404 },
+    [SpResult.ADMIN_FORBIDDEN]: { message: '이 작업을 할 권한이 없습니다.', httpStatus: 403 },
+    [SpResult.ADMIN_SELF_CHANGE]: { message: '자기 계정의 역할과 상태는 바꿀 수 없습니다.', httpStatus: 400 },
+    [SpResult.ADMIN_LOGIN_ID_TAKEN]: { message: '이미 사용 중인 아이디입니다.', httpStatus: 409 },
     [ApiResult.VALIDATION_FAILED]: { message: '요청 형식이 올바르지 않습니다.', httpStatus: 400 },
-    [ApiResult.UNAUTHORIZED]: { message: 'API 키가 없거나 유효하지 않습니다.', httpStatus: 401 },
+    [ApiResult.UNAUTHORIZED]: { message: '인증 정보(API 키 또는 로그인 세션)가 없거나 유효하지 않습니다.', httpStatus: 401 },
     [ApiResult.FORBIDDEN]: { message: '이 API를 호출할 권한이 없습니다.', httpStatus: 403 },
+    [ApiResult.PASSWORD_POLICY]: { message: '비밀번호는 12~128자이고 아이디와 달라야 합니다.', httpStatus: 400 },
     [ApiResult.NOT_FOUND]: { message: '존재하지 않는 경로입니다.', httpStatus: 404 },
     [ApiResult.TIMEOUT]: { message: '처리 시간이 초과되었습니다. 쓰기 요청은 반영되었을 수 있습니다.', httpStatus: 503 },
     [ApiResult.TOO_MANY_REQUESTS]: { message: '제출 빈도 한도를 넘었습니다. 잠시 후 같은 requestId로 다시 시도하세요.', httpStatus: 429 },

@@ -13,7 +13,7 @@ import { logger, shutdownLogger } from './core/logger.js';
 import { runMigrations } from './core/migration.js';
 
 const POLL_INTERVAL_MS = 2000;
-const { stopCmd, startCmd, expectApi, expectWorker, timeoutSec } = config.upgrade;
+const { stopCmd, startCmd, expectApi, expectWorker, expectAdmin, timeoutSec } = config.upgrade;
 
 /**
  * 셸 명령을 실행하고 표준 출력·에러·종료 코드를 출력한다.
@@ -75,10 +75,11 @@ async function waitFor(pool: Pool, done: (rows: AliveInstance[]) => boolean): Pr
  * migrate의 하트비트·버전 검사는 그대로 적용되므로, 이 스크립트가 그 검사를 우회하지 않는다.
  * @param pool 커넥션 풀
  * @returns 성공 여부
+ * @modified 2026-10-22 trisakion 관리 API 기대 대수(UPGRADE_EXPECT_ADMIN) 확인 추가
  */
 async function upgrade(pool: Pool): Promise<boolean> {
     const version = config.appVersion;
-    logger.info(`upgrade to v${version} (expect API ${expectApi}, WORKER ${expectWorker}, timeout ${timeoutSec}s)`);
+    logger.info(`upgrade to v${version} (expect API ${expectApi}, WORKER ${expectWorker}, ADMIN ${expectAdmin}, timeout ${timeoutSec}s)`);
 
     runCommand('1/5 stop', stopCmd);
 
@@ -98,8 +99,8 @@ async function upgrade(pool: Pool): Promise<boolean> {
 
     logger.info(`[5/5 wait start] waiting for v${version} heartbeats`);
     const count = (rows: AliveInstance[], type: number): number => rows.filter((r) => r.process_type === type && r.app_version === version).length;
-    const started = await waitFor(pool, (rows) => count(rows, ProcessType.API) >= expectApi && count(rows, ProcessType.WORKER) >= expectWorker);
-    const summary = `API ${count(started.rows, ProcessType.API)}/${expectApi}, WORKER ${count(started.rows, ProcessType.WORKER)}/${expectWorker}`;
+    const started = await waitFor(pool, (rows) => count(rows, ProcessType.API) >= expectApi && count(rows, ProcessType.WORKER) >= expectWorker && count(rows, ProcessType.ADMIN) >= expectAdmin);
+    const summary = `API ${count(started.rows, ProcessType.API)}/${expectApi}, WORKER ${count(started.rows, ProcessType.WORKER)}/${expectWorker}, ADMIN ${count(started.rows, ProcessType.ADMIN)}/${expectAdmin}`;
     if (!started.ok) {
         logger.error(`[5/5 wait start] ${timeoutSec}초 안에 새 버전 인스턴스가 모두 뜨지 않았습니다 (${summary}). 현재 인스턴스:\n${formatInstances(started.rows) || '  (없음)'}`);
         return false;

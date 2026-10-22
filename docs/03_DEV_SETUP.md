@@ -37,7 +37,7 @@ root 등 관리자 계정으로 실행한다. 스키마는 메인(`podium_de`)�
 | 계정 | 사용처 | 권한 |
 |---|---|---|
 | `podium_migrate` | `npm run migrate`, `npm run upgrade`, SP DEFINER | `podium_de`·`podium_de_log` 전체, `PROCESS` |
-| `podium_app` | API, 워커 | `podium_de`·`podium_de_log` `EXECUTE`만 |
+| `podium_app` | API, 워커, 관리 API | `podium_de`·`podium_de_log` `EXECUTE`만 |
 
 ```sql
 CREATE DATABASE `podium_de` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
@@ -55,6 +55,9 @@ CREATE USER 'podium_app'@'localhost' IDENTIFIED BY '<app 비밀번호>';
 CREATE USER 'podium_app'@'127.0.0.1' IDENTIFIED BY '<app 비밀번호>';
 GRANT EXECUTE ON podium_de.* TO 'podium_app'@'localhost', 'podium_app'@'127.0.0.1';
 GRANT EXECUTE ON podium_de_log.* TO 'podium_app'@'localhost', 'podium_app'@'127.0.0.1';
+
+-- 서버 설정: migrate 계정이 Function을 만들 수 있게 한다 (binlog가 켜진 MySQL, D-80)
+SET PERSIST log_bin_trust_function_creators = 1;
 
 -- 확인
 SHOW GRANTS FOR 'podium_migrate'@'localhost';
@@ -78,6 +81,7 @@ GRANT EXECUTE ON podium_de_log.* TO 'podium_app'@'localhost', 'podium_app'@'127.
   된다. 앱 계정은 테이블 권한 없이 SP로만 접근한다.
 - `PROCESS`는 정산 전 미종료 트랜잭션 확인(`INNODB_TRX` 조회)에 필요하다. 이 조회는 SP 안에서
   하므로 DEFINER인 migrate 계정이 권한을 가진다. 상세: [01_DESIGN 7.1](01_DESIGN.md#s-7-1)
+- `log_bin_trust_function_creators`: 없으면 `npm run migrate`가 Function(`FN_GET_ADMIN_ROLE`)에서 1419로 멈춘다. `binlog_format = ROW`(기본값)에서는 복제 안전에 영향이 없다 ([D-80](02_DECISIONS.md#d-80)).
 - 서버 시간대와 시간 동기화는 아래 "시간대와 시간 동기화"를 따른다.
 
 ### 시간대와 시간 동기화
@@ -104,10 +108,10 @@ cp .env.example .env
 
 `.env`를 열어 3.1에서 만든 계정을 `DB_APP_USER`/`DB_APP_PASSWORD`,
 `DB_MIGRATE_USER`/`DB_MIGRATE_PASSWORD`에 채운다. 변수별 설명은 `.env.example`의 주석 참고.
-API·워커만 실행하는 호스트의 `.env`에는 `DB_MIGRATE_*`를 두지 않는다.
+API·워커·관리 API만 실행하는 호스트의 `.env`에는 `DB_MIGRATE_*`를 두지 않는다. 관리 CLI(`npm run admin`)는 migrate 계정을 쓴다.
 로그 DB는 별도 DB라 접속 정보(`DB_LOG_HOST`, `DB_LOG_PORT`, `DB_LOG_NAME`)와 계정
 (`DB_LOG_APP_*`, `DB_LOG_MIGRATE_*`)을 따로 채운다. 비어 있으면 기동하지 않는다. 로컬은 같은 MySQL과
-3.1의 같은 계정을 그대로 적으면 된다. API·워커만 실행하는 호스트에는 `DB_LOG_MIGRATE_*`도 두지 않는다.
+3.1의 같은 계정을 그대로 적으면 된다. API·워커·관리 API만 실행하는 호스트에는 `DB_LOG_MIGRATE_*`도 두지 않는다.
 Redis 접속은 `REDIS_URL`, `REDIS_PASSWORD`에 채운다. 다른 서비스와 같은 Redis를 쓰면 `REDIS_KEY_PREFIX`(예: `ped:`)를
 지정한다. Redis가 없어도 API는 기동하며 제출은 MySQL에만 반영된다.
 
@@ -119,14 +123,24 @@ npm run migrate        # 테이블·SP 적용 (migrate 계정)
 npm run start:api      # API 실행 (http://localhost:3000, API_PORT로 변경 가능)
                        # API_DOCS=1이면 http://localhost:3000/docs 에 Swagger UI
 npm run start:worker   # 워커 실행
+npm run start:admin    # 관리 API 실행 (http://localhost:3200, ADMIN_PORT로 변경 가능)
 ```
 
-로컬에서는 API와 워커를 터미널 두 개에서 직접 띄우고 Ctrl+C로 끈다(정상 종료 처리됨).
+관리 API에 처음 로그인하려면 admin 계정을 CLI로 만든다. 초기 비밀번호는 이때 한 번만 출력되고, 첫 로그인 때 바꿔야 한다.
+
+```bash
+npm run admin -- create --login-id <아이디> --name <이름>
+npm run admin -- reset-password --login-id <아이디>   # 모든 admin이 비밀번호를 잃었거나 잠겼을 때
+```
+
+세션 쿠키에 `Secure`가 붙으므로 브라우저는 HTTPS나 `localhost`에서만 쿠키를 보낸다. 브라우저에서 쓰기 요청을 보내려면 `ADMIN_ORIGINS`에 화면 주소를 넣는다.
+
+로컬에서는 API·워커(필요하면 관리 API)를 터미널마다 직접 띄우고 Ctrl+C로 끈다(정상 종료 처리됨).
 `.env`의 `UPGRADE_STOP_CMD`/`UPGRADE_START_CMD`는 비워 두며, 이 상태에서 `npm run upgrade`는
-아무것도 멈추지 않고 중단한다. DB 변경(테이블·SP)을 반영할 때는 둘 다 끄고 → `npm run build` →
+아무것도 멈추지 않고 중단한다. DB 변경(테이블·SP)을 반영할 때는 모두 끄고 → `npm run build` →
 `npm run migrate` → 다시 띄운다.
 
-API·워커는 기동 시 DB 스키마가 패키지와 같은지 확인만 하고, 다르면 기동하지 않는다.
+API·워커·관리 API는 기동 시 DB 스키마가 패키지와 같은지 확인만 하고, 다르면 기동하지 않는다.
 적용은 `npm run migrate`로만 한다. 마이그레이션 규칙과 배포 절차는 README의
 [실행 방법](../README.md#실행-방법) 참고.
 
@@ -151,6 +165,8 @@ node tests/recovery.mjs      # 기본 3회 반복, 약 8분
 ```
 
 로컬 DB·Redis에서 워커·API를 직접 띄워 확인한다. 테스트 랭킹 940\~971을 쓰고 끝나면 지운다(시즌 백업 테이블 포함). API 포트는 TEST_PORT(기본 3199)부터 6개(3199\~3204)를 쓴다. 끝난 뒤 30초 동안은 migrate가 거부된다(강제 종료로 남은 하트비트).
+관리 API는 그다음 포트(3205)를 쓰고, `rtest-`로 시작하는 관리 계정·세션·감사 로그를 만들고 지운다.
+고치는 중에는 `ONLY=관리`처럼 구간 이름 일부를 주면 그 구간만 돈다(PowerShell: `$env:ONLY='관리'`). 커밋 전에는 전체를 돌린다.
 `KEEP_BACKUP_TABLES=1`로 실행하면 테스트가 만든 시즌 백업 테이블을 남긴다(확인용, 랭킹 정의·시즌 행은 지워진다). 다음 실행 시작 때 지워진다.
 
 진행 상황은 구간 시작·끝의 `[mm:ss]` 경과 시간과 30초마다 찍는 `... 진행 중: run N / 구간` 하트비트로 본다. 출력이 30초 넘게 멈추면 그 자리에서 멈춘 것이다. 구간이 5분을 넘거나 예외가 나면 `ABORTED`와 요약을 찍고 종료 코드 1로 끝난다. 워커·API가 스스로 종료하면(스키마 불일치로 기동 거부 등) err 로그의 마지막 ERROR 줄과 함께 FAIL로 찍는다.
@@ -165,6 +181,7 @@ node tests/recovery.mjs      # 기본 3회 반복, 약 8분
 | 보상 전달 (R) | 결과·내 결과·Top N 페이지, 확정 전 1003·시즌 없음 1002, 보상 목록 커서(보류·제재 제외), 권한(2003), 대기 시즌 남은 건수, ack 멱등(notApplied, delivered_at 유지, 1001개 거부), 남은 대상 0 → SETTLED(빈 시즌 포함), ack 정체·적체 경고 판정, 오류 주입(동시 중복 ack, 락 대기로 2005 뒤 커밋, 데드락 50001 후 재시도, 워커 실제 경고·해소 로그) |
 | 로그 정리 (L, 락 대기와 별개) | 오늘 + 7일 일 파티션 생성, 재실행 무변화, 보관 기간 지난 파티션의 월 테이블 이동(중단 후 이어서 포함), 12개월 지난 월 테이블 삭제, p_max 경고, 보관 0일·0개월·32일 거부(1001), job_state 기록, 정체 감시 |
 | 시즌 백업 분리 (B) | SETTLED 시즌 분리(submit_key 바로, entry는 다음 시즌 SETTLED·마지막 시즌), 재실행 무변화, 백업 COMMENT, 보관 기간 지난 백업 경고 대상(0일 제외), job_state 기록 |
+| 관리 API (G) | 첫 admin CLI, 로그인·쿠키 속성, 초기 비밀번호 변경 강제, 비밀번호 규칙·변경과 세션 종료, 역할(operator 2003), 계정 생성·중복·수정·사용중지·초기화·잠금 해제, 연속·동시 실패 잠금, 잠금 중 비밀번호 대입 차단, Origin 검사, 유휴·최대 수명 만료, SP 역할 재확인(1405), 감사 로그와 비밀번호 마스킹 |
 | 장애 주입 (X) | 요청 형식·권한·상태 거부 17종(코드·HTTP 상태, 바디 타입 변환 없음), 조회·보상 API 검증 9종, 빈도 초과, 같은 requestId 동시 제출, 같은 멤버 동시 첫 제출, 락 대기로 2005 뒤 커밋·재시도, API 경유 락 대기 초과(50001·롤백), 제출 경로 데드락(50001·롤백), Redis·로그 DB가 죽은 API(제출 성공·조회 2007·이력 실패 경고)와 워커(정산 건너뜀·로그 정리 실패), TCP 프록시로 만든 실행 중 Redis 무응답·다운과 로그 DB·메인 DB 다운 → 복구(메인 DB 다운 중 50001, DB 상태 로그 한 쌍), 메인 DB 무응답 중 동시 제출(대기열 초과 즉시 50001, 호출 제한 시간에 커넥션 회수, 재개 뒤 즉시 정상), 제출 처리 중 API 강제 종료, 메인 DB 접속 불가·잘못된 설정·포트 충돌 시 기동 거부, 키 폐기 전파(30초), 실행 중 migrate 거부, 가순위·확정 도중 워커 강제 종료(2대 동시 포함) 후 이어받기 |
 
 ---
