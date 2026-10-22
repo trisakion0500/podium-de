@@ -24,11 +24,11 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 쓰는 주체 | 관리자 조작 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, OPEN·CLOSED), 정산 잡 (SETTLING~DELIVERING), 전달 잡 (SETTLED) | 검수 보류·조기 확정, DELIVERING 강제 종료 (일정은 랭킹 정의로 계산, D-79) | — | 영구 | [3.1](01_DESIGN.md#31-ranking_season), [3.4](01_DESIGN.md#34-관리자-수정-범위), [7.5](01_DESIGN.md#75-review-검수), [7.7](01_DESIGN.md#77-delivering-보상-전달) |
+| `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, OPEN·CLOSED), 정산 잡 (SETTLING~DELIVERING), 전달 잡 (SETTLED) | 검수 보류·조기 확정, DELIVERING 강제 종료 (일정은 랭킹 정의로 계산, [D-79](02_DECISIONS.md#d-79)) | — | 영구 | [3.1](01_DESIGN.md#31-ranking_season), [3.4](01_DESIGN.md#34-관리자-수정-범위), [7.5](01_DESIGN.md#75-review-검수), [7.7](01_DESIGN.md#77-delivering-보상-전달) |
 | `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | — | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED(마지막 시즌은 자기 시즌)에 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [7.4](01_DESIGN.md#74-결과-컬럼), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
 | `ranking_submit_key` | 제출 멱등 키 (재전송 판별, 하드 검증 거부 사유) | 제출 API | — | 시즌 | 자기 시즌 SETTLED에 분리 | [4.4](01_DESIGN.md#44-ranking_submit_key), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
 | `ranking_entry_settling` | 정산 작업 테이블 (entry 시즌 파티션을 꺼내 가순위를 매긴 뒤 되돌림) | 정산 잡 | — | — | 평소 비어 있음 | [7.3](01_DESIGN.md#73-settling-가순위-생성) |
-| `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (검수 후 제재 시 `sanctioned`는 제재 처리가 갱신, D-78) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_season_top) |
+| `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (검수 후 제재 시 `sanctioned`는 제재 처리가 갱신, [D-78](02_DECISIONS.md#d-78)) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_season_top) |
 | `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#92-소프트-탐지-받되-표시), [9.3](01_DESIGN.md#93-어뷰징-포인트) |
 | `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
 | `job_state` | 워커 잡별 동기화 시각 (리컨실러 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
@@ -37,7 +37,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 ### 1.3 로그 DB (`podium_de_log`)
 
-물리적으로 분리된 DB다. 장애가 서비스로 번지지 않게 메인과 떼어 둔다 (D-48). 메인 DB와 FK로 묶지 않는다.
+물리적으로 분리된 DB다. 장애가 서비스로 번지지 않게 메인과 떼어 둔다 ([D-48](02_DECISIONS.md#d-48)). 메인 DB와 FK로 묶지 않는다.
 
 | 테이블 | 용도 | 쓰는 주체 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- |
@@ -49,11 +49,11 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 **로그 DB 월 테이블**: `log_ranking_submit_YYYYMM` 이름의 일 파티션 테이블이다(운영 테이블과 구조·일 경계가 같다). 그 달의 일 파티션을 처음 옮길 때 생기고 `LOG_ARCHIVE_MONTHS`가 지나면 로그 정리 잡이 DROP한다. `log_ranking_submit_xchg`는 옮기는 동안만 있는 교환 테이블이다 ([4.5](01_DESIGN.md#45-log_ranking_submit-로그-db)).
 
-**코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/core/codes.ts`에 있다 (D-46).
+**코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/core/codes.ts`에 있다 ([D-46](02_DECISIONS.md#d-46)).
 
 ## 2. ERD
 
-관계는 논리 관계다. FK 제약은 걸지 않는다. 파티션 테이블은 FK를 쓸 수 없고, 나머지는 키 구조를 설계에 맞췄다 (D-35). 아래는 키와 주요 컬럼만 보인다.
+관계는 논리 관계다. FK 제약은 걸지 않는다. 파티션 테이블은 FK를 쓸 수 없고, 나머지는 키 구조를 설계에 맞췄다 ([D-35](02_DECISIONS.md#d-35)). 아래는 키와 주요 컬럼만 보인다.
 
 ```mermaid
 erDiagram
@@ -306,7 +306,7 @@ flowchart LR
 | ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 인증·형식 검사를 통과한 제출의 결과는 모두 로그 DB `log_ranking_submit`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 근거를 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
 | ③ | 마감과 정산 | `ranking_entry` 파티션을 `ranking_entry_settling`으로 꺼내(EXCHANGE) `final_rank` 가순위를 매기고 같은 파티션으로 되돌린다(EXCHANGE). 행 복사 없음. Redis 시즌 키 삭제 |
 | ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트순 검수 목록, 상위 N → `ranking_season_top` |
-| ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED. 남은 대상이 0이면 워커 전달 잡이 SETTLED로 넘긴다 (D-70). 결과는 `ranking_entry`, Top N은 `ranking_season_top`에서 조회한다 |
+| ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED. 남은 대상이 0이면 워커 전달 잡이 SETTLED로 넘긴다 ([D-70](02_DECISIONS.md#d-70)). 결과는 `ranking_entry`, Top N은 `ranking_season_top`에서 조회한다 |
 | ⑥ | SETTLED 이후 | `ranking_submit_key`(자기 시즌 SETTLED), `ranking_entry`(자기·다음 시즌 SETTLED, 마지막 시즌은 자기 시즌) 파티션 → 백업 테이블(EXCHANGE). 백업은 `history_retention` 후 경고(삭제는 운영자) |
 
 - Redis는 `ranking_entry`의 투영이다. 언제든 MySQL로 재구축할 수 있으므로 흐름의 끝점이 아니다 (1.5, 6.3).
@@ -355,9 +355,9 @@ flowchart TD
     OK & XN & X0 & X1 & X2 & X3 & X4 -.-> HIST["제출 이력 기록 (로그 DB, 4.5)<br/>모든 결과, result_code 포함<br/>실패해도 응답에 영향 없음"]
 ```
 
-- **시각:** `achieved_at`, `updated_at`은 MySQL `UTC_TIMESTAMP(3)`이며 세션 시간대와 무관한 UTC다(D-66). 게임 서버나 Redis 시각을 쓰지 않는다 (4.1).
+- **시각:** `achieved_at`, `updated_at`은 MySQL `UTC_TIMESTAMP(3)`이며 세션 시간대와 무관한 UTC다([D-66](02_DECISIONS.md#d-66)). 게임 서버나 Redis 시각을 쓰지 않는다 (4.1).
 - **값이 그대로면 아무것도 갱신하지 않는다:** BEST에서 기록이 같거나 나쁠 때, SUM에서 0점에 음수 증분이 들어올 때는 `version`, `achieved_at`, `updated_at`이 바뀌지 않는다 (2.3). 그래서 리컨실러의 `updated_at` 스캔에도 잡히지 않는다.
 - **ASC 정렬:** BEST의 "더 좋은 기록"은 더 작은 값이다 (4.3).
 - **Redis 반영 실패:** 응답은 성공으로 나간다. MySQL이 원장이고, 리컨실러가 `ranking_entry.updated_at` 변경분으로 Redis를 다시 맞춘다.
-- **재전송:** 재전송 응답도 현재 entry 상태를 돌려주므로 Redis 반영을 다시 시도할 수 있다. version 비교로 오래된 값은 무시된다 (D-43).
-- **제출 이력:** 인증·형식 검사를 통과한 제출은 결과와 무관하게 모두 로그 DB에 남는다. 메인 트랜잭션과 묶지 않으며, 기록에 실패하면 앱 로그 파일에 남기고 넘어간다 (4.5, D-48).
+- **재전송:** 재전송 응답도 현재 entry 상태를 돌려주므로 Redis 반영을 다시 시도할 수 있다. version 비교로 오래된 값은 무시된다 ([D-43](02_DECISIONS.md#d-43)).
+- **제출 이력:** 인증·형식 검사를 통과한 제출은 결과와 무관하게 모두 로그 DB에 남는다. 메인 트랜잭션과 묶지 않으며, 기록에 실패하면 앱 로그 파일에 남기고 넘어간다 (4.5, [D-48](02_DECISIONS.md#d-48)).

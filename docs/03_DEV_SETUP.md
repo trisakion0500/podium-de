@@ -82,7 +82,7 @@ GRANT EXECUTE ON podium_de_log.* TO 'podium_app'@'localhost', 'podium_app'@'127.
 
 ### 시간대와 시간 동기화
 
-모든 시각은 UTC로 저장·비교한다(01_DESIGN 4.1, D-66). VM 시간대는 아래처럼 둔다.
+모든 시각은 UTC로 저장·비교한다(01_DESIGN 4.1, [D-66](02_DECISIONS.md#d-66)). VM 시간대는 아래처럼 둔다.
 
 | VM | OS 시간대 | 비고 |
 | --- | --- | --- |
