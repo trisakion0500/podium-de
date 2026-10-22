@@ -1,7 +1,7 @@
 # Podium DE — 스키마
 
 `podium_de`(메인)와 `podium_de_log`(로그 DB) 스키마의 테이블 색인과 ERD다. 컬럼 정의는 `database/tables/`, `database_log/tables/`와 [01_DESIGN](01_DESIGN.md)의 DDL이 기준이며, 이 문서는 컬럼을 반복하지 않는다. 테이블을 추가하거나 관계가 바뀌면 이 문서도 함께 고친다.
-본문과 다이어그램 괄호 안의 절 번호(예: `(4.3)`)는 [01_DESIGN](01_DESIGN.md)의 절이다. 용어는 [01_DESIGN 1.6](01_DESIGN.md#16-용어).
+본문과 다이어그램 괄호 안의 절 번호(예: `(4.3)`)는 [01_DESIGN](01_DESIGN.md)의 절이다. 용어는 [01_DESIGN 1.6](01_DESIGN.md#s-1-6).
 
 ## 1. 테이블 목록
 
@@ -13,10 +13,10 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- |
-| `ranking_definition` | 랭킹 정의 (갱신 규칙, 정렬, 일정, 보관, 검증 설정). 순위 규칙은 등록 후 불변 | — | 영구 | [2.1](01_DESIGN.md#21-ranking_definition), [2.7](01_DESIGN.md#27-등록-검증), [2.8](01_DESIGN.md#28-등록-후-수정-d-79) |
-| `ranking_reward_tier` | 랭킹별 보상 구간 (순위·백분율 → `reward_code`) | — | 영구. 정산 시 `tier_snapshot`에 고정 | [2.6](01_DESIGN.md#26-보상-구간) |
-| `ranking_exclusion` | 제재로 순위에서 제외할 멤버 (`season_no = 0`은 전 시즌) | — | 영구 | [7.8](01_DESIGN.md#78-제재-처리) |
-| `api_credential` | 서버 간 호출 API 키 (해시와 권한) | — | 폐기 후에도 보관 | [10.1](01_DESIGN.md#101-인증) |
+| `ranking_definition` | 랭킹 정의 (갱신 규칙, 정렬, 일정, 보관, 검증 설정). 순위 규칙은 등록 후 불변 | — | 영구 | [2.1](01_DESIGN.md#s-2-1), [2.7](01_DESIGN.md#s-2-7), [2.8](01_DESIGN.md#s-2-8) |
+| `ranking_reward_tier` | 랭킹별 보상 구간 (순위·백분율 → `reward_code`) | — | 영구. 정산 시 `tier_snapshot`에 고정 | [2.6](01_DESIGN.md#s-2-6) |
+| `ranking_exclusion` | 제재로 순위에서 제외할 멤버 (`season_no = 0`은 전 시즌) | — | 영구 | [7.8](01_DESIGN.md#s-7-8) |
+| `api_credential` | 서버 간 호출 API 키 (해시와 권한) | — | 폐기 후에도 보관 | [10.1](01_DESIGN.md#s-10-1) |
 
 ### 1.2 시스템 관리
 
@@ -24,16 +24,16 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 쓰는 주체 | 관리자 조작 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- | --- |
-| `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, OPEN·CLOSED), 정산 잡 (SETTLING~DELIVERING), 전달 잡 (SETTLED) | 검수 보류·조기 확정, DELIVERING 강제 종료 (일정은 랭킹 정의로 계산, [D-79](02_DECISIONS.md#d-79)) | — | 영구 | [3.1](01_DESIGN.md#31-ranking_season), [3.4](01_DESIGN.md#34-관리자-수정-범위), [7.5](01_DESIGN.md#75-review-검수), [7.7](01_DESIGN.md#77-delivering-보상-전달) |
-| `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | — | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED(마지막 시즌은 자기 시즌)에 분리 | [4.2](01_DESIGN.md#42-ranking_entry), [7.4](01_DESIGN.md#74-결과-컬럼), [7.7](01_DESIGN.md#77-delivering-보상-전달), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
-| `ranking_submit_key` | 제출 멱등 키 (재전송 판별, 하드 검증 거부 사유) | 제출 API | — | 시즌 | 자기 시즌 SETTLED에 분리 | [4.4](01_DESIGN.md#44-ranking_submit_key), [8.2](01_DESIGN.md#82-테이블별-생명주기) |
-| `ranking_entry_settling` | 정산 작업 테이블 (entry 시즌 파티션을 꺼내 가순위를 매긴 뒤 되돌림) | 정산 잡 | — | — | 평소 비어 있음 | [7.3](01_DESIGN.md#73-settling-가순위-생성) |
-| `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (검수 후 제재 시 `sanctioned`는 제재 처리가 갱신, [D-78](02_DECISIONS.md#d-78)) | — | 영구 | [8.4](01_DESIGN.md#84-ranking_season_top) |
-| `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#92-소프트-탐지-받되-표시), [9.3](01_DESIGN.md#93-어뷰징-포인트) |
-| `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
-| `job_state` | 워커 잡별 동기화 시각 (리컨실러 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#114-운영-테이블) |
-| `instance_heartbeat` | 실행 중인 API·워커 인스턴스 | API·워커 하트비트 | — | — | 정상 종료 시 삭제, 1시간 경과 행 정리 | [11.4](01_DESIGN.md#114-운영-테이블) |
-| `schema_migration` | 마이그레이션 적용 이력 | 러너 (테이블도 러너가 직접 생성) | — | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
+| `ranking_season` | 랭킹별 시즌 일정과 상태 | 시즌 스케줄러 (자동 생성, OPEN·CLOSED), 정산 잡 (SETTLING~DELIVERING), 전달 잡 (SETTLED) | 검수 보류·조기 확정, DELIVERING 강제 종료 (일정은 랭킹 정의로 계산, [D-79](02_DECISIONS.md#d-79)) | — | 영구 | [3.1](01_DESIGN.md#s-3-1), [3.4](01_DESIGN.md#s-3-4), [7.5](01_DESIGN.md#s-7-5), [7.7](01_DESIGN.md#s-7-7) |
+| `ranking_entry` | 시즌별 멤버 스코어와 정산 결과(순위, 보상 상태) (운영 테이블, 랭킹 간 공유) | 제출 API, 정산 잡, 보상 ack API | — | 시즌 | 자기 시즌과 다음 시즌 모두 SETTLED(마지막 시즌은 자기 시즌)에 분리 | [4.2](01_DESIGN.md#s-4-2), [7.4](01_DESIGN.md#s-7-4), [7.7](01_DESIGN.md#s-7-7), [8.2](01_DESIGN.md#s-8-2) |
+| `ranking_submit_key` | 제출 멱등 키 (재전송 판별, 하드 검증 거부 사유) | 제출 API | — | 시즌 | 자기 시즌 SETTLED에 분리 | [4.4](01_DESIGN.md#s-4-4), [8.2](01_DESIGN.md#s-8-2) |
+| `ranking_entry_settling` | 정산 작업 테이블 (entry 시즌 파티션을 꺼내 가순위를 매긴 뒤 되돌림) | 정산 잡 | — | — | 평소 비어 있음 | [7.3](01_DESIGN.md#s-7-3) |
+| `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (검수 후 제재 시 `sanctioned`는 제재 처리가 갱신, [D-78](02_DECISIONS.md#d-78)) | — | 영구 | [8.4](01_DESIGN.md#s-8-4) |
+| `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#s-9-2), [9.3](01_DESIGN.md#s-9-3) |
+| `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#s-11-4) |
+| `job_state` | 워커 잡별 동기화 시각 (리컨실러 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#s-11-4) |
+| `instance_heartbeat` | 실행 중인 API·워커 인스턴스 | API·워커 하트비트 | — | — | 정상 종료 시 삭제, 1시간 경과 행 정리 | [11.4](01_DESIGN.md#s-11-4) |
+| `schema_migration` | 마이그레이션 적용 이력 | 러너 (테이블도 러너가 직접 생성) | — | — | 영구 | [11.5](01_DESIGN.md#s-11-5) |
 
 ### 1.3 로그 DB (`podium_de_log`)
 
@@ -41,13 +41,13 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 관리 API가 생
 
 | 테이블 | 용도 | 쓰는 주체 | 파티션 | 생명주기 | 상세 |
 | --- | --- | --- | --- | --- | --- |
-| `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 월 테이블 `log_ranking_submit_YYYYMM`으로 이동, `LOG_ARCHIVE_MONTHS` 후 월 테이블 DROP | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db) |
-| `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#45-log_ranking_submit-로그-db), [11.4](01_DESIGN.md#114-운영-테이블) |
-| `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#115-마이그레이션) |
+| `log_ranking_submit` | 인증·형식 검사를 통과한 모든 제출의 처리 결과 이력 (감사, 어뷰징·장애 조사) | 제출 API (응답 후, 별도 풀) | 일 단위 | `LOG_RETENTION_DAYS` 후 월 테이블 `log_ranking_submit_YYYYMM`으로 이동, `LOG_ARCHIVE_MONTHS` 후 월 테이블 DROP | [4.5](01_DESIGN.md#s-4-5) |
+| `log_ddl_audit` | 로그 DB `SP_EXEC_DDL` 실행 감사 로그 (메인과 같은 구조) | 로그 DB 관리 SP | — | 영구 | [4.5](01_DESIGN.md#s-4-5), [11.4](01_DESIGN.md#s-11-4) |
+| `schema_migration` | 로그 DB 마이그레이션 적용 이력 | 러너 | — | 영구 | [11.5](01_DESIGN.md#s-11-5) |
 
-**메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`). 시즌마다 생기며 `history_retention`이 지나면 경고하고, 삭제는 운영자가 한다 ([8.3](01_DESIGN.md#83-보관-방식), [11.4](01_DESIGN.md#114-운영-테이블)).
+**메인 DB 백업 테이블**: `{원본}_r{rankingId}_s{seasonNo}` 이름의 일반 테이블이다(`ranking_entry`, `ranking_submit_key`). 시즌마다 생기며 `history_retention`이 지나면 경고하고, 삭제는 운영자가 한다 ([8.3](01_DESIGN.md#s-8-3), [11.4](01_DESIGN.md#s-11-4)).
 
-**로그 DB 월 테이블**: `log_ranking_submit_YYYYMM` 이름의 일 파티션 테이블이다(운영 테이블과 구조·일 경계가 같다). 그 달의 일 파티션을 처음 옮길 때 생기고 `LOG_ARCHIVE_MONTHS`가 지나면 로그 정리 잡이 DROP한다. `log_ranking_submit_xchg`는 옮기는 동안만 있는 교환 테이블이다 ([4.5](01_DESIGN.md#45-log_ranking_submit-로그-db)).
+**로그 DB 월 테이블**: `log_ranking_submit_YYYYMM` 이름의 일 파티션 테이블이다(운영 테이블과 구조·일 경계가 같다). 그 달의 일 파티션을 처음 옮길 때 생기고 `LOG_ARCHIVE_MONTHS`가 지나면 로그 정리 잡이 DROP한다. `log_ranking_submit_xchg`는 옮기는 동안만 있는 교환 테이블이다 ([4.5](01_DESIGN.md#s-4-5)).
 
 **코드 컬럼**: 상태·구분값은 `TINYINT UNSIGNED`이고 값의 의미는 `src/core/codes.ts`에 있다 ([D-46](02_DECISIONS.md#d-46)).
 
@@ -315,7 +315,7 @@ flowchart LR
 
 ## 5. 스코어 적용
 
-4절 ②의 "제출" 한 건이 처리되는 순서다. 점선 상자 안이 `SP_SUBMIT_SCORE`이고, 상세는 01_DESIGN 2.3, 4.1~4.5, 5.3.
+4절 ②의 "제출" 한 건이 처리되는 순서다. 점선 상자 안이 `SP_SUBMIT_SCORE`이고, 상세는 [01_DESIGN 2.3](01_DESIGN.md#s-2-3), [4.1](01_DESIGN.md#s-4-1)~[4.5](01_DESIGN.md#s-4-5), [5.3](01_DESIGN.md#s-5-3).
 
 ```mermaid
 flowchart TD

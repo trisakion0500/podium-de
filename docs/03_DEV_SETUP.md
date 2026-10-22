@@ -13,7 +13,7 @@ MySQL을 어떤 조건으로 준비해야 하는지에 대한 설명이다.
 |---|---|
 | Node.js | 22 이상 — `process.loadEnvFile`(네이티브 `.env` 로딩)을 쓴다 |
 | MySQL | 8.4 |
-| Redis | 7.4 — 순위 반영과 조회에 필요하다. 없어도 API는 뜨고 제출은 MySQL에 저장된다. `maxmemory-policy noeviction`으로 두고, `maxmemory`는 진행 중인 시즌 키 합 + 가장 큰 시즌 하나 이상으로 잡는다(01_DESIGN 1.7). 로컬도 같다 — 재구축 중 축출되면 순위표가 조용히 빈다 |
+| Redis | 7.4 — 순위 반영과 조회에 필요하다. 없어도 API는 뜨고 제출은 MySQL에 저장된다. `maxmemory-policy noeviction`으로 두고, `maxmemory`는 진행 중인 시즌 키 합 + 가장 큰 시즌 하나 이상으로 잡는다([01_DESIGN 1.7](01_DESIGN.md#s-1-7)). 로컬도 같다 — 재구축 중 축출되면 순위표가 조용히 빈다 |
 | Git | 최신 버전 |
 
 ---
@@ -77,12 +77,12 @@ GRANT EXECUTE ON podium_de_log.* TO 'podium_app'@'localhost', 'podium_app'@'127.
 - SP는 `SQL SECURITY DEFINER`(기본값)이고 migrate 계정이 만들므로 DEFINER가 `podium_migrate`가
   된다. 앱 계정은 테이블 권한 없이 SP로만 접근한다.
 - `PROCESS`는 정산 전 미종료 트랜잭션 확인(`INNODB_TRX` 조회)에 필요하다. 이 조회는 SP 안에서
-  하므로 DEFINER인 migrate 계정이 권한을 가진다. 상세: [01_DESIGN 7.1](01_DESIGN.md#71-정산-시작-조건)
+  하므로 DEFINER인 migrate 계정이 권한을 가진다. 상세: [01_DESIGN 7.1](01_DESIGN.md#s-7-1)
 - 서버 시간대와 시간 동기화는 아래 "시간대와 시간 동기화"를 따른다.
 
 ### 시간대와 시간 동기화
 
-모든 시각은 UTC로 저장·비교한다(01_DESIGN 4.1, [D-66](02_DECISIONS.md#d-66)). VM 시간대는 아래처럼 둔다.
+모든 시각은 UTC로 저장·비교한다([01_DESIGN 4.1](01_DESIGN.md#s-4-1), [D-66](02_DECISIONS.md#d-66)). VM 시간대는 아래처럼 둔다.
 
 | VM | OS 시간대 | 비고 |
 | --- | --- | --- |

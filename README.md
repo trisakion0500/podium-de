@@ -19,7 +19,7 @@
 
 설계의 단일 기준은 [`docs/01_DESIGN.md`](docs/01_DESIGN.md)(현재 설계)와
 [`docs/02_DECISIONS.md`](docs/02_DECISIONS.md)(결정과 이유)다. 이 README는 요약과 링크만 둔다.
-처음 보는 용어(원장, 센티넬, 리컨실러, `D-xx` 등)는 [01_DESIGN 1.6 용어](docs/01_DESIGN.md#16-용어)에 있다.
+처음 보는 용어(원장, 센티넬, 리컨실러, `D-xx` 등)는 [01_DESIGN 1.6 용어](docs/01_DESIGN.md#s-1-6)에 있다.
 
 ---
 
@@ -47,16 +47,16 @@
 보상이 걸린 랭킹은 기록 하나의 유실이 CS 사고가 되고, 정산·검수·어뷰징 조사에는 감사
 가능한 원장이 필요하다. Redis 단독 랭킹으로는 이를 채울 수 없어, MySQL을 원장으로 두고
 Redis를 언제든 재구축 가능한 투영으로 다루는 구조를 직접 설계·구현해 보기 위해 시작했다.
-배경과 검토한 대안은 [D-01](docs/02_DECISIONS.md#d-01-싱글테넌트-프로젝트별-독립-배포--확정),
-[D-02](docs/02_DECISIONS.md#d-02-mysql-원장-redis-투영--확정) 참고.
+배경과 검토한 대안은 [D-01](docs/02_DECISIONS.md#d-01),
+[D-02](docs/02_DECISIONS.md#d-02) 참고.
 
 ## 핵심 아이디어
 
 - **MySQL이 원장, Redis는 투영** — Redis 값은 MySQL 행 하나와 랭킹 정의만으로 결정적으로
-  계산된다. 상세: [01_DESIGN 1.5](docs/01_DESIGN.md#15-핵심-원칙)
+  계산된다. 상세: [01_DESIGN 1.5](docs/01_DESIGN.md#s-1-5)
 - **상태 전이는 시각과 관측에 묶는다** — 마감은 잡 실행 여부가 아니라 SP의 시각 검사로
-  결정한다. 상세: [01_DESIGN 3.5](docs/01_DESIGN.md#35-상태-흐름),
-  [D-11](docs/02_DECISIONS.md#d-11-쓰기-차단은-시각-검사로--확정)
+  결정한다. 상세: [01_DESIGN 3.5](docs/01_DESIGN.md#s-3-5),
+  [D-11](docs/02_DECISIONS.md#d-11)
 - **운영 테이블에서 무거운 작업을 하지 않는다** — 운영 테이블 DDL은 메타데이터 수준으로
   제한하고, 정산·삭제는 EXCHANGE로 분리한 테이블에서 수행한다. 상세:
   [01_DESIGN 8](docs/01_DESIGN.md#8-아카이브)
@@ -69,16 +69,16 @@ Redis를 언제든 재구축 가능한 투영으로 다루는 구조를 직접 �
 
 - **문제**: 같은 점수면 먼저 달성한 쪽이 위여야 하고, 조회 시 별도 정렬 없이 순위가 나와야 한다.
 - **해결**: 점수와 달성 시각을 하나의 ZSET score에 비트 분할로 인코딩하고, 등록 시 비트
-  예산을 검증한다. 상세: [01_DESIGN 2.4·5.2](docs/01_DESIGN.md#24-비트-예산),
-  [D-05](docs/02_DECISIONS.md#d-05-동점은-composite-score-인코딩으로-처리--확정)
+  예산을 검증한다. 상세: [01_DESIGN 2.4·5.2](docs/01_DESIGN.md#s-2-4),
+  [D-05](docs/02_DECISIONS.md#d-05)
 
 ### 2. 공유 운영 테이블에서 시즌 데이터를 무중단으로 분리
 
 - **문제**: 데이터가 찬 파티션을 직접 DROP하면 배타 MDL을 잡은 채 파일 삭제가 진행돼 모든
   랭킹의 쓰기가 멈춘다.
 - **해결**: 시즌 파티션을 일반 테이블과 EXCHANGE 1회로 분리하고, 그 테이블을 그대로 백업으로
-  쓴다. 상세: [01_DESIGN 8.1\~8.3](docs/01_DESIGN.md#81-exchange-원칙),
-  [D-18](docs/02_DECISIONS.md#d-18-exchange-1회--시즌별-일반-테이블--확정)
+  쓴다. 상세: [01_DESIGN 8.1\~8.3](docs/01_DESIGN.md#s-8-1),
+  [D-18](docs/02_DECISIONS.md#d-18)
 
 ### 3. MySQL 커밋 후 Redis 반영 유실
 
@@ -138,7 +138,7 @@ API와 워커는 같은 코드베이스의 별도 엔트리다. 테이블·SP �
   - **PERCENT 판정:** "내 앞에 있는 사람이 t% 미만이면 상위 t%"로 판정한다. 상위 t% 인원은 `ceil(참가자 × t / 100)`이고, 경계에 걸친 1명을 포함한다(예: 참가자 199명의 상위 1%는 2명). 1위는 참가자 수와 무관하게 첫 구간을 받는다.
   - **구간이 겹칠 때:** RANK 구간이 PERCENT보다 항상 먼저다. 같은 종류끼리는 `tier_no`가 작은 쪽이다. 상위권(1위, 2~3위 …)은 RANK로, 그 아래는 PERCENT(상위 10% …)로 두면 순서와 무관하게 의도대로 나뉜다.
   - **보상 공백:** 보상받는 순위 사이에 어느 구간에도 들지 않는 순위가 있으면 확정할 때 경고 로그를 남긴다. 예: RANK 1\~10위 + PERCENT 11%부터 → 11위\~상위 10% 경계가 빈다.
-  - 상세: [01_DESIGN 2.6](docs/01_DESIGN.md#26-보상-구간), [D-69](docs/02_DECISIONS.md#d-69)
+  - 상세: [01_DESIGN 2.6](docs/01_DESIGN.md#s-2-6), [D-69](docs/02_DECISIONS.md#d-69)
 - **제재·Anti-cheat** — 제재 제외 후 순위 재부여, 소프트 탐지, 어뷰징 포인트
 - **아카이브** — 시즌별 백업 테이블, 시즌별 Top N 영구 보관(ranking_season_top)
 
@@ -316,7 +316,7 @@ upgrade 없이 수동으로 할 때는 전체 프로세스 중지 → `npm run m
 
 API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 워커는 잡마다 한 곳에서만 돌아
 늘려도 빨라지지 않으므로 장애 대비로 2대를 둔다. 한 대가 죽으면 다른 워커가 다음 차례에 락을
-잡고 이어서 돌린다([01_DESIGN 11.3](docs/01_DESIGN.md#113-잡-실행)). 인스턴스마다 커넥션
+잡고 이어서 돌린다([01_DESIGN 11.3](docs/01_DESIGN.md#s-11-3)). 인스턴스마다 커넥션
 풀(`DB_POOL_SIZE`)을 따로 가지므로, (API 수 + 워커 수) × `DB_POOL_SIZE`가 MySQL
 `max_connections`를 넘지 않게 한다.
 
@@ -395,10 +395,10 @@ migrate가 하트비트로 거부되면
 ## 한계 및 개선 과제
 
 - **2차 이후 범위** — LATEST 갱신 규칙, 늦은 제출 허용, 친구·길드 랭킹 등은 1차 범위
-  밖이다. 목록: [01_DESIGN 12.2](docs/01_DESIGN.md#122-2차-이후)
+  밖이다. 목록: [01_DESIGN 12.2](docs/01_DESIGN.md#s-12-2)
 - **처리량은 단일 장비 측정치** — 로컬 PC 한 대에서 API 2개로 피크 추정치(2,300건/초)를
   처리했다. DB·Redis·API를 분리한 환경의 상한은 미측정이다.
-  결과: [06_LOAD_TEST](docs/06_LOAD_TEST.md), 근거: [D-02](docs/02_DECISIONS.md#d-02-mysql-원장-redis-투영--확정)
+  결과: [06_LOAD_TEST](docs/06_LOAD_TEST.md), 근거: [D-02](docs/02_DECISIONS.md#d-02)
 
 ## 라이선스
 

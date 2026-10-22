@@ -14,7 +14,7 @@
 | 증상 (로그) | 원인 | 조치 |
 |---|---|---|
 | `실행 중인 인스턴스가 있어 migrate를 거부합니다` | 최근 30초 안에 하트비트가 있는 인스턴스가 있다 | 출력된 인스턴스를 모두 정상 종료한 뒤 다시 실행. 강제 종료(kill, Windows `Stop-Process`)한 인스턴스는 행이 남으므로 30초 뒤 다시 실행 |
-| `DB 스키마가 앱과 다릅니다. npm run migrate가 필요합니다` (기동 거부) | 패키지의 SQL 파일과 DB 적용 기록이 다르다 | 전체 중지 → `npm run migrate` → 기동 (중단 패치, 01_DESIGN 11.5) |
+| `DB 스키마가 앱과 다릅니다. npm run migrate가 필요합니다` (기동 거부) | 패키지의 SQL 파일과 DB 적용 기록이 다르다 | 전체 중지 → `npm run migrate` → 기동 (중단 패치, [01_DESIGN 11.5](01_DESIGN.md#s-11-5)) |
 | `스키마 확인용 락(podium:migrate)을 10초 안에 얻지 못했습니다` | migrate가 실행 중이다 | migrate 종료를 기다린 뒤 기동 |
 | `DB에 더 높은 버전(x.y.z)이 적용되어 있습니다` | 낮은 버전 패키지로 migrate를 실행했다 | 올바른 버전 패키지로 실행. DB를 되돌리는 경로는 없다 |
 | `이미 적용된 마이그레이션이 변경되었습니다` | 적용된 테이블 파일(`V0xx`)을 고쳤다 | 파일을 원래대로 돌리고 변경은 새 `V` 파일로 추가 |
@@ -54,14 +54,14 @@
 | `redis unavailable — scores are saved to MySQL only until it recovers` | Redis 접속 불가 | 제출은 성공한다(원장 MySQL). 빈도 검사는 통과로 동작한다. 복구되면 `redis ready`가 남는다. 장애 동안의 제출은 워커 복구 잡이 순위표에 채운다(복구 후 한 주기 안) |
 | `redis apply gave up ... reconciler will catch up` | 첫 시도와 재시도 2회 모두 실패 | 워커 복구 잡이 다음 주기에 맞춘다. 잦으면 Redis 지연·`REDIS_TIMEOUT_MS` 확인 |
 | `redis rate limit check failed, allowing` | 빈도 검사 시간 초과 | 그 요청은 통과된다. 잦으면 Redis 지연 확인 |
-| 순위표에 반영이 안 됨, 오류 로그 없음 | 시즌 센티넬(`...:ready`)이 없다 — 정산 중이거나 재구축 전 | 의도된 동작이다(01_DESIGN 5.3). 조회는 2007을 받는다. 워커가 떠 있으면 다음 주기에 재구축되어 센티넬이 생긴다. 계속 없으면 워커 기동 여부와 `recovery cycle failed` 로그 확인 |
+| 순위표에 반영이 안 됨, 오류 로그 없음 | 시즌 센티넬(`...:ready`)이 없다 — 정산 중이거나 재구축 전 | 의도된 동작이다([01_DESIGN 5.3](01_DESIGN.md#s-5-3)). 조회는 2007을 받는다. 워커가 떠 있으면 다음 주기에 재구축되어 센티넬이 생긴다. 계속 없으면 워커 기동 여부와 `recovery cycle failed` 로그 확인 |
 | `rebuilt ranking=… season=… members=N in Xms` | 센티넬이 없어 재구축함(새 시즌, Redis 유실) | 정상. 100만 명 기준 BEST 약 6초, SUM 약 11초가 기준이다. 새 시즌이 아닌데 자주 나오면 Redis 재시작·메모리 축출 확인 |
-| 순위표가 비었거나 일부 멤버가 빠짐, 조회는 정상 응답(2007 아님), 오류 로그 없음 | Redis 축출 정책(`maxmemory-policy`가 `noeviction`이 아님)이 순위표 키를 지웠다. 센티넬이 남아 있어 빈 순위표를 정상으로 내보낸다 | `CONFIG GET maxmemory-policy`와 `INFO stats`의 `evicted_keys`를 확인한다. `noeviction`으로 바꾸고(01_DESIGN 1.7) 해당 시즌 센티넬(`…:ready`)을 지우면 다음 주기에 재구축된다. 그냥 두면 1시간 1회 점검이 전체 스캔으로 채울 때까지 틀린 순위가 나간다 |
-| 순위 값이 MySQL과 다름, 조회는 정상(2007 아님), 오류 로그 없음 | 시스템 밖에서 Redis 값이 바뀌었다(직접 쓰기, 코드 결함) — 자동 복구 창 밖이라 남는다(01_DESIGN 6.5) | Redis를 직접 건드렸는지 확인한다. 해당 시즌 센티넬(`…:ready`)을 지우면 다음 주기에 재구축된다(그동안 그 시즌 조회는 2007) |
+| 순위표가 비었거나 일부 멤버가 빠짐, 조회는 정상 응답(2007 아님), 오류 로그 없음 | Redis 축출 정책(`maxmemory-policy`가 `noeviction`이 아님)이 순위표 키를 지웠다. 센티넬이 남아 있어 빈 순위표를 정상으로 내보낸다 | `CONFIG GET maxmemory-policy`와 `INFO stats`의 `evicted_keys`를 확인한다. `noeviction`으로 바꾸고([01_DESIGN 1.7](01_DESIGN.md#s-1-7)) 해당 시즌 센티넬(`…:ready`)을 지우면 다음 주기에 재구축된다. 그냥 두면 1시간 1회 점검이 전체 스캔으로 채울 때까지 틀린 순위가 나간다 |
+| 순위 값이 MySQL과 다름, 조회는 정상(2007 아님), 오류 로그 없음 | 시스템 밖에서 Redis 값이 바뀌었다(직접 쓰기, 코드 결함) — 자동 복구 창 밖이라 남는다([01_DESIGN 6.5](01_DESIGN.md#s-6-5)) | Redis를 직접 건드렸는지 확인한다. 해당 시즌 센티넬(`…:ready`)을 지우면 다음 주기에 재구축된다(그동안 그 시즌 조회는 2007) |
 | `recovery audit mismatch … redis=A mysql=B — full reconcile` | 1시간 1회 점검에서 Redis 멤버 수가 MySQL보다 적음 | 같은 주기에 시즌 전체를 L2로 다시 훑어 채운다(조회 중단 없음). 매번 반복되면 composite 계산 실패 행(`recovery skipped member`) 확인 |
 | `OOM command not allowed when used memory > 'maxmemory'` (반영 실패, `recovery cycle failed`) | Redis 메모리 한도 도달 (`noeviction`) | 원장은 안전하다. `maxmemory`를 늘리거나 끝난 시즌 키가 남았는지 확인한다. 늘리면 다음 주기에 재구축·반영이 따라잡는다 |
 | `recovery cycle failed` | 복구 주기 중 DB·Redis 오류 | 다음 주기에 다시 시도한다. 연속되면 DB·Redis 연결 확인 |
-| `reconcile from redis sentinel … (behind db synced_at — redis restored or failed over?)` | 센티넬 값이 DB 동기화 시각보다 이르다 — Redis가 RDB 스냅샷 복원이나 레플리카 페일오버로 과거로 돌아갔다 | 자동으로 센티넬 값부터 다시 읽어 메운다(01_DESIGN 6.2). 조치 불필요. Redis 재시작·페일오버 원인 확인. 이전 버전이 만든 센티넬(`'1'`)이 남은 시즌은 첫 주기에 한 번 나오고 전체를 훑는다 |
+| `reconcile from redis sentinel … (behind db synced_at — redis restored or failed over?)` | 센티넬 값이 DB 동기화 시각보다 이르다 — Redis가 RDB 스냅샷 복원이나 레플리카 페일오버로 과거로 돌아갔다 | 자동으로 센티넬 값부터 다시 읽어 메운다([01_DESIGN 6.2](01_DESIGN.md#s-6-2)). 조치 불필요. Redis 재시작·페일오버 원인 확인. 이전 버전이 만든 센티넬(`'1'`)이 남은 시즌은 첫 주기에 한 번 나오고 전체를 훑는다 |
 | `rebuild aborted: temp keys lost members …` (`recovery cycle failed`) | 재구축 도중 Redis가 재시작·페일오버돼 임시 키 일부를 잃었다 | 교체하지 않았으므로 틀린 순위가 나가지 않는다. 다음 주기에 처음부터 다시 재구축한다. 반복되면 Redis 재시작 원인 확인 |
 
 ## 1.4 DB·잡
@@ -116,8 +116,8 @@
 
 ## 2.4 composite 정밀도 손실
 
-- **원인:** `score × 2^time_bits`가 2^53을 넘으면 double이 하위(시간) 비트를 잃어 동점 순서가 소리 없이 틀어진다. 등록 시 비트 예산 검사(01_DESIGN 2.7)는 아직 없다.
-- **해결:** composite 계산에서 안전 정수가 아니면 예외로 막는다. 응답은 성공으로 두고 리컨실러에 맡긴다. 리컨실러도 같은 행에서 같은 이유로 건너뛰며 `recovery skipped member` 로그를 남긴다. 근본 대책은 등록 시 비트 예산 검사(01_DESIGN 2.7)다.
+- **원인:** `score × 2^time_bits`가 2^53을 넘으면 double이 하위(시간) 비트를 잃어 동점 순서가 소리 없이 틀어진다. 등록 시 비트 예산 검사([01_DESIGN 2.7](01_DESIGN.md#s-2-7))는 아직 없다.
+- **해결:** composite 계산에서 안전 정수가 아니면 예외로 막는다. 응답은 성공으로 두고 리컨실러에 맡긴다. 리컨실러도 같은 행에서 같은 이유로 건너뛰며 `recovery skipped member` 로그를 남긴다. 근본 대책은 등록 시 비트 예산 검사([01_DESIGN 2.7](01_DESIGN.md#s-2-7))다.
 
 ## 2.5 RESULT 0 뒤 데이터 SELECT 실패가 성공으로 처리됨
 
@@ -143,13 +143,13 @@
 
 - **증상:** 100만 명 시즌을 두 번째로 재구축할 때 Redis PING이 186~215ms 걸렸다. SLOWLOG에 교체 Lua 안의 `RENAME`이 같은 시간으로 남았다.
 - **원인:** `RENAME`이 기존 라이브 키를 덮어쓰면서 100만 개 원소를 메인 스레드에서 동기로 해제했다. 그동안 다른 모든 명령(제출 반영, 조회)이 기다린다.
-- **해결:** 교체 Lua가 기존 라이브 키를 `UNLINK`로 먼저 뗀 뒤 `RENAME`한다. `UNLINK`는 해제를 백그라운드 스레드로 넘기므로 lazyfree 설정과 무관하다. 수정 후에는 교체가 SLOWLOG(10ms 이상)에 나타나지 않았다. 4단계의 시즌 키 삭제도 같은 이유로 `UNLINK`를 쓴다(01_DESIGN 5.6).
+- **해결:** 교체 Lua가 기존 라이브 키를 `UNLINK`로 먼저 뗀 뒤 `RENAME`한다. `UNLINK`는 해제를 백그라운드 스레드로 넘기므로 lazyfree 설정과 무관하다. 수정 후에는 교체가 SLOWLOG(10ms 이상)에 나타나지 않았다. 4단계의 시즌 키 삭제도 같은 이유로 `UNLINK`를 쓴다([01_DESIGN 5.6](01_DESIGN.md#s-5-6)).
 
 ## 2.10 Redis 축출 정책이 순위표를 조용히 지움
 
 - **증상:** 위 수정 뒤에도 SUM 재구축에서 PING이 210~240ms 나왔다. 그 시간대 SLOWLOG에는 느린 명령이 없었다.
 - **원인:** LATENCY 모니터에 `eviction-del 216~255ms`가 남았다. 로컬 Redis가 `maxmemory 256MB`, `allkeys-lru`라, 재구축 중 라이브 키와 임시 키가 함께 있는 동안(약 280MB) 한도를 넘겨 키 31개를 축출했다. 축출 정책은 라이브 순위표도 지울 수 있다. 센티넬이 남아 있으면 조회가 2007이 아니라 비거나 일부만 남은 순위를 정상처럼 돌려준다.
-- **해결:** Redis를 `maxmemory-policy noeviction`으로 두고 `maxmemory`를 "진행 중인 시즌 키 합 + 가장 큰 시즌 하나" 이상으로 잡는다(01_DESIGN 1.7). 로컬은 1GB로 바꿨고, 다시 측정했을 때 축출 0개, 최대 PING 11~22ms였다.
+- **해결:** Redis를 `maxmemory-policy noeviction`으로 두고 `maxmemory`를 "진행 중인 시즌 키 합 + 가장 큰 시즌 하나" 이상으로 잡는다([01_DESIGN 1.7](01_DESIGN.md#s-1-7)). 로컬은 1GB로 바꿨고, 다시 측정했을 때 축출 0개, 최대 PING 11~22ms였다.
 - **이후:** 100만 명 측정을 마친 뒤 로컬은 512MB로 되돌렸다. 평소 테스트(수만 명 규모)는 2026-10-09 2,000건/초 측정에서도 최대 378MB였다. 100만 명 규모를 다시 잴 때만 1GB 이상으로 올린다.
 
 ## 2.11 부하 테스트 처리량이 기존 측정보다 15~20% 낮음
