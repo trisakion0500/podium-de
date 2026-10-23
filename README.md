@@ -13,7 +13,7 @@
 
 - **핵심 기술**: Node.js 22 + TypeScript · MySQL 8.4(모든 DB 로직은 Stored Procedure,
   LIST COLUMNS 파티션) · Redis 7.4(실시간 순위표, MySQL의 투영)
-- **정량 현황**: 5단계(아카이브 로테이션)까지 완료. 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
+- **정량 현황**: 5단계(아카이브 로테이션)까지 완료, 6단계 진행 중(관리 API 기반, 랭킹 등록·수정). 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
 - **기술적 강조점**: 시즌 단위 파티션 EXCHANGE 아카이브 · composite score 동점 처리 ·
   동기화 시각 차분 리컨실러 기반 자가 복구 · 동적 SQL을 `SP_EXEC_DDL` 하나로 격리
 
@@ -194,12 +194,13 @@ podiumDE/
 │   │   ├── submit.ts    # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
 │   │   ├── ranks.ts     # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
 │   │   ├── results.ts   # 지난 시즌 결과·Top N 조회, 보상 목록·ack·대기 시즌 API
-│   │   └── seasons.ts   # 현재 시즌 메모리 캐시(end_at까지)
+│   │   └── seasons.ts   # 현재 시즌 메모리 캐시(end_at과 30초 중 이른 쪽까지)
 │   ├── admin/           # 관리 API (01_DESIGN 10.4)
 │   │   ├── session.ts   # 세션 쿠키·토큰 해시, 세션·역할 가드, Origin 검사
 │   │   ├── password.ts  # scrypt 해시·비교, 비밀번호 규칙, 초기 비밀번호 생성
 │   │   ├── auth.ts      # 로그인·로그아웃·내 계정·비밀번호 변경
 │   │   ├── accounts.ts  # 계정 목록·생성·수정·초기화·잠금 해제
+│   │   ├── rankings.ts  # 랭킹 목록·조회·등록·수정·보상 구간 교체, 등록 검증
 │   │   └── audit.ts     # 감사 로그 적재(로그 DB, 별도 풀)·조회
 │   └── worker/          # 워커 잡
 │       ├── loop.ts      # 잡 주기 실행(GET_LOCK 단일 실행, 정상 종료 대기)
@@ -415,13 +416,13 @@ migrate가 하트비트로 거부되면
   - ✅ 로그 DB 월 테이블 아카이브 — 일 파티션 EXCHANGE 두 번(복사 없음, 중단 후 이어서), `LOG_ARCHIVE_MONTHS` 후 월 테이블 삭제 ([D-72](docs/02_DECISIONS.md#d-72))
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
   - ✅ 관리 API 기반 — `start:admin` 프로세스, 계정·세션·감사 로그, 로그인·비밀번호 변경·잠금, 첫 admin CLI, 역할 확인 ([D-74](docs/02_DECISIONS.md#d-74), [D-80](docs/02_DECISIONS.md#d-80))
-  - ⬜ 랭킹 등록·수정 — 등록 검증(보상 구간 값, 보상 공백 표시), 시즌 1 생성, 묶음별 수정, 늘리기·줄이기·조기 종료·ENDED·PAUSED ([D-69](docs/02_DECISIONS.md#d-69), [D-79](docs/02_DECISIONS.md#d-79))
+  - ✅ 랭킹 등록·수정 — 등록 검증(비트 예산, 일정 시험 계산, 정산 기간, 보상 구간), 묶음별 수정, 늘리기·줄이기·조기 종료·ENDED·PAUSED, 스케줄러 락 직렬화, 현재 시즌 캐시 30초 상한 ([D-79](docs/02_DECISIONS.md#d-79), [D-81](docs/02_DECISIONS.md#d-81))
   - ⬜ 제재 — 반영 Lua 제외 집합, 등록·해제, 리컨실러 동기화, 재구축 때 다시 채우기, 검수 후 제재 표시 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
   - ⬜ 검수·전달 조작 — 검수 보류·해제·조기 확정, 장기 보류 알림, 검수 목록, DELIVERING 강제 종료
   - ⬜ Anti-cheat — 소프트 탐지 4규칙, 탐지 중복 방지, 검수 목록 포인트 정렬 ([D-76](docs/02_DECISIONS.md#d-76), [D-77](docs/02_DECISIONS.md#d-77))
   - ⬜ 정리 — `reward_held` 조건 제거(SP, 회귀 테스트, 03_DEV_SETUP 문구)
   - ⬜ 설치 패키징 — 배포 형태, 설치 절차, 설정 안내
-- ⬜ 7단계: 운영 웹 프론트엔드
+- ⬜ 7단계: 운영 웹 프론트엔드 (보상 공백 표시 포함, [D-69](docs/02_DECISIONS.md#d-69))
 
 ---
 

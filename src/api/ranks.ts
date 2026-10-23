@@ -100,10 +100,11 @@ async function readCurrent(deps: { pool: Pool; redis: Redis }, rankingId: number
 
 /**
  * 순위 조회 라우트를 등록한다 (01_DESIGN 5.4, 10.2): 현재 시즌 정보, 상위 페이징, 내 순위. 권한: read.
- * 현재 시즌은 랭킹별로 end_at까지 메모리에 두고(rankings.getCurrentSeason), 순위는 Redis에서만 읽는다.
+ * 현재 시즌은 랭킹별로 end_at과 30초 중 이른 때까지 메모리에 두고(seasons.getCurrentSeason), 순위는 Redis에서만 읽는다.
  * @param app Fastify 인스턴스
  * @param deps 메인 DB 풀, Redis 클라이언트
  * @author trisakion
+ * @modified 2026-10-23 trisakion 현재 시즌 설명에 조기 종료 재조회 안내 추가
  */
 export function registerRankRoutes(app: FastifyInstance, deps: { pool: Pool; redis: Redis }): void {
     app.get<{ Params: { id: number } }>('/v1/rankings/:id/seasons/current', {
@@ -114,6 +115,7 @@ export function registerRankRoutes(app: FastifyInstance, deps: { pool: Pool; red
                 '지금 시각이 [startAt, endAt)에 드는 시즌을 돌려준다. 권한: read.',
                 '',
                 '- 게임 서버는 이 값을 캐시해 표시와 제출(`seasonNo`)에 쓰고, `endAt`이 지나면 다시 조회한다.',
+                '- `endAt`은 조기 종료로 앞당겨질 수 있다. 주기적으로(예: 1분) 다시 조회하고, 제출이 1103이면 바로 다시 조회한다.',
                 '- 시즌 사이 공백이거나 종료된 랭킹이면 1301/404다.',
             ].join('\n'),
             tags: ['rankings'],

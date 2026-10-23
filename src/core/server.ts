@@ -86,7 +86,7 @@ function errorBody(result: ErrorCode, detail?: string): { result: number; messag
 function resultCodeTable(): string {
     const rows = Object.entries(ERROR_MAP).map(([code, e]) => `| ${code} | ${e.httpStatus} | ${e.message} |`);
     return [
-        '성공은 `{ result: 0, data }`, 실패는 `{ result, message }`이다. 대역: 10xx~14xx SP, 20xx API 계층, 5000 앱 미분류, 50001 DB.',
+        '성공은 `{ result: 0, data }`, 실패는 `{ result, message }`이다. 대역: 10xx~15xx SP, 20xx API 계층, 5000 앱 미분류, 50001 DB.',
         '',
         '| result | HTTP | 의미 |',
         '| --- | --- | --- |',
@@ -118,6 +118,7 @@ export interface ServerOptions {
  * @modified 2026-10-07 trisakion 순위 집계 중(2007)은 오류 로그에서 제외
  * @modified 2026-10-14 trisakion 바디 검증은 타입 변환을 끔 (쿼리·경로는 유지)
  * @modified 2026-10-22 trisakion 관리 API용 옵션(문서 제목, 인증 방식, 프록시 신뢰)과 GM 계정 ID 로그 추가
+ * @modified 2026-10-23 trisakion BusinessException의 응답 설명(publicDetail)을 message 뒤에 붙임
  */
 export async function buildServer(options: ServerOptions = {}): Promise<FastifyInstance> {
     // Fastify 요청 처리 순서(아래 훅·핸들러가 끼어드는 위치):
@@ -201,7 +202,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<FastifyI
             // 2007(집계 중)은 재구축·Redis 장애 동안 조회마다 나오는 예상된 상태다. 원인은 Redis 연결·읽기 로그에 이미 남는다.
             if (err.httpStatus >= 500 && err.result !== ApiResult.RANKING_UNAVAILABLE)
                 logger.error(`[${req.id}] ${err.message}`);
-            return reply.code(err.httpStatus).send({ result: err.result, message: err.publicMessage });
+            return reply.code(err.httpStatus).send({ result: err.result, message: err.publicDetail ? `${err.publicMessage} ${err.publicDetail}` : err.publicMessage });
         }
         // 스키마 검증 실패와 Fastify가 만든 4xx(JSON 파싱, 바디 크기, Content-Type)는 요청 형식 오류다.
         // Fastify 메시지는 요청 자체에 대한 설명이라 내부 정보가 없어 그대로 붙인다.

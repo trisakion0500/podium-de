@@ -179,21 +179,33 @@ export async function callSp(db: Pool | PoolConnection, name: string, params: un
 }
 
 /**
+ * SP 실패 RESULT를 응답 코드(BusinessException)로 던진다. ERROR_MAP에 없는 코드는 SP와 앱이 어긋난 것이라 앱 오류(5000)로 던진다.
+ * 감사 로그를 먼저 남겨야 하는 관리 API는 callSp 결과를 받아 로그를 쓴 뒤 이것을 부른다.
+ * @param name SP 이름 (오류 메시지용)
+ * @param result SP RESULT
+ * @returns 없음 (실패면 예외)
+ * @author trisakion
+ */
+export function throwIfSpFailed(name: string, result: number): void {
+    if (result === 0)
+        return;
+    if (!(result in ERROR_MAP))
+        throw new Error(`${name}: unmapped result ${result}`);
+    throw new BusinessException(result as ErrorCode);
+}
+
+/**
  * SP를 부르고 실패 RESULT를 응답 코드(BusinessException)로 던진다. 결과·보상 API와 관리 API가 함께 쓴다.
- * ERROR_MAP에 없는 코드는 SP와 앱이 어긋난 것이라 앱 오류(5000)로 던진다.
  * @param db 풀 또는 전용 커넥션
  * @param name SP 이름
  * @param params IN 파라미터
  * @returns 데이터 행
  * @author trisakion
+ * @modified 2026-10-23 trisakion 실패 변환을 throwIfSpFailed로 분리
  */
 export async function callSpRows(db: Pool | PoolConnection, name: string, params: unknown[]): Promise<RowDataPacket[]> {
     const { result, rows } = await callSp(db, name, params);
-    if (result !== 0) {
-        if (!(result in ERROR_MAP))
-            throw new Error(`${name}: unmapped result ${result}`);
-        throw new BusinessException(result as ErrorCode);
-    }
+    throwIfSpFailed(name, result);
     return rows;
 }
 

@@ -211,7 +211,7 @@ export const PartitionTarget = {
 /**
  * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
  * SP는 같은 숫자를 리터럴로 쓴다. API 응답 result로 그대로 나가며, API 계층 코드(ApiResult 20xx)와 겹치지 않게
- * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회, 1400번대 관리 계정). 도메인당 99개, 넘치면 예비 대역을 준다.
+ * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회, 1400번대 관리 계정, 1500번대 관리 랭킹). 도메인당 99개, 넘치면 예비 대역을 준다.
  * @author trisakion
  * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
  * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
@@ -221,6 +221,7 @@ export const PartitionTarget = {
  * @modified 2026-10-11 trisakion 확정 SP 코드(1014~1015) 추가
  * @modified 2026-10-14 trisakion SETTLED 전이 코드(1016) 추가
  * @modified 2026-10-22 trisakion 관리 계정 SP 코드(1401~1407) 추가
+ * @modified 2026-10-23 trisakion 관리 랭킹 SP 코드(1501~1503) 추가, 대역 설명에 1500번대 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -291,6 +292,12 @@ export const SpResult = {
     ADMIN_SELF_CHANGE: 1406,
     /** 관리 계정: login_id 중복 (대소문자 무시) */
     ADMIN_LOGIN_ID_TAKEN: 1407,
+    /** 관리 랭킹: 랭킹 없음 */
+    ADMIN_RANKING_NOT_FOUND: 1501,
+    /** 관리 랭킹: ranking_code 중복 (대소문자 구분) */
+    ADMIN_RANKING_CODE_TAKEN: 1502,
+    /** 관리 랭킹: 지금 상태에서 바꿀 수 없음 — 시즌 시작 뒤 일정 변경, ENDED 뒤 상태·일정·종료 변경, 지난 시각으로 줄이기, 끝난 랭킹 늘리기 (01_DESIGN 2.8) */
+    ADMIN_RANKING_LOCKED: 1503,
 } as const;
 
 /**
@@ -301,6 +308,7 @@ export const SpResult = {
  * @modified 2026-10-07 trisakion 제출 빈도 초과(2006) 추가
  * @modified 2026-10-07 trisakion 순위 집계 중(2007) 추가
  * @modified 2026-10-22 trisakion 관리 API 세션·역할·Origin을 2002·2003에 포함, 비밀번호 규칙 위반(2008) 추가
+ * @modified 2026-10-23 trisakion 랭킹 등록·수정 검증(2009~2012)과 스케줄러 락 대기 초과(2013) 추가
  */
 export const ApiResult = {
     /** 요청 형식 오류 (스키마 검증 실패, JSON 파싱 실패 등) */
@@ -319,6 +327,16 @@ export const ApiResult = {
     RANKING_UNAVAILABLE: 2007,
     /** 관리 API: 비밀번호 규칙 위반 (12~128자, 아이디와 같으면 안 됨) */
     PASSWORD_POLICY: 2008,
+    /** 관리 API: 비트 예산 초과 — bits(score_max) + bits(최대 시즌 길이 / time_unit) > 53 (01_DESIGN 2.4) */
+    BIT_BUDGET_EXCEEDED: 2009,
+    /** 관리 API: 시즌 일정 규칙 위반 — 시작 시각, 시간대, MONTHLY 시작일, FIXED 길이 (01_DESIGN 2.7) */
+    SCHEDULE_INVALID: 2010,
+    /** 관리 API: 정산 시작 지연 + 검수 기간이 시즌 길이 이상 (01_DESIGN 2.7) */
+    SETTLE_PERIOD_TOO_LONG: 2011,
+    /** 관리 API: 보상 구간 규칙 위반 (01_DESIGN 2.6) */
+    REWARD_TIER_INVALID: 2012,
+    /** 관리 API: 스케줄러 락을 기다리다 시간 초과. 반영되지 않았으므로 그대로 다시 시도한다 */
+    SCHEDULER_BUSY: 2013,
     /** 분류되지 않은 앱 예외 */
     INTERNAL_ERROR: 5000,
     /** SP 내부 시스템 오류 (SP RESULT 50001, db.ts callSp가 던짐) */

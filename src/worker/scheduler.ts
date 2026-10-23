@@ -109,6 +109,26 @@ function addCalendar(start: Date, timezone: string, cycleType: number): Date {
 }
 
 /**
+ * 시즌 하나의 원래 종료 시각을 구한다. 랭킹 end_at에서 자르기 전 값이다 — 관리 API가 늘리기에서 잘려 있던 시즌을 되돌릴 때도 쓴다(2.8).
+ * @param cycle 랭킹 주기 설정
+ * @param startAt 시즌 시작
+ * @returns 시즌 종료 (반복 없음이면 랭킹 end_at, 없으면 9999-12-31). 잘못된 주기 설정이면 예외
+ * @author trisakion
+ */
+export function naturalSeasonEnd(cycle: SeasonCycle, startAt: Date): Date {
+    if (cycle.cycleType === CycleType.NONE)
+        return cycle.endAt ?? PERMANENT_END;
+    if (cycle.cycleType === CycleType.FIXED) {
+        if (!cycle.cycleValue || cycle.cycleValue < 1)
+            throw new Error(`FIXED cycle_value must be >= 1 (got ${cycle.cycleValue})`);
+        return new Date(startAt.getTime() + cycle.cycleValue * 1000);
+    }
+    if (cycle.cycleType === CycleType.DAILY || cycle.cycleType === CycleType.WEEKLY || cycle.cycleType === CycleType.MONTHLY)
+        return addCalendar(startAt, cycle.timezone, cycle.cycleType);
+    throw new Error(`unsupported cycle_type ${cycle.cycleType}`);
+}
+
+/**
  * 다음 시즌을 계산한다 (01_DESIGN 2.5, 3.2). 시즌 1은 랭킹 시작에서 시작하고, 이후 시즌은 앞 시즌 종료 + wait_period에서 시작한다.
  * 시즌 길이는 DAILY·WEEKLY·MONTHLY가 timezone 벽시계로 하루·7일·한 달, FIXED가 cycle_value초다. WEEKLY의 요일은 시작 시각의 요일이다.
  * 랭킹 종료가 있으면 그 시각에서 자르고, 그 뒤에 시작하는 시즌은 만들지 않는다.
@@ -120,6 +140,7 @@ function addCalendar(start: Date, timezone: string, cycleType: number): Date {
  * @author trisakion
  * @modified 2026-10-10 trisakion MONTHLY 29일 이후 시작이 이어지는 시즌이면 거부 (D-67)
  * @modified 2026-10-10 trisakion FIXED cycle_value 1 미만 거부 (길이 0 시즌 방지)
+ * @modified 2026-10-23 trisakion 종료 계산을 naturalSeasonEnd로 분리
  */
 export function nextSeason(cycle: SeasonCycle, last: SeasonSpan | null): SeasonSpan | null {
     if (last && cycle.cycleType === CycleType.NONE)
@@ -129,18 +150,7 @@ export function nextSeason(cycle: SeasonCycle, last: SeasonSpan | null): SeasonS
     if (cycle.endAt && startAt >= cycle.endAt)
         return null;
 
-    let endAt: Date;
-    if (cycle.cycleType === CycleType.NONE)
-        endAt = cycle.endAt ?? PERMANENT_END;
-    else if (cycle.cycleType === CycleType.FIXED) {
-        if (!cycle.cycleValue || cycle.cycleValue < 1)
-            throw new Error(`FIXED cycle_value must be >= 1 (got ${cycle.cycleValue})`);
-        endAt = new Date(startAt.getTime() + cycle.cycleValue * 1000);
-    }
-    else if (cycle.cycleType === CycleType.DAILY || cycle.cycleType === CycleType.WEEKLY || cycle.cycleType === CycleType.MONTHLY)
-        endAt = addCalendar(startAt, cycle.timezone, cycle.cycleType);
-    else
-        throw new Error(`unsupported cycle_type ${cycle.cycleType}`);
+    let endAt = naturalSeasonEnd(cycle, startAt);
     const isLast = cycle.endAt !== null && endAt >= cycle.endAt;
     if (cycle.cycleType === CycleType.MONTHLY && !isLast && new Date(wallClock(startAt.getTime(), cycle.timezone)).getUTCDate() > MONTHLY_MAX_START_DAY)
         throw new Error(`MONTHLY season ${seasonNo} starts after day ${MONTHLY_MAX_START_DAY} (${startAt.toISOString()} ${cycle.timezone}) and more seasons follow — set start_at day to 1~${MONTHLY_MAX_START_DAY} (D-67)`);

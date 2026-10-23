@@ -50,8 +50,10 @@ const { createClient } = await import('redis');
 /** 복구 시나리오(BEST·SUM), 락 대기, API 경유(BEST·SUM), 스케줄러(FIXED, 단일 시즌, 종료), 정산(DESC, ASC 이어받기, 빈 시즌), 보상 전달 */
 const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
     finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964,
-    fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969, arc: 970, arcLast: 971 };
+    fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969, arc: 970, arcLast: 971, rkShort: 972, rkExtend: 973, rkOver: 974, rkEnd: 975 };
 const ALL_IDS = Object.values(IDS);
+/** 관리 API로 등록한 테스트 랭킹의 코드 접두어. ID는 AUTO_INCREMENT라 코드로 찾아 지운다 */
+const RK_CODE = 'rtk-';
 const N = 2500;
 const PORT = Number(process.env.TEST_PORT ?? 3199);
 const BASE = `http://localhost:${PORT}`;
@@ -97,9 +99,10 @@ function check(name, ok, detail = '') {
  * @returns 없음
  */
 async function clean() {
+    const ids = [...ALL_IDS, ...(await q('SELECT ranking_id id FROM ranking_definition WHERE ranking_code LIKE ?', [`${RK_CODE}%`])).map((r) => r.id)];
     for (const t of ['ranking_entry', 'ranking_submit_key']) {
-        await q(`DELETE FROM ${t} WHERE ranking_id IN (?)`, [ALL_IDS]);
-        for (const id of ALL_IDS) {
+        await q(`DELETE FROM ${t} WHERE ranking_id IN (?)`, [ids]);
+        for (const id of ids) {
             const ps = (await q('SELECT PARTITION_NAME n FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND PARTITION_DESCRIPTION LIKE ?', [t, `(${id},%`]))
                 .map((x) => '`' + x.n + '`');
             if (ps.length)
@@ -107,7 +110,7 @@ async function clean() {
         }
     }
     for (const t of ['ranking_season', 'ranking_definition', 'ranking_reward_tier', 'ranking_season_top', 'ranking_exclusion', 'job_state', 'ranking_entry_settling'])
-        await q(`DELETE FROM ${t} WHERE ranking_id IN (?)`, [ALL_IDS]);
+        await q(`DELETE FROM ${t} WHERE ranking_id IN (?)`, [ids]);
     // 정산 도중 끊긴 테스트가 남긴 정렬 인덱스·가상 컬럼 (작업 테이블이 비어 있을 때만 — 다른 시즌 정산 중이면 건드리지 않는다)
     if ((await q('SELECT COUNT(member_id) n FROM ranking_entry_settling'))[0].n === 0) {
         if ((await q("SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ranking_entry_settling' AND INDEX_NAME = 'ix_settle_order'")).length)
@@ -127,8 +130,8 @@ async function clean() {
         await q('DELETE FROM admin_account WHERE admin_account_id IN (?)', [adminIds]);
     }
     await LM.query("DELETE FROM log_admin_audit WHERE login_id LIKE 'rtest-%'");
-    await LM.query('DELETE FROM log_ranking_submit WHERE ranking_id IN (?)', [ALL_IDS]);
-    for (const id of ALL_IDS)
+    await LM.query('DELETE FROM log_ranking_submit WHERE ranking_id IN (?)', [ids]);
+    for (const id of ids)
         for await (const keys of R.scanIterator({ MATCH: `${config.redis.keyPrefix}rk:{${id}}*`, COUNT: 1000 }))
             if (keys.length)
                 await R.unlink(keys);
@@ -2365,6 +2368,205 @@ async function adminScenarios() {
         `(${[...actions].join(',')}, 실패 ${failRows}, CLI ${cliRows})`);
 }
 
+/**
+ * 관리 CLI로 admin을 만들고 비밀번호를 바꿔 세션 토큰을 돌려준다.
+ * @param loginId 아이디
+ * @returns 세션 토큰
+ */
+async function admRoot(loginId) {
+    const { password } = await adminCli(['create', '--login-id', loginId, '--name', 'Root']);
+    const first = await admLogin(loginId, password);
+    return (await adm('POST', '/auth/password', { token: first.token, body: { currentPassword: password, newPassword: `${loginId}-password` } })).token;
+}
+
+/**
+ * 관리 API가 응답할 때까지 기다린다.
+ * @returns 없음
+ */
+async function admUp() {
+    await until(async () => {
+        try {
+            return (await fetch(`${ADMIN_BASE}/health`)).ok;
+        } catch {
+            return false;
+        }
+    }, 20000);
+}
+
+/**
+ * 관리 API 랭킹 등록·수정 회귀 (01_DESIGN 2.7, 2.8, 10.4, D-79, D-81): 등록과 시즌 생성, 검증 거부(2009~2012, 2001), 역할,
+ * 시즌 일정 변경, 운영 값, 조기 종료와 빈 파티션 정리, 늘리기(잘린 시즌 재계산), 끝난 랭킹·지난 시각 거부, ENDED, 보상 구간 교체,
+ * SP 역할 재확인, 스케줄러 락 겹침, 감사 로그.
+ * 포트: TEST_PORT+6.
+ * @returns 없음
+ */
+async function rankingAdminScenarios() {
+    // 픽스처 랭킹(FIXED 600초)이 정산 기간 검증(2.7)을 통과하도록 워커와 같은 안전마진·주기를 쓴다.
+    const env = { RECOVERY_INTERVAL_MS: '1000', RECOVERY_MARGIN_SEC: '5' };
+    spawnTracked('trk', 'admin', { ADMIN_PORT: String(ADMIN_PORT), ...env });
+    await admUp();
+    startWorker('trkw', { SCHEDULER_INTERVAL_MS: '500' });
+    const root = await admRoot('rtest-rkroot');
+    const vInit = (await adm('POST', '/accounts', { token: root, body: { loginId: 'rtest-rkview', name: 'Viewer', role: 1 } })).body.data.initialPassword;
+    const vFirst = await admLogin('rtest-rkview', vInit);
+    const viewer = (await adm('POST', '/auth/password', { token: vFirst.token, body: { currentPassword: vInit, newPassword: 'rtest-rkview-password' } })).token;
+    const at = (sec) => new Date(Date.now() + sec * 1000).toISOString();
+    const body = (code, o = {}) => ({
+        rankingCode: `${RK_CODE}${code}`, name: 'RK', updateRule: 1, sortOrder: 1, scoreMax: 100000000, timeUnit: 2, timezone: 'Asia/Seoul',
+        startAt: at(120), cycleType: 2, settleDelay: 600, reviewPeriod: 86400, historyRetention: 30,
+        tiers: [{ tierNo: 1, rangeType: 1, rangeFrom: 1, rangeTo: 10, rewardCode: 'TOP10' }, { tierNo: 2, rangeType: 2, rangeFrom: 1, rangeTo: 10, rewardCode: 'P10' }], ...o,
+    });
+
+    const reg = await adm('POST', '/rankings', { token: root, body: body('weekly') });
+    const id = reg.body.data?.rankingId;
+    const [def] = await q('SELECT time_bits tb, status, update_rule ur FROM ranking_definition WHERE ranking_id = ?', [id]);
+    const [{ n: tierCount }] = await q('SELECT COUNT(tier_no) n FROM ranking_reward_tier WHERE ranking_id = ?', [id]);
+    check('K1 등록: ID 발급, time_bits = 53 − bits(score_max), 보상 구간 함께 저장', reg.status === 200 && id > 0 && def?.tb === 53 - 27 && def.status === 1 && tierCount === 2,
+        `(${reg.status} ${JSON.stringify(reg.body)}, tb ${def?.tb})`);
+    const made = await until(async () => {
+        const s = await seasonsOf(id);
+        return s.length === 3 && s.every((x) => x.status === 1 && x.parts === 2);
+    });
+    check('K2 시즌은 스케줄러가 만든다 (예정 3개, 파티션)', made >= 0, JSON.stringify(await seasonsOf(id)));
+
+    const vReg = await adm('POST', '/rankings', { token: viewer, body: body('viewer') });
+    const vList = await adm('GET', '/rankings?size=100', { token: viewer });
+    const vGet = await adm('GET', `/rankings/${id}`, { token: viewer });
+    const none = await adm('GET', '/rankings/4000000000', { token: viewer });
+    check('K3 viewer는 조회만 (등록 2003), 상세에 구간·시즌, 없는 ID 1501',
+        vReg.body.result === 2003 && vList.body.data?.items.some((r) => r.rankingId === id) && vGet.body.data?.tiers.length === 2
+        && vGet.body.data?.seasons.length === 3 && vGet.body.data?.timeBits === 26 && none.body.result === 1501,
+        `(${vReg.body.result}, ${vGet.status}, ${none.body.result})`);
+
+    const bad = async (o) => (await adm('POST', '/rankings', { token: root, body: body(`bad${Math.random().toString(36).slice(2, 8)}`, o) })).body.result;
+    const codes = {
+        dup: (await adm('POST', '/rankings', { token: root, body: body('weekly') })).body.result,
+        bits: await bad({ scoreMax: 2 ** 40, timeUnit: 1 }),
+        past: await bad({ startAt: at(-60) }),
+        soon: await bad({ startAt: at(30) }),
+        tz: await bad({ timezone: 'Mars/Base' }),
+        monthly: await bad({ cycleType: 3, startAt: '2027-01-30T00:00:00+09:00' }),
+        fixedNoValue: await bad({ cycleType: 4 }),
+        endBeforeStart: await bad({ endAt: at(60) }),
+        settle: await bad({ cycleType: 1, reviewPeriod: 86400 }),
+        tierOrder: await bad({ tiers: [{ tierNo: 1, rangeType: 1, rangeFrom: 5, rangeTo: 1, rewardCode: 'X' }] }),
+        tierPercent: await bad({ tiers: [{ tierNo: 1, rangeType: 2, rangeFrom: 1, rangeTo: 101, rewardCode: 'X' }] }),
+        tierDup: await bad({ tiers: [{ tierNo: 1, rangeType: 1, rangeFrom: 1, rangeTo: 1, rewardCode: 'X' }, { tierNo: 1, rangeType: 1, rangeFrom: 2, rangeTo: 2, rewardCode: 'Y' }] }),
+        latest: await bad({ updateRule: 3 }),
+        unknown: await bad({ timeBits: 40 }),
+        rule: await bad({ suspicionConfig: { rules: { VELOCTY: { weight: 1, maxPerHour: 10 } } } }),
+    };
+    const expect = { dup: 1502, bits: 2009, past: 2010, soon: 2010, tz: 2010, monthly: 2010, fixedNoValue: 2010, endBeforeStart: 2010, settle: 2011,
+        tierOrder: 2012, tierPercent: 2012, tierDup: 2012, latest: 2001, unknown: 2001, rule: 2001 };
+    check('K4 등록 검증: 중복 1502, 비트 2009, 일정 2010, 정산 기간 2011, 구간 2012, 형식·모르는 필드·모르는 탐지 규칙 2001',
+        Object.entries(expect).every(([k, v]) => codes[k] === v), JSON.stringify(codes));
+
+    // 시즌 일정 변경 (첫 시즌 시작 전): 시즌을 지우고 스케줄러가 새 정의로 다시 만든다
+    const newStart = at(300);
+    const sched = await adm('PATCH', `/rankings/${id}`, { token: root, body: { cycleType: 4, cycleValue: 3600, startAt: newStart, reviewPeriod: 600 } });
+    const remade = await until(async () => {
+        const s = await seasonsOf(id);
+        return s.length === 3 && s[0].start === new Date(newStart).getTime() && s.every((x) => x.end - x.start === 3_600_000 && x.parts === 2);
+    });
+    check('K5 시작 전 일정 변경: 시즌 다시 생성 (새 시작·FIXED 1시간)', sched.status === 200 && remade >= 0, `(${sched.status} ${sched.body.message ?? ''})`);
+
+    const ops = await adm('PATCH', `/rankings/${id}`, { token: root, body: { name: 'RK renamed', maxSubmitPerMin: 200, suspicionConfig: { rules: { REJECTED: { weight: 10 } } } } });
+    const immut = await adm('PATCH', `/rankings/${id}`, { token: root, body: { scoreMax: 5 } });
+    const empty = await adm('PATCH', `/rankings/${id}`, { token: root, body: {} });
+    const [opsRow] = await q('SELECT ranking_name n, max_submit_per_min m, suspicion_config c, score_max s FROM ranking_definition WHERE ranking_id = ?', [id]);
+    const paused = await adm('PATCH', `/rankings/${id}`, { token: root, body: { status: 2 } });
+    const resumed = await adm('PATCH', `/rankings/${id}`, { token: root, body: { status: 1 } });
+    check('K6 운영 값 수정, 불변 필드·빈 바디 2001, PAUSED ↔ ACTIVE',
+        ops.status === 200 && ops.body.data?.name === 'RK renamed' && opsRow.m === 200 && opsRow.c?.rules?.REJECTED?.weight === 10 && opsRow.s === 100000000
+        && immut.body.result === 2001 && empty.body.result === 2001 && paused.body.data?.status === 2 && resumed.body.data?.status === 1,
+        `(${ops.status}, ${immut.body.result}, ${empty.body.result}, ${paused.status}/${resumed.status})`);
+
+    // 진행 중 랭킹 픽스처 (FIXED 600초, 30초 전 시작): 1 OPEN, 2·3 예정
+    await createDefinition(IDS.rkShort, { cycleType: 4, cycleValue: 600, startSec: -30 });
+    await createDefinition(IDS.rkExtend, { cycleType: 4, cycleValue: 600, startSec: -30, endSec: 100 });
+    await createDefinition(IDS.rkOver, { cycleType: 4, cycleValue: 600, startSec: -700, endSec: -5 });
+    // rkEnd는 지금 규칙으로는 정산 기간 검증(2011)에 걸리는 기존 정의다(60 + 600 ≥ 600). 검증 값을 바꾸지 않는 수정은 통과해야 한다.
+    await createDefinition(IDS.rkEnd, { cycleType: 4, cycleValue: 600, startSec: -30, reviewPeriod: 600 });
+    const ready = await until(async () => (await seasonsOf(IDS.rkShort)).length === 3 && (await seasonsOf(IDS.rkEnd)).length === 3
+        && (await seasonsOf(IDS.rkExtend)).length === 1 && (await seasonsOf(IDS.rkOver)).length === 2);
+    check('K7 픽스처 시즌 준비', ready >= 0);
+
+    const tzRun = await adm('PATCH', `/rankings/${IDS.rkShort}`, { token: root, body: { timezone: 'Asia/Tokyo' } });
+    const pastEnd = await adm('PATCH', `/rankings/${IDS.rkShort}`, { token: root, body: { endAt: at(-10) } });
+    const shortEnd = at(20);
+    const short = await adm('PATCH', `/rankings/${IDS.rkShort}`, { token: root, body: { endAt: shortEnd } });
+    const sShort = await seasonsOf(IDS.rkShort);
+    const [st] = await q('SELECT TIMESTAMPDIFF(SECOND, end_at, settle_at) d FROM ranking_season WHERE ranking_id = ? AND season_no = 1', [IDS.rkShort]);
+    // 빈 파티션은 응답 뒤에 지운다(요청 제한 시간 밖)
+    const partsGone = await until(async () => !(await hasSeasonPart('ranking_entry', IDS.rkShort, 2)) && !(await hasSeasonPart('ranking_submit_key', IDS.rkShort, 3)));
+    const cur = (await callSp(A, 'SP_GET_CURRENT_SEASON', [IDS.rkShort])).rows[0];
+    check('K8 시작 뒤 일정 변경 1503, 지난 시각 1503, 조기 종료: 진행 중 시즌 end_at·settle_at 재계산, 예정 시즌 삭제, 빈 파티션은 응답 뒤 삭제',
+        tzRun.body.result === 1503 && pastEnd.body.result === 1503 && short.status === 200 && sShort.length === 1
+        && sShort[0].end === new Date(shortEnd).getTime() && st?.d === 60 && partsGone >= 0 && cur?.end_at.getTime() === new Date(shortEnd).getTime(),
+        `(${tzRun.body.result}, ${pastEnd.body.result}, ${short.status}, ${JSON.stringify(sShort.map((x) => [x.no, x.status]))}, settle ${st?.d}, parts ${partsGone})`);
+
+    const [s1] = await seasonsOf(IDS.rkExtend);
+    const extend = await adm('PATCH', `/rankings/${IDS.rkExtend}`, { token: root, body: { endAt: at(2000) } });
+    const sExt = await seasonsOf(IDS.rkExtend);
+    const more = await until(async () => (await seasonsOf(IDS.rkExtend)).length === 3);
+    check('K9 늘리기: 잘려 있던 시즌을 원래 길이로 되돌리고 스케줄러가 이어서 생성',
+        extend.status === 200 && sExt[0].end === s1.start + 600_000 && more >= 0, `(${extend.status} ${extend.body.message ?? ''}, ${JSON.stringify(sExt.map((x) => [x.no, x.end - x.start]))})`);
+
+    const over = await adm('PATCH', `/rankings/${IDS.rkOver}`, { token: root, body: { endAt: at(1000) } });
+    check('K10 이미 끝난 랭킹 늘리기 1503', over.body.result === 1503, `(${over.body.result})`);
+
+    const ended = await adm('PATCH', `/rankings/${IDS.rkEnd}`, { token: root, body: { status: 3 } });
+    const sEnd = await seasonsOf(IDS.rkEnd);
+    const revive = await adm('PATCH', `/rankings/${IDS.rkEnd}`, { token: root, body: { status: 1 } });
+    const endMove = await adm('PATCH', `/rankings/${IDS.rkEnd}`, { token: root, body: { endAt: at(100) } });
+    const endOps = await adm('PATCH', `/rankings/${IDS.rkEnd}`, { token: root, body: { topSize: 50 } });
+    check('K11 ENDED: 예정 시즌 삭제·진행 중 유지, 되돌리기·종료 변경 1503, 운영 값은 허용 (검증에 걸리는 기존 정의도)',
+        ended.status === 200 && sEnd.length === 1 && sEnd[0].status === 2 && revive.body.result === 1503 && endMove.body.result === 1503 && endOps.status === 200,
+        `(${ended.status}, ${JSON.stringify(sEnd.map((x) => [x.no, x.status]))}, ${revive.body.result}, ${endMove.body.result}, ${endOps.status})`);
+
+    const tiers = [{ tierNo: 1, rangeType: 1, rangeFrom: 1, rangeTo: 3, rewardCode: 'TOP3' }];
+    const put = await adm('PUT', `/rankings/${id}/tiers`, { token: root, body: { tiers } });
+    const [{ n: afterTiers }] = await q('SELECT COUNT(tier_no) n FROM ranking_reward_tier WHERE ranking_id = ?', [id]);
+    const putBad = await adm('PUT', `/rankings/${id}/tiers`, { token: root, body: { tiers: [{ ...tiers[0], rangeFrom: 9 }] } });
+    const putNone = await adm('PUT', '/rankings/4000000000/tiers', { token: root, body: { tiers } });
+    const putViewer = await adm('PUT', `/rankings/${id}/tiers`, { token: viewer, body: { tiers } });
+    check('K12 보상 구간 교체, 규칙 위반 2012, 없는 랭킹 1501, viewer 2003',
+        put.status === 200 && afterTiers === 1 && putBad.body.result === 2012 && putNone.body.result === 1501 && putViewer.body.result === 2003,
+        `(${put.status}, ${afterTiers}, ${putBad.body.result}, ${putNone.body.result}, ${putViewer.body.result})`);
+
+    const [{ vid }] = await q("SELECT admin_account_id vid FROM admin_account WHERE login_id = 'rtest-rkview'");
+    const spIns = await callSp(A, 'SP_INSERT_RANKING_DEFINITION', [vid, `${RK_CODE}sp`, 'x', 1, 1, 1, 100, 2, 46, 'UTC', new Date(Date.now() + 3_600_000), null, 0, null, 0, 0, 0, 100, 0, null, null, null, '[]']);
+    const spUpd = await callSp(A, 'SP_UPDATE_RANKING_DEFINITION', [vid, id, 'x', 1, 'UTC', new Date(), null, 0, null, 0, 0, 0, 100, 0, null, null, null, null, null]);
+    const spTier = await callSp(A, 'SP_REPLACE_RANKING_REWARD_TIER', [vid, id, '[]']);
+    check('K13 SP 역할 재확인: viewer는 등록·수정·구간 교체 1405', spIns.result === 1405 && spUpd.result === 1405 && spTier.result === 1405,
+        `(${spIns.result}, ${spUpd.result}, ${spTier.result})`);
+
+    // 스케줄러 락을 테스트가 쥐고 있으면 수정은 3초 기다린 뒤 2013으로 끝나고 반영되지 않는다
+    const holder = await A.getConnection();
+    try {
+        const [[{ got }]] = await holder.query("SELECT GET_LOCK('podium:schedule', 10) got");
+        const busy = await adm('PATCH', `/rankings/${id}`, { token: root, body: { name: 'RK busy' } });
+        const [{ n: busyName }] = await q('SELECT ranking_name n FROM ranking_definition WHERE ranking_id = ?', [id]);
+        check('K14 스케줄러와 겹치면 2013, 반영 안 됨', got === 1 && busy.body.result === 2013 && busy.status === 503 && busyName === 'RK renamed', `(${busy.body.result}, ${busyName})`);
+    } finally {
+        await holder.query("SELECT RELEASE_LOCK('podium:schedule')");
+        holder.release();
+    }
+
+    await sleep(300);
+    const [{ rid }] = await q("SELECT admin_account_id rid FROM admin_account WHERE login_id = 'rtest-rkroot'");
+    const audit = (await LM.query("SELECT action, target_id t, result_code r, before_json b, after_json a FROM log_admin_audit WHERE admin_account_id = ? AND target_type = 'ranking'", [rid]))[0];
+    const create = audit.find((x) => x.action === 'ranking.create' && x.t === String(id) && x.r === 0);
+    const update = audit.find((x) => x.action === 'ranking.update' && x.t === String(id) && x.r === 0 && x.a?.name === 'RK renamed');
+    const tierLog = audit.find((x) => x.action === 'ranking.tiers' && x.r === 0);
+    // 실패: SP 거부(1502)와 SP 전에 앱이 거부한 것(검증 2009·2012, 락 2013)
+    const failed = [['ranking.create', 1502], ['ranking.create', 2009], ['ranking.update', 1503], ['ranking.update', 2013], ['ranking.tiers', 2012]]
+        .filter(([action, r]) => !audit.some((x) => x.action === action && x.r === r));
+    check('K15 감사 로그: 등록·수정(변경 전·후)·구간 교체, 앱 검증·락 거부를 포함한 실패도 기록',
+        create?.a?.timeBits === 26 && update?.b?.name === 'RK' && tierLog?.b?.tiers?.length === 2 && tierLog?.a?.tiers?.length === 1 && failed.length === 0,
+        `(${audit.length}건, 빠짐 ${JSON.stringify(failed)})`);
+}
+
 // ------------------------------------------------------------------------------------------------ 실행
 
 /** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
@@ -2388,7 +2590,7 @@ try {
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
         for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios], ['시즌 백업 분리', archiveScenarios],
-            ['관리 API', adminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
+            ['관리 API', adminScenarios], ['관리 랭킹', rankingAdminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);

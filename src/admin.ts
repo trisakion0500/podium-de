@@ -1,6 +1,7 @@
 import { registerAccountRoutes } from './admin/accounts.js';
 import { createAuditWriter, registerAuditRoutes } from './admin/audit.js';
 import { registerAuthRoutes } from './admin/auth.js';
+import { registerRankingRoutes } from './admin/rankings.js';
 import { originGuard, SESSION_COOKIE } from './admin/session.js';
 import { bootstrap } from './core/bootstrap.js';
 import { ProcessType } from './core/codes.js';
@@ -25,6 +26,7 @@ app.addHook('onRequest', originGuard);
 registerAuthRoutes(app, { pool, audit });
 registerAccountRoutes(app, { pool, audit });
 registerAuditRoutes(app, { pool, logPool });
+registerRankingRoutes(app, { pool, audit });
 
 // 새 요청 수신을 멈추고 진행 중 요청이 끝날 때까지 기다린 뒤, 남은 감사 로그를 적재하고 로그 DB 풀을 닫는다.
 const shutdown = onShutdown(async () => {

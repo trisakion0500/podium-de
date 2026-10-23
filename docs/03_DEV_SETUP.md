@@ -154,8 +154,8 @@ API·워커·관리 API는 기동 시 DB 스키마가 패키지와 같은지 확
 3. 화면 오른쪽 위 **Authorize**에 키를 넣는다. 이후 요청에 `x-api-key` 헤더가 붙는다.
    API는 키 목록을 30초마다 다시 읽으므로 발급 직후 잠깐은 401이 날 수 있다.
 4. 제출·조회에는 진행 중인 시즌과 Redis 센티넬이 있는 랭킹이 필요하다. 센티넬은 워커가 시즌 시작 60초 전부터 만든다.
-   시즌은 워커 스케줄러가 랭킹 정의로 만든다. 랭킹 등록 도구는 6단계 구현 예정이라, 그전에는 `node loadtest/load.mjs setup`으로
-   테스트 랭킹 931(BEST)·932(SUM)를 만들어 쓰고, 끝나면 `node loadtest/load.mjs clean`으로 지운다.
+   시즌은 워커 스케줄러가 랭킹 정의로 만든다. 랭킹은 관리 API(`POST /admin/v1/rankings`, [01_DESIGN 10.4](01_DESIGN.md#s-10-4))로 등록한다.
+   빠르게 확인할 때는 `node loadtest/load.mjs setup`으로 테스트 랭킹 931(BEST)·932(SUM)를 만들어 쓰고, 끝나면 `node loadtest/load.mjs clean`으로 지운다.
 
 ## 4.4 회귀 테스트
 

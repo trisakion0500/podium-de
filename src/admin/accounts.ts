@@ -5,8 +5,7 @@ import { adminErrors, roleSchema } from './auth.js';
 import { generatePassword, hashPassword } from './password.js';
 import { requireRole } from './session.js';
 import { AdminRole, SpResult } from '../core/codes.js';
-import { callSp } from '../core/db.js';
-import { BusinessException, ERROR_MAP, type ErrorCode } from '../core/errors.js';
+import { callSp, callSpRows, throwIfSpFailed } from '../core/db.js';
 
 /**
  * 아이디 형식. 영문·숫자·`.`·`_`·`-`만 쓴다 — 감사 로그와 화면에서 비슷해 보이는 문자(공백, 유니코드 혼동 문자)로 다른 계정을
@@ -31,19 +30,6 @@ const initialPasswordSchema = { type: 'string', description: '초기 비밀번�
 const okSchema = (data: object) => ({ type: 'object', properties: { result: { type: 'integer', example: 0 }, data } });
 
 /**
- * SP 실패 RESULT를 응답 코드로 던진다. 감사 로그를 먼저 남겨야 해서 callSpRows 대신 결과를 직접 받는다.
- * @param result SP RESULT
- * @returns 없음 (실패면 예외)
- */
-function throwIfFailed(result: number): void {
-    if (result === SpResult.OK)
-        return;
-    if (!(result in ERROR_MAP))
-        throw new Error(`admin account sp: unmapped result ${result}`);
-    throw new BusinessException(result as ErrorCode);
-}
-
-/**
  * 응답용 계정
  * @param r SP 결과 행
  * @returns 계정
@@ -58,6 +44,7 @@ function accountOf(r: Record<string, unknown>) {
  * @param app Fastify 인스턴스
  * @param deps 메인 DB 풀, 감사 로그 적재기
  * @author trisakion
+ * @modified 2026-10-23 trisakion SP 실패 변환을 db.throwIfSpFailed로 통일
  */
 export function registerAccountRoutes(app: FastifyInstance, deps: { pool: Pool; audit: AuditWriter }): void {
     const { pool, audit } = deps;
@@ -102,8 +89,7 @@ export function registerAccountRoutes(app: FastifyInstance, deps: { pool: Pool; 
             },
         },
     }, async (req) => {
-        const { result, rows } = await callSp(pool, 'SP_LIST_ADMIN_ACCOUNT', [req.query.offset, req.query.size]);
-        throwIfFailed(result);
+        const rows = await callSpRows(pool, 'SP_LIST_ADMIN_ACCOUNT', [req.query.offset, req.query.size]);
         return {
             result: 0,
             data: {
@@ -147,7 +133,7 @@ export function registerAccountRoutes(app: FastifyInstance, deps: { pool: Pool; 
         const created = rows[0];
         audit.write({ ...auditBase(req, admin), action: 'account.create', targetType: 'account', targetId: created?.admin_account_id, result,
             after: result === SpResult.OK ? accountOf(created) : req.body });
-        throwIfFailed(result);
+        throwIfSpFailed('SP_INSERT_ADMIN_ACCOUNT', result);
         return { result: 0, data: { ...accountOf(created), initialPassword } };
     });
 
@@ -183,7 +169,7 @@ export function registerAccountRoutes(app: FastifyInstance, deps: { pool: Pool; 
         audit.write({ ...auditBase(req, admin), action: 'account.update', targetType: 'account', targetId: req.params.id, result,
             before: r ? { name: r.before_display_name, role: r.before_role, status: r.before_status } : undefined,
             after: r ? { name: r.display_name, role: r.role, status: r.status } : req.body });
-        throwIfFailed(result);
+        throwIfSpFailed('SP_UPDATE_ADMIN_ACCOUNT', result);
         return { result: 0, data: accountOf(r) };
     });
 
@@ -202,7 +188,7 @@ export function registerAccountRoutes(app: FastifyInstance, deps: { pool: Pool; 
         const initialPassword = generatePassword();
         const { result, rows } = await callSp(pool, 'SP_RESET_ADMIN_PASSWORD', [admin.accountId, req.params.id, await hashPassword(initialPassword)]);
         audit.write({ ...auditBase(req, admin), action: 'account.password_reset', targetType: 'account', targetId: req.params.id, result });
-        throwIfFailed(result);
+        throwIfSpFailed('SP_RESET_ADMIN_PASSWORD', result);
         return { result: 0, data: { ...accountOf(rows[0]), initialPassword } };
     });
 
@@ -220,7 +206,7 @@ export function registerAccountRoutes(app: FastifyInstance, deps: { pool: Pool; 
         const admin = req.admin!;
         const { result } = await callSp(pool, 'SP_UNLOCK_ADMIN_ACCOUNT', [admin.accountId, req.params.id]);
         audit.write({ ...auditBase(req, admin), action: 'account.unlock', targetType: 'account', targetId: req.params.id, result });
-        throwIfFailed(result);
+        throwIfSpFailed('SP_UNLOCK_ADMIN_ACCOUNT', result);
         return { result: 0 };
     });
 }

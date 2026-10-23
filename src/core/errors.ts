@@ -20,6 +20,7 @@ export interface ErrorEntry {
  * @modified 2026-10-07 trisakion 현재 시즌 없음(1301)과 순위 집계 중(2007) 추가
  * @modified 2026-10-14 trisakion 시즌 없음(1002)과 확정 전(1003) 추가 (결과·보상 API)
  * @modified 2026-10-22 trisakion 관리 API 코드(1401~1407, 2008) 추가, 2002·2003 메시지를 관리 API와 공용으로
+ * @modified 2026-10-23 trisakion 관리 랭킹 코드(1501~1503, 2009~2013) 추가
  */
 export const ERROR_MAP = {
     [SpResult.INVALID_PARAM]: { message: '요청 값이 허용 범위를 벗어났습니다.', httpStatus: 400 },
@@ -40,6 +41,14 @@ export const ERROR_MAP = {
     [SpResult.ADMIN_FORBIDDEN]: { message: '이 작업을 할 권한이 없습니다.', httpStatus: 403 },
     [SpResult.ADMIN_SELF_CHANGE]: { message: '자기 계정의 역할과 상태는 바꿀 수 없습니다.', httpStatus: 400 },
     [SpResult.ADMIN_LOGIN_ID_TAKEN]: { message: '이미 사용 중인 아이디입니다.', httpStatus: 409 },
+    [SpResult.ADMIN_RANKING_NOT_FOUND]: { message: '존재하지 않는 랭킹입니다.', httpStatus: 404 },
+    [SpResult.ADMIN_RANKING_CODE_TAKEN]: { message: '이미 사용 중인 랭킹 코드입니다.', httpStatus: 409 },
+    [SpResult.ADMIN_RANKING_LOCKED]: { message: '지금 랭킹 상태에서는 이 값을 바꿀 수 없습니다.', httpStatus: 409 },
+    [ApiResult.BIT_BUDGET_EXCEEDED]: { message: '스코어 상한과 시즌 길이가 비트 예산(53비트)을 넘습니다. score_max를 낮추거나 time_unit을 거칠게 하세요.', httpStatus: 400 },
+    [ApiResult.SCHEDULE_INVALID]: { message: '시즌 일정이 규칙에 맞지 않습니다.', httpStatus: 400 },
+    [ApiResult.SETTLE_PERIOD_TOO_LONG]: { message: '정산 시작 지연과 검수 기간의 합이 시즌 길이보다 길거나 같습니다.', httpStatus: 400 },
+    [ApiResult.REWARD_TIER_INVALID]: { message: '보상 구간이 규칙에 맞지 않습니다.', httpStatus: 400 },
+    [ApiResult.SCHEDULER_BUSY]: { message: '시즌 스케줄러가 작업 중입니다. 잠시 후 다시 시도하세요. 반영되지 않았습니다.', httpStatus: 503 },
     [ApiResult.VALIDATION_FAILED]: { message: '요청 형식이 올바르지 않습니다.', httpStatus: 400 },
     [ApiResult.UNAUTHORIZED]: { message: '인증 정보(API 키 또는 로그인 세션)가 없거나 유효하지 않습니다.', httpStatus: 401 },
     [ApiResult.FORBIDDEN]: { message: '이 API를 호출할 권한이 없습니다.', httpStatus: 403 },
@@ -72,18 +81,22 @@ export class BusinessException extends Error {
     readonly sqlState?: string;
     /** DB 오류 진단 MySQL 오류 번호 (DATABASE_ERROR일 때만, 응답에 넣지 않는다) */
     readonly errorNo?: number;
+    /** 응답 message 뒤에 붙일 설명. 요청 값이 어느 규칙에 걸렸는지만 담는다 — 내부 정보는 넣지 않는다 */
+    readonly publicDetail?: string;
 
     /**
      * @param result 결과 코드
      * @param detail 로그용 상세. 생략하면 ERROR_MAP 메시지
-     * @param diag DB 오류 진단 정보. 재시도 가능 여부를 스스로 판단해야 하는 내부 호출부만 읽는다
+     * @param extra DB 오류 진단 정보(재시도 가능 여부를 스스로 판단해야 하는 내부 호출부만 읽는다), 응답에 붙일 설명
+     * @modified 2026-10-23 trisakion 응답에 붙일 설명(publicDetail) 추가 — 관리 API 등록 검증 사유
      */
-    constructor(readonly result: ErrorCode, detail?: string, diag?: { sqlState?: string; errorNo?: number }) {
+    constructor(readonly result: ErrorCode, detail?: string, extra?: { sqlState?: string; errorNo?: number; publicDetail?: string }) {
         super(detail ?? ERROR_MAP[result].message);
         this.name = 'BusinessException';
         this.httpStatus = ERROR_MAP[result].httpStatus;
         this.publicMessage = ERROR_MAP[result].message;
-        this.sqlState = diag?.sqlState;
-        this.errorNo = diag?.errorNo;
+        this.sqlState = extra?.sqlState;
+        this.errorNo = extra?.errorNo;
+        this.publicDetail = extra?.publicDetail;
     }
 }
