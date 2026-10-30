@@ -1,0 +1,345 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "데이터 흐름 (등록부터 백업까지)",
+    "locale": "ko",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/season-data.html",
+    "legend": {
+      "entries": {
+        "default": {
+          "label": "행 단위 읽기·쓰기"
+        },
+        "emphasis": {
+          "label": "파티션 EXCHANGE (행 복사 없음)"
+        },
+        "security": {
+          "label": "제재 반영"
+        },
+        "dashed": {
+          "label": "응답 뒤 비동기 기록"
+        }
+      }
+    }
+  },
+  "stages": [
+    {
+      "label": "주체"
+    },
+    {
+      "label": "관리자 등록"
+    },
+    {
+      "label": "운영 테이블"
+    },
+    {
+      "label": "투영·정산"
+    },
+    {
+      "label": "백업"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "gm",
+      "type": "external",
+      "label": "관리자",
+      "sublabel": "관리 API",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "gs",
+      "type": "external",
+      "label": "게임 서버",
+      "sublabel": "제출·보상 API",
+      "stage": 0,
+      "row": 3
+    },
+    {
+      "id": "def",
+      "type": "database",
+      "label": "definition",
+      "sublabel": "랭킹 정의",
+      "stage": 1,
+      "row": 0
+    },
+    {
+      "id": "tier",
+      "type": "database",
+      "label": "reward_tier",
+      "sublabel": "보상 구간",
+      "stage": 1,
+      "row": 1
+    },
+    {
+      "id": "exc",
+      "type": "security",
+      "label": "exclusion",
+      "sublabel": "제재",
+      "stage": 1,
+      "row": 2
+    },
+    {
+      "id": "sea",
+      "type": "database",
+      "label": "season",
+      "sublabel": "tier_snapshot",
+      "stage": 2,
+      "row": 0
+    },
+    {
+      "id": "sus",
+      "type": "database",
+      "label": "suspicion",
+      "sublabel": "어뷰징 근거",
+      "stage": 2,
+      "row": 1
+    },
+    {
+      "id": "ent",
+      "type": "database",
+      "label": "entry",
+      "sublabel": "시즌 파티션, 스코어 + 결과",
+      "stage": 2,
+      "row": 2,
+      "tag": "원장"
+    },
+    {
+      "id": "key",
+      "type": "database",
+      "label": "submit_key",
+      "sublabel": "시즌 파티션",
+      "stage": 2,
+      "row": 3
+    },
+    {
+      "id": "rd",
+      "type": "messagebus",
+      "label": "Redis",
+      "sublabel": "시즌 ZSET (투영)",
+      "stage": 3,
+      "row": 0
+    },
+    {
+      "id": "stl",
+      "type": "database",
+      "label": "entry_settling",
+      "sublabel": "가순위 작업 테이블",
+      "stage": 3,
+      "row": 1
+    },
+    {
+      "id": "hall",
+      "type": "database",
+      "label": "season_top",
+      "sublabel": "시즌 Top N (영구)",
+      "stage": 3,
+      "row": 2
+    },
+    {
+      "id": "slog",
+      "type": "database",
+      "label": "log_ranking_submit",
+      "sublabel": "로그 DB, 일 파티션",
+      "stage": 3,
+      "row": 4
+    },
+    {
+      "id": "eb",
+      "type": "database",
+      "label": "entry_r_s",
+      "sublabel": "백업, 보존 후 경고",
+      "stage": 4,
+      "row": 2
+    },
+    {
+      "id": "kb",
+      "type": "database",
+      "label": "submit_key_r_s",
+      "sublabel": "백업, 삭제는 운영자",
+      "stage": 4,
+      "row": 3
+    }
+  ],
+  "flows": [
+    {
+      "id": "f1-def",
+      "from": "gm",
+      "to": "def",
+      "label": "① 등록"
+    },
+    {
+      "id": "f1-tier",
+      "from": "gm",
+      "to": "tier",
+      "label": "① 보상 구간"
+    },
+    {
+      "id": "f1-season",
+      "from": "def",
+      "to": "sea",
+      "label": "① 시즌 생성"
+    },
+    {
+      "id": "f2-ent",
+      "from": "gs",
+      "to": "ent",
+      "label": "② 제출"
+    },
+    {
+      "id": "f2-key",
+      "from": "gs",
+      "to": "key",
+      "label": "② 제출 키"
+    },
+    {
+      "id": "f2-log",
+      "from": "gs",
+      "to": "slog",
+      "label": "② 제출 이력",
+      "variant": "dashed"
+    },
+    {
+      "id": "f2-redis",
+      "from": "ent",
+      "to": "rd",
+      "label": "② 반영·리컨실러"
+    },
+    {
+      "id": "f2-sus",
+      "from": "ent",
+      "to": "sus",
+      "label": "② 소프트 탐지"
+    },
+    {
+      "id": "f2-exc",
+      "from": "gm",
+      "to": "exc",
+      "label": "② 제재",
+      "variant": "security"
+    },
+    {
+      "id": "f2-exc-redis",
+      "from": "exc",
+      "to": "rd",
+      "label": "② 순위 제외",
+      "variant": "security"
+    },
+    {
+      "id": "f3-out",
+      "from": "ent",
+      "to": "stl",
+      "label": "③ 꺼내기",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f3-back",
+      "from": "stl",
+      "to": "ent",
+      "label": "③ 되돌리기",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f4-tier",
+      "from": "tier",
+      "to": "sea",
+      "label": "④ tier_snapshot"
+    },
+    {
+      "id": "f4-exc",
+      "from": "exc",
+      "to": "ent",
+      "label": "④ 제외·재순위",
+      "variant": "security"
+    },
+    {
+      "id": "f4-reward",
+      "from": "sea",
+      "to": "ent",
+      "label": "④ 보상 판정"
+    },
+    {
+      "id": "f4-review",
+      "from": "sus",
+      "to": "gm",
+      "label": "④ 검수 목록"
+    },
+    {
+      "id": "f4-top",
+      "from": "ent",
+      "to": "hall",
+      "label": "④ Top N"
+    },
+    {
+      "id": "f5-read",
+      "from": "ent",
+      "to": "gs",
+      "label": "⑤ 목록·결과"
+    },
+    {
+      "id": "f5-ack",
+      "from": "gs",
+      "to": "ent",
+      "label": "⑤ ack"
+    },
+    {
+      "id": "f-top-read",
+      "from": "hall",
+      "to": "gs",
+      "label": "Top N 조회"
+    },
+    {
+      "id": "f6-key",
+      "from": "key",
+      "to": "kb",
+      "label": "⑥ 백업",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f6-ent",
+      "from": "ent",
+      "to": "eb",
+      "label": "⑥ 백업",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "단계 (3절 구간)",
+      "items": [
+        "① 등록: 관리 API → 정의·보상 구간, 스케줄러가 시즌 행과 파티션 생성",
+        "② 시즌 진행: 제출 → entry·submit_key → Redis, 모든 결과는 로그 DB에 따로",
+        "③ 마감과 정산: entry 파티션을 settling으로 꺼내 final_rank 가순위 후 되돌림, Redis 시즌 키 삭제",
+        "④ 검수와 확정: 제재 제외·재순위, tier_snapshot → reward_code, 상위 N → season_top",
+        "⑤ 보상 전달: PENDING 목록 → ack로 DELIVERED, 남은 대상 0이면 SETTLED (D-70)",
+        "⑥ SETTLED 이후: submit_key는 자기 시즌, entry는 자기·다음 시즌 SETTLED 뒤 백업 (마지막 시즌은 자기)"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "끝점이 아닌 것",
+      "items": [
+        "Redis는 ranking_entry의 투영이라 언제든 MySQL로 재구축한다",
+        "로그 DB는 LOG_RETENTION_DAYS 후 월 테이블로 옮기고 LOG_ARCHIVE_MONTHS 후 DROP한다"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "데이터를 빼는 방법",
+      "items": [
+        "운영 테이블에서 데이터가 빠질 때는 항상 EXCHANGE를 쓴다",
+        "데이터가 찬 파티션을 직접 DROP하지 않는다 (8.1)"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "표기",
+      "items": [
+        "테이블 이름의 ranking_ 접두어는 생략했다 (예: entry = ranking_entry)"
+      ]
+    }
+  ]
+}

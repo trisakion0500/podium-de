@@ -269,6 +269,8 @@ sequenceDiagram
 
 3절의 단계를 기준으로 데이터가 어느 테이블에서 어디로 가는지 그린다. 화살표의 번호는 아래 표의 단계다. 굵은 화살표(`==>`)는 파티션 EXCHANGE로, 행 복사 없이 데이터 파일이 통째로 옮겨진다 (8.1).
 
+같은 흐름의 대화형 다이어그램: [diagrams/season-data.html](diagrams/season-data.html) (브라우저에서 열기, 원본 `diagrams/season-data.json`). 아래 Mermaid와 내용이 같으며, 흐름을 바꾸면 둘 다 고친다.
+
 ```mermaid
 flowchart LR
     GM([관리자])
