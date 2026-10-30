@@ -1,0 +1,264 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "시즌 상태 흐름 (SeasonStatus)",
+    "locale": "ko",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/season-status.html",
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "시즌 상태"
+        },
+        "external": {
+          "label": "게임 서버가 처리하는 상태"
+        },
+        "security": {
+          "label": "관리자 조작 결과"
+        },
+        "database": {
+          "label": "완료"
+        }
+      }
+    }
+  },
+  "lanes": [
+    {
+      "id": "sched",
+      "label": "스케줄러 (시각만 보고 일괄)"
+    },
+    {
+      "id": "settle",
+      "label": "정산 잡 (한 번에 한 시즌)"
+    },
+    {
+      "id": "gm",
+      "label": "관리자 (관리 API)",
+      "variant": "exception"
+    },
+    {
+      "id": "deliver",
+      "label": "전달 잡"
+    }
+  ],
+  "mainPath": [
+    "scheduled",
+    "open",
+    "closed",
+    "settling",
+    "review",
+    "finalizing",
+    "delivering",
+    "settled"
+  ],
+  "nodes": [
+    {
+      "id": "scheduled",
+      "lane": "sched",
+      "col": 0,
+      "type": "backend",
+      "icon": "start",
+      "label": "1 SCHEDULED",
+      "sublabel": "예정, 파티션 준비"
+    },
+    {
+      "id": "open",
+      "lane": "sched",
+      "col": 1,
+      "type": "backend",
+      "icon": "active",
+      "label": "2 OPEN",
+      "sublabel": "스코어 적재"
+    },
+    {
+      "id": "closed",
+      "lane": "sched",
+      "col": 2,
+      "type": "backend",
+      "icon": "waiting",
+      "label": "3 CLOSED",
+      "sublabel": "적재 차단 (시각 검사)"
+    },
+    {
+      "id": "settling",
+      "lane": "settle",
+      "col": 2,
+      "type": "backend",
+      "icon": "active",
+      "label": "4 SETTLING",
+      "sublabel": "가순위 생성"
+    },
+    {
+      "id": "review",
+      "lane": "settle",
+      "col": 3,
+      "type": "backend",
+      "icon": "decision",
+      "label": "5 REVIEW",
+      "sublabel": "검수, 제재 반영"
+    },
+    {
+      "id": "finalizing",
+      "lane": "settle",
+      "col": 4,
+      "type": "backend",
+      "icon": "active",
+      "label": "6 FINALIZING",
+      "sublabel": "제외·재순위·보상 판정"
+    },
+    {
+      "id": "deleted",
+      "lane": "gm",
+      "col": 0,
+      "type": "security",
+      "icon": "stop",
+      "label": "시즌 행 삭제",
+      "sublabel": "빈 파티션도 삭제"
+    },
+    {
+      "id": "hold",
+      "lane": "gm",
+      "col": 3,
+      "type": "security",
+      "icon": "waiting",
+      "label": "검수 보류",
+      "sublabel": "review_hold = 1, 상태 아님"
+    },
+    {
+      "id": "delivering",
+      "lane": "deliver",
+      "col": 4,
+      "type": "external",
+      "icon": "external",
+      "label": "7 DELIVERING",
+      "sublabel": "게임 서버 수신·ack"
+    },
+    {
+      "id": "settled",
+      "lane": "deliver",
+      "col": 5,
+      "type": "database",
+      "icon": "success",
+      "label": "8 SETTLED",
+      "sublabel": "전달 완료, 이후 백업 분리"
+    }
+  ],
+  "edges": [
+    {
+      "id": "t-open",
+      "from": "scheduled",
+      "to": "open",
+      "label": "start_at"
+    },
+    {
+      "id": "t-close",
+      "from": "open",
+      "to": "closed",
+      "label": "end_at"
+    },
+    {
+      "id": "t-settle",
+      "from": "closed",
+      "to": "settling",
+      "label": "settle_at + 확인",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t-review",
+      "from": "settling",
+      "to": "review",
+      "label": "가순위 끝"
+    },
+    {
+      "id": "t-final",
+      "from": "review",
+      "to": "finalizing",
+      "label": "review_until"
+    },
+    {
+      "id": "t-deliver",
+      "from": "finalizing",
+      "to": "delivering",
+      "label": "Top N 적재",
+      "variant": "emphasis"
+    },
+    {
+      "id": "t-settled",
+      "from": "delivering",
+      "to": "settled",
+      "label": "PENDING 0"
+    },
+    {
+      "id": "t-skip",
+      "from": "scheduled",
+      "to": "closed",
+      "label": "워커 정지 중 end_at 경과",
+      "variant": "dashed",
+      "role": "branch",
+      "fromSide": "top",
+      "toSide": "top"
+    },
+    {
+      "id": "t-delete",
+      "from": "scheduled",
+      "to": "deleted",
+      "label": "end_at 줄이기 · ENDED",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "t-hold",
+      "from": "review",
+      "to": "hold",
+      "label": "GM 보류",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "t-unhold",
+      "from": "hold",
+      "to": "review",
+      "label": "해제",
+      "role": "return"
+    },
+    {
+      "id": "t-force",
+      "from": "delivering",
+      "to": "settled",
+      "label": "GM 강제 종료",
+      "variant": "security",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "전이 조건",
+      "items": [
+        "OPEN → CLOSED: end_at을 줄이면 다시 계산된 시각에 닫힌다 (조기 종료)",
+        "CLOSED → SETTLING: settle_at 경과 + 미종료 트랜잭션 없음 + 동기화 시각 통과 (아니면 1009·1010·1011)",
+        "REVIEW → FINALIZING: review_until 경과 + 보류 없음, 조기 확정은 review_until = 지금",
+        "보류 해제 때 review_until이 지났으면 지금으로 맞춘다",
+        "DELIVERING → SETTLED: 남은 PENDING 0이면 전달 잡 (D-70), 강제 종료는 forced_by·forced_reason 기록"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "쓰기 차단은 시각으로",
+      "items": [
+        "SP가 UTC_TIMESTAMP(3) ∈ [start_at, end_at)를 직접 검사해 전이 잡이 늦어도 마감은 정확하다",
+        "랭킹 PAUSED는 시즌 상태가 아니다. 시즌은 시간대로 계속 만들어지고 정산된다"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "상태별 조회와 보관",
+      "items": [
+        "결과·보상 API는 DELIVERING 전 시즌을 1003으로 거부한다",
+        "SETTLED 뒤 submit_key·entry 파티션이 백업 테이블로 분리된다 (8.2)",
+        "영구 랭킹은 정산·보상·아카이브가 없다"
+      ]
+    }
+  ]
+}

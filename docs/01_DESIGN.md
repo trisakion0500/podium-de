@@ -372,6 +372,8 @@ SCHEDULED ──start_at──▶ OPEN ──end_at──▶ CLOSED ──settle
   ──▶ REVIEW ──review_until (검수 보류 없음)──▶ FINALIZING ──▶ DELIVERING ──▶ SETTLED
 ```
 
+시즌 상태 전이를 전이 주체(스케줄러·정산 잡·전달 잡·관리자)별로 나누고 예외 경로를 함께 그린 archify 다이어그램(workflow 형식): [diagrams/season-status.html](diagrams/season-status.html) (브라우저에서 열기, 원본 `diagrams/season-status.json`). 상태나 전이 조건을 바꾸면 이 그림도 고친다.
+
 | 상태 | 내용 |
 | --- | --- |
 | OPEN | 스코어 적재 |
