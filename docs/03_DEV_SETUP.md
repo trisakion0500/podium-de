@@ -141,8 +141,8 @@ npm run admin -- reset-password --login-id <아이디>   # 모든 admin이 비�
 `npm run migrate` → 다시 띄운다.
 
 API·워커·관리 API는 기동 시 DB 스키마가 패키지와 같은지 확인만 하고, 다르면 기동하지 않는다.
-적용은 `npm run migrate`로만 한다. 마이그레이션 규칙과 배포 절차는 README의
-[실행 방법](../README.md#실행-방법) 참고.
+적용은 `npm run migrate`로만 한다. 마이그레이션 규칙과 배포 절차는
+[09_OPERATIONS](09_OPERATIONS.md) 참고.
 
 ## 4.3 Swagger로 호출해 보기
 

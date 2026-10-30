@@ -1,7 +1,7 @@
 # Podium DE
 
 - 공통 코딩·SP·커밋 컨벤션: `.claude/skills/trisakion-dev-convention-skill/SKILL.md`
-- 설계 기준: `docs/01_DESIGN.md` (용어는 1.6), 결정 기록: `docs/02_DECISIONS.md` (D-xx)
+- 설계 기준: `docs/01_DESIGN.md`, 용어: `docs/00_GLOSSARY.md`, 결정 기록: `docs/02_DECISIONS.md` (D-xx)
 - 이 저장소는 `CLAUDE.md`를 커밋한다(공용 규칙만). 개인 설정은 `CLAUDE.local.md`(gitignore)에 둔다 — 컨벤션 스킬 12장의 예외.
 
 ## DB

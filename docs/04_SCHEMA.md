@@ -1,7 +1,7 @@
 # Podium DE — 스키마
 
 `podium_de`(메인)와 `podium_de_log`(로그 DB) 스키마의 테이블 색인과 ERD다. 컬럼 정의는 `database/tables/`, `database_log/tables/`와 [01_DESIGN](01_DESIGN.md)의 DDL이 기준이며, 이 문서는 컬럼을 반복하지 않는다. 테이블을 추가하거나 관계가 바뀌면 이 문서도 함께 고친다.
-본문과 다이어그램 괄호 안의 절 번호(예: `(4.3)`)는 [01_DESIGN](01_DESIGN.md)의 절이다. 용어는 [01_DESIGN 1.6](01_DESIGN.md#s-1-6).
+본문과 다이어그램 괄호 안의 절 번호(예: `(4.3)`)는 [01_DESIGN](01_DESIGN.md)의 절이다. 용어는 [00_GLOSSARY](00_GLOSSARY.md).
 
 ## 1. 테이블 목록
 

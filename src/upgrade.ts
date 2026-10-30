@@ -111,7 +111,7 @@ async function upgrade(pool: Pool): Promise<boolean> {
 
 // 명령이 없으면 아무것도 멈추지 않은 상태에서 중단한다.
 if (!stopCmd || !startCmd) {
-    logger.error('UPGRADE_STOP_CMD, UPGRADE_START_CMD를 설정해야 합니다. .env.example과 README의 "upgrade" 설정 예시(pm2, 직접 실행)를 참고하세요.');
+    logger.error('UPGRADE_STOP_CMD, UPGRADE_START_CMD를 설정해야 합니다. .env.example과 docs/09_OPERATIONS.md의 "설정 예시"(pm2, 직접 실행)를 참고하세요.');
     await shutdownLogger();
     process.exit(1);
 }

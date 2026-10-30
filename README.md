@@ -13,13 +13,14 @@
 
 - **핵심 기술**: Node.js 22 + TypeScript · MySQL 8.4(모든 DB 로직은 Stored Procedure,
   LIST COLUMNS 파티션) · Redis 7.4(실시간 순위표, MySQL의 투영)
-- **정량 현황**: 5단계(아카이브 로테이션)까지 완료, 6단계 진행 중(관리 API 기반, 랭킹 등록·수정). 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
+- **정량 현황**: 5단계(아카이브 로테이션)까지 완료, 6단계 진행 중(관리 API 기반, 랭킹 등록·수정, 제재 완료). 로컬 PC 1대 기준 API 1대당 제출 1,500건/초 안정, 피크 2,300건/초는 API 2대로 처리 ([06_LOAD_TEST](docs/06_LOAD_TEST.md))
 - **기술적 강조점**: 시즌 단위 파티션 EXCHANGE 아카이브 · composite score 동점 처리 ·
   동기화 시각 차분 리컨실러 기반 자가 복구 · 동적 SQL을 `SP_EXEC_DDL` 하나로 격리
 
 설계의 단일 기준은 [`docs/01_DESIGN.md`](docs/01_DESIGN.md)(현재 설계)와
-[`docs/02_DECISIONS.md`](docs/02_DECISIONS.md)(결정과 이유)다. 이 README는 요약과 링크만 둔다.
-처음 보는 용어(원장, 센티넬, 리컨실러, `D-xx` 등)는 [01_DESIGN 1.6 용어](docs/01_DESIGN.md#s-1-6)에 있다.
+[`docs/02_DECISIONS.md`](docs/02_DECISIONS.md)(결정과 이유)다. 01과 02가 다르면 현재 설계인 01을 따른다.
+이 README는 프로젝트 개요와 빠른 시작만 두고, 상세는 [문서 목록](#문서-목록)의 각 문서에 둔다.
+처음 보는 용어(원장, 센티넬, 리컨실러, `D-xx` 등)는 [00_GLOSSARY](docs/00_GLOSSARY.md)에 있다.
 
 ---
 
@@ -63,7 +64,7 @@ Redis를 언제든 재구축 가능한 투영으로 다루는 구조를 직접 �
 
 ## 기술적 도전과 해결
 
-설계 단계에서 정한 해법이다. 구현·검증 결과는 단계별로 이 절에 갱신한다.
+세 해법 모두 구현했고 회귀 테스트로 검증한다([08_TEST_CASES](docs/08_TEST_CASES.md)). 실측 처리량은 [06_LOAD_TEST](docs/06_LOAD_TEST.md)에 있다.
 
 ### 1. 동점 순위를 Redis 정렬만으로 고유하게
 
@@ -138,12 +139,10 @@ API, 워커, 관리 API는 같은 코드베이스의 별도 엔트리다. 테이
 - **스코어 적재** — 시각 기반 마감, `requestId` 멱등 키, 하드 검증(범위·최대 증분)
 - **실시간 순위** — 상위 페이징, 내 순위 조회
 - **정산** — 가순위 생성 → 검수 → 확정 → 일괄 보상 전달(게임 서버 pull + ack)
-- **보상 구간** — 순위(RANK) 또는 백분율(PERCENT)이며, 한 사람은 보상 하나만 받는다.
-  - **PERCENT 판정:** "내 앞에 있는 사람이 t% 미만이면 상위 t%"로 판정한다. 상위 t% 인원은 `ceil(참가자 × t / 100)`이고, 경계에 걸친 1명을 포함한다(예: 참가자 199명의 상위 1%는 2명). 1위는 참가자 수와 무관하게 첫 구간을 받는다.
-  - **구간이 겹칠 때:** RANK 구간이 PERCENT보다 항상 먼저다. 같은 종류끼리는 `tier_no`가 작은 쪽이다. 상위권(1위, 2~3위 …)은 RANK로, 그 아래는 PERCENT(상위 10% …)로 두면 순서와 무관하게 의도대로 나뉜다.
-  - **보상 공백:** 보상받는 순위 사이에 어느 구간에도 들지 않는 순위가 있으면 확정할 때 경고 로그를 남긴다. 예: RANK 1\~10위 + PERCENT 11%부터 → 11위\~상위 10% 경계가 빈다.
-  - 상세: [01_DESIGN 2.6](docs/01_DESIGN.md#s-2-6), [D-69](docs/02_DECISIONS.md#d-69)
-- **제재·Anti-cheat** — 제재 제외 후 순위 재부여, 소프트 탐지, 어뷰징 포인트
+- **보상 구간** — 순위(RANK) 또는 참가자 대비 백분율(PERCENT). 한 사람은 보상 하나만 받고, 겹치면 RANK가 먼저다. 판정 규칙: [01_DESIGN 2.6](docs/01_DESIGN.md#s-2-6)
+- **제재** — 시즌 중 실시간 순위 제외, 검수 전 제재는 확정에서 제외 후 순위 재부여, 검수 후 제재는 표시만
+- **Anti-cheat** — 소프트 탐지, 어뷰징 포인트 (6단계 구현 예정)
+- **관리 API** — GM 계정·역할·감사 로그, 랭킹 등록·수정, 제재 등록·해제
 - **아카이브** — 시즌별 백업 테이블, 시즌별 Top N 영구 보관(ranking_season_top)
 
 범위와 구현 순서: [01_DESIGN 12](docs/01_DESIGN.md#12-구현-범위와-순서)
@@ -154,14 +153,16 @@ API, 워커, 관리 API는 같은 코드베이스의 별도 엔트리다. 테이
 
 | 문서 | 내용 |
 |---|---|
+| [00_GLOSSARY.md](docs/00_GLOSSARY.md) | 용어집. 처음 읽을 때 옆에 둔다 |
 | [01_DESIGN.md](docs/01_DESIGN.md) | 현재 설계(단일 기준) |
 | [02_DECISIONS.md](docs/02_DECISIONS.md) | 결정 기록 — 배경, 검토한 대안, 이유 |
-| [03_DEV_SETUP.md](docs/03_DEV_SETUP.md) | 로컬 개발 환경 설정(스키마·계정 생성) |
+| [03_DEV_SETUP.md](docs/03_DEV_SETUP.md) | 로컬 개발 환경(스키마·계정 생성, 실행, Swagger, 회귀 테스트) |
 | [04_SCHEMA.md](docs/04_SCHEMA.md) | 테이블 목록, ERD, 시즌 데이터 흐름 |
 | [05_TROUBLESHOOTING.md](docs/05_TROUBLESHOOTING.md) | 운영 장애 대응, 개발 중 겪은 문제와 해결 |
 | [06_LOAD_TEST.md](docs/06_LOAD_TEST.md) | 부하 테스트 결과 보고서 (처리량, 지연, 병목, 재현 방법) |
 | [07_K6_LOAD_TEST.md](docs/07_K6_LOAD_TEST.md) | k6 부하 테스트 결과와 따라 하기 (설치, 실행, 결과 해석, 정리) |
 | [08_TEST_CASES.md](docs/08_TEST_CASES.md) | 회귀 테스트 항목 번호별 설명 (tests/cases-doc.mjs가 생성) |
+| [09_OPERATIONS.md](docs/09_OPERATIONS.md) | 운영·배포 (프로세스와 대수, 중단 패치·롤링, upgrade, migrate 거부 대응, 마이그레이션 규칙) |
 
 ---
 
@@ -170,63 +171,17 @@ API, 워커, 관리 API는 같은 코드베이스의 별도 엔트리다. 테이
 ```
 podiumDE/
 ├── src/
-│   ├── api.ts           # API 프로세스 엔트리
-│   ├── worker.ts        # 워커 프로세스 엔트리(복구 잡·시즌 스케줄러 등록)
-│   ├── migrate.ts       # 마이그레이션 적용 CLI(npm run migrate)
-│   ├── upgrade.ts       # 중단 패치 일괄 실행(npm run upgrade)
-│   ├── apikey.ts        # API 키 발급·폐기·목록(npm run credential)
-│   ├── admin.ts         # 관리 API 프로세스 엔트리(npm run start:admin)
-│   ├── adminctl.ts      # 관리 CLI: 첫 admin 생성, 비밀번호 초기화(npm run admin)
-│   ├── core/            # API·워커·CLI 공통 기반
-│   │   ├── bootstrap.ts # API·워커 공통 기동(스키마 확인, 하트비트)과 정상 종료 순서
-│   │   ├── migration.ts # 마이그레이션 적용·기동 시 스키마 확인
-│   │   ├── heartbeat.ts # 인스턴스 하트비트
-│   │   ├── server.ts    # Fastify 공통 처리(요청 로그·마스킹, 시간 초과, 오류 변환, Swagger, /health)
-│   │   ├── redis.ts     # node-redis 클라이언트, 반영·빈도·조회·재구축 교체 Lua, 센티넬, 명령 제한 시간, 재시도
-│   │   ├── rankings.ts  # 랭킹 정의 메모리 캐시, composite 계산·디코드(API·워커 공용)
-│   │   ├── refresh.ts   # 메모리 목록 주기 재조회(키·랭킹 정의 공용)
-│   │   ├── errors.ts    # ERROR_MAP·BusinessException (결과 코드별 메시지·HTTP 상태)
-│   │   ├── codes.ts     # 상태·구분값 코드와 결과 코드(SpResult·ApiResult)
-│   │   ├── db.ts        # mysql2 풀(세션 time_zone '+00:00' 고정, 대기열 상한), SP 호출(50001·연결 실패는 BusinessException, API 호출 제한 시간, 연결 상태 로그), GET_LOCK 헬퍼
-│   │   ├── logger.ts    # log4js 로거(파일명에 프로세스 역할·인스턴스 suffix)
-│   │   └── config.ts    # 환경변수 로딩
-│   ├── api/             # API 도메인
-│   │   ├── auth.ts      # API 키 인증 가드(활성 키 메모리 목록, 권한 비트)
-│   │   ├── submit.ts    # 스코어 제출 API (빈도 검사 → SP_SUBMIT_SCORE → Redis 반영 → 제출 이력)
-│   │   ├── ranks.ts     # 순위 조회 API (현재 시즌, 상위 페이징, 내 순위)
-│   │   ├── results.ts   # 지난 시즌 결과·Top N 조회, 보상 목록·ack·대기 시즌 API
-│   │   └── seasons.ts   # 현재 시즌 메모리 캐시(end_at과 30초 중 이른 쪽까지)
-│   ├── admin/           # 관리 API (01_DESIGN 10.4)
-│   │   ├── session.ts   # 세션 쿠키·토큰 해시, 세션·역할 가드, Origin 검사
-│   │   ├── password.ts  # scrypt 해시·비교, 비밀번호 규칙, 초기 비밀번호 생성
-│   │   ├── auth.ts      # 로그인·로그아웃·내 계정·비밀번호 변경
-│   │   ├── accounts.ts  # 계정 목록·생성·수정·초기화·잠금 해제
-│   │   ├── rankings.ts  # 랭킹 목록·조회·등록·수정·보상 구간 교체, 등록 검증
-│   │   └── audit.ts     # 감사 로그 적재(로그 DB, 별도 풀)·조회
-│   └── worker/          # 워커 잡
-│       ├── loop.ts      # 잡 주기 실행(GET_LOCK 단일 실행, 정상 종료 대기)
-│       ├── recovery.ts  # 자가 복구 잡(L2 리컨실러, L3 재구축, 보조 점검)
-│       ├── delivery.ts  # 보상 전달 잡(SETTLED 전이, ack 정체·적체 경고)
-│       ├── settle.ts    # 정산 잡(시작 조건, 가순위, 시즌 키 삭제, REVIEW 전이, 확정·DELIVERING 전이)
-│       ├── scheduler.ts # 시즌 스케줄러(시즌 경계 계산, 선행 생성, 상태 전이)
-│       ├── archive.ts   # 시즌 백업 분리 잡(SETTLED 파티션 → 백업 테이블, 오래된 백업 경고)
-│       ├── logcleanup.ts # 로그 정리 잡(로그 DB 일 파티션 생성, 월 테이블 이동·삭제, p_max 경고)
-│       └── stall.ts     # 정리 잡 정체 감시(백업 분리, 로그 정리)
-├── database/
-│   ├── tables/          # 테이블 DDL(버전 마이그레이션, 파일당 DDL 1개)
-│   ├── functions/       # Function(반복 마이그레이션, SP보다 먼저 적용)
-│   ├── procedures/      # Stored Procedure(반복 마이그레이션)
-│   └── TABLE_LOCK_ORDER.md
+│   ├── *.ts             # 프로세스 엔트리(api, worker, admin)와 CLI(migrate, upgrade, credential, admin)
+│   ├── core/            # 공통 기반: DB·SP 호출, Redis·Lua, 결과 코드·오류, 로거, 설정, 기동·하트비트
+│   ├── api/             # 게임 서버용 API: 인증, 제출, 순위 조회, 결과·보상
+│   ├── admin/           # 관리 API: 세션·역할, 계정, 랭킹 등록·수정, 제재, 감사 로그
+│   └── worker/          # 워커 잡: 스케줄러, 자가 복구, 정산, 보상 전달, 백업 분리, 로그 정리
+├── database/            # 메인 DB: tables(버전 마이그레이션), functions·procedures(반복 마이그레이션), TABLE_LOCK_ORDER.md
 ├── database_log/        # 로그 DB(podium_de_log), database/와 같은 규칙
-│   ├── tables/
-│   ├── procedures/
-│   └── TABLE_LOCK_ORDER.md
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
-├── loadtest/load.mjs    # 부하 테스트 스크립트(로컬 전용, docs/06_LOAD_TEST.md)
-├── loadtest/k6-submit.js # k6 제출 부하 스크립트(로컬 전용, docs/07_K6_LOAD_TEST.md)
-├── tests/recovery.mjs   # 회귀 테스트(로컬 전용, 자가 복구·시즌 스케줄러·정산·관리 API. npm run build 후 실행)
-├── tests/cases-doc.mjs  # 회귀 테스트 항목 문서(docs/08_TEST_CASES.md) 생성·검사
-└── docs/                # 설계 문서(위 목록)
+├── loadtest/            # 부하 테스트 스크립트(로컬 전용, docs/06·07)
+├── tests/               # 회귀 테스트 recovery.mjs, 항목 문서 생성 cases-doc.mjs(로컬 전용, docs/03 4.4·08)
+└── docs/                # 문서(위 목록)
 ```
 
 ---
@@ -247,133 +202,16 @@ npm run credential -- create <이름> write,read,reward      # 게임 서버용 
 MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 먼저 만들어 둔다. 상세 절차는
 [`docs/03_DEV_SETUP.md`](docs/03_DEV_SETUP.md).
 
-상시 실행 프로세스 — 운영 중 계속 떠 있어야 하는 것은 이 세 가지다.
+상시 실행 프로세스는 세 가지다.
 
-| 명령 | 프로세스 | 역할 | 권장 대수 |
-|---|---|---|---|
-| `npm run start:api` | API | 게임 서버의 S2S 요청(제출, 순위 조회) | 2 (목표 피크 460건/초 기준 N+1, [07_K6_LOAD_TEST 1.2](docs/07_K6_LOAD_TEST.md)) |
-| `npm run start:worker` | 워커 | 스케줄러, 리컨실러, 정산, 보상 전달, 아카이브 | 2 (장애 대비, 아래 배포 절 참고) |
-| `npm run start:admin` | 관리 API | GM 계정·세션 쿠키 인증 관리 기능 | 1 |
-
-MySQL 메인, MySQL 로그 DB, Redis는 이 저장소 밖에서 따로 운영하는 인프라다.
-
-API·워커·관리 API는 기동 시 하트비트를 기록한 뒤
-migrate와 같은 락을 잡고 DB 스키마가 패키지와 같은지 확인만 하며, 다르면 하트비트를 지우고 기동하지 않는다.
-적용은 `npm run migrate`로만 한다.
-
-필요할 때 실행하는 명령 — 실행하고 끝나는 명령이며, 상시 프로세스가 아니다.
-
-| 명령 | 설명 |
-|---|---|
-| `npm run build` | TypeScript 컴파일(`dist/`) |
-| `npm run migrate` | 대기 중인 테이블·SP 마이그레이션 적용 |
-| `npm run upgrade` | 중단 패치 일괄 실행(중지 → migrate → 기동 → 새 버전 확인) |
-| `npm run credential` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
-| `npm run admin` | 관리 계정 CLI (`create --login-id <아이디> --name <이름>` / `reset-password --login-id <아이디>`). migrate 계정 사용, 초기 비밀번호는 한 번만 표시 |
-
-### 배포
-
-| 배포 유형 | 조건 | 방식 |
+| 명령 | 프로세스 | 역할 |
 |---|---|---|
-| 중단 패치 | DB 변경(테이블, SP) 있음 | 전체 프로세스 중지 → 마이그레이션 → 기동. 게임 점검 시간에 맞춘다 |
-| 롤링 | DB 변경 없음 | 인스턴스를 하나씩 교체 |
+| `npm run start:api` | API | 게임 서버의 S2S 요청(제출, 순위 조회, 보상 목록·ack) |
+| `npm run start:worker` | 워커 | 스케줄러, 리컨실러, 정산, 보상 전달, 아카이브 |
+| `npm run start:admin` | 관리 API | GM 계정·세션 쿠키 인증 관리 기능 |
 
-> **DB 변경이 있는 패키지는 `pm2 reload`(롤링) 금지, `npm run upgrade`만 사용한다.**
-> 새 인스턴스가 스키마 불일치로 기동을 거부해도 pm2는 `--listen-timeout`이 지나면 구버전을
-> 내리고, 모든 인스턴스가 errored가 되어 전체가 중단된다(아래 실험 결과).
-
-롤링 절차 (DB 변경 없음): 새 패키지 설치 후 `npm run build` → `pm2 reload podium-api podium-worker`.
-API·워커는 기동 확인(하트비트 기록, 스키마 확인)을 통과한 뒤(API는 listen 성공 후) pm2에 `ready`를
-보내고, pm2는 `--wait-ready`로 이를 기다린 뒤 구버전을 내린다. 로드밸런서 헬스체크는 `GET /health`를
-쓴다(기동 확인을 통과해 떠 있으면 200).
-
-| 실험 (pm2 7.0.4, 새 패키지가 기동 확인 실패로 종료) | 결과 |
-|---|---|
-| API 클러스터 `-i 2 --wait-ready --listen-timeout 15000` | 구버전은 인스턴스마다 `listen-timeout` 동안만 유지되고, 그 뒤 내려간다. reload 시작 약 32초 후 전체 중단, 두 인스턴스 모두 errored |
-| 워커 fork 모드 | reload가 재시작으로 동작해 구버전이 바로 내려간다 |
-
-실수로 reload했다면 이전 패키지로 되돌려 `pm2 reload`하거나, 새 패키지로 `npm run upgrade`를 실행한다.
-
-중단 패치 절차
-
-1. 새 패키지 설치 후 `npm run build`
-2. `npm run upgrade` — 아래 단계를 차례로 실행하고, 각 단계 결과와 명령 출력·종료 코드를 출력한다.
-   하나라도 실패하면 거기서 멈추고 종료 코드 1로 끝난다.
-
-| 단계 | 동작 | 실패 조건 |
-|---|---|---|
-| 1 stop | `UPGRADE_STOP_CMD` 실행 | 종료 코드 ≠ 0 |
-| 2 wait stop | 살아 있는 인스턴스가 없어질 때까지 대기 | `UPGRADE_TIMEOUT_SEC` 초과 — 남은 인스턴스 출력 |
-| 3 migrate | `npm run migrate`와 같은 규칙(하트비트·버전 검사 포함) | migrate 거부·실패 |
-| 4 start | `UPGRADE_START_CMD` 실행 | 종료 코드 ≠ 0 |
-| 5 wait start | 새 `version`의 하트비트가 API `UPGRADE_EXPECT_API`개, 워커 `UPGRADE_EXPECT_WORKER`개, 관리 API `UPGRADE_EXPECT_ADMIN`개(기본 0) 이상 | `UPGRADE_TIMEOUT_SEC` 초과 — 현재 인스턴스 출력 |
-
-`UPGRADE_STOP_CMD`, `UPGRADE_START_CMD`가 없으면 1단계 전에 중단한다(아무것도 멈추지 않음).
-명령 실행·중지 대기·기동 대기는 각각 `UPGRADE_TIMEOUT_SEC`(기본 120초)를 넘으면 실패다.
-4·5단계에서 실패하면 마이그레이션은 이미 적용된 상태이므로, 원인을 고친 뒤 기동만 다시 한다.
-
-upgrade 설정 예시 (`.env`)
-
-pm2 — 최초 1회 등록한다. `--kill-timeout`은 정상 종료(진행 중 요청 마무리, 하트비트 삭제)를
-기다릴 시간이다. 기본값(1.6초)을 넘기면 강제 종료되어 하트비트가 30초 동안 남고, 2단계가 그만큼 기다린다.
-`--wait-ready`는 롤링 시 기동 확인 통과를 기다리게 하고, `--listen-timeout`은 그 대기 한도다.
-기동 확인이 migrate 락을 최대 10초 기다리므로 그보다 길게 잡는다.
-
-```bash
-pm2 start dist/api.js --name podium-api -i 2 --wait-ready --listen-timeout 20000 --kill-timeout 10000
-pm2 start dist/worker.js --name podium-worker -i 2 --wait-ready --listen-timeout 20000 --kill-timeout 10000
-```
-
-```dotenv
-UPGRADE_STOP_CMD=pm2 stop podium-api podium-worker
-UPGRADE_START_CMD=pm2 start podium-api podium-worker
-UPGRADE_EXPECT_API=2
-UPGRADE_EXPECT_WORKER=2
-```
-
-직접 실행 (Linux) — 시작 명령은 백그라운드로 띄우고 출력을 파일로 돌린다. 중지 명령은
-SIGTERM으로 정상 종료시키며, 대상이 없을 때도 실패하지 않도록 `|| true`를 붙인다.
-
-```dotenv
-UPGRADE_STOP_CMD=pkill -TERM -f "node dist/(api|worker)\.js" || true
-UPGRADE_START_CMD=mkdir -p logs && (nohup node dist/api.js >> logs/api.out 2>&1 &) && (nohup node dist/worker.js >> logs/worker.out 2>&1 &)
-UPGRADE_EXPECT_API=1
-UPGRADE_EXPECT_WORKER=1
-```
-
-upgrade 없이 수동으로 할 때는 전체 프로세스 중지 → `npm run migrate` → API·워커 기동 순서로 한다.
-
-API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 워커는 잡마다 한 곳에서만 돌아
-늘려도 빨라지지 않으므로 장애 대비로 2대를 둔다. 한 대가 죽으면 다른 워커가 다음 차례에 락을
-잡고 이어서 돌린다([01_DESIGN 11.3](docs/01_DESIGN.md#s-11-3)). 인스턴스마다 커넥션
-풀(`DB_POOL_SIZE`)을 따로 가지므로, (API 수 + 워커 수 + 관리 API 수) × `DB_POOL_SIZE`가 MySQL
-`max_connections`를 넘지 않게 한다.
-
-API·워커는 실행 중 10초마다 `instance_heartbeat`에 하트비트를 남기고, 정상 종료 시 자기 행을
-지운다. 인스턴스 ID는 기동마다 새로 만드는 UUID이고, 마지막 하트비트에서 1시간이 지난 행은
-하트비트 기록 때 함께 지워진다. `migrate`는 최근 30초 안에 하트비트가 있으면 거부하고 살아 있는
-인스턴스 목록(유형, 인스턴스 ID, 버전, 마지막 하트비트 시각)을 출력한다. 강제 실행 옵션은 없다.
-
-migrate가 하트비트로 거부되면
-
-1. 출력된 인스턴스 ID로 로그의 `heartbeat started: <ID> (host ..., pid ...)` 줄을 찾아
-   남은 프로세스를 중지한다(정상 종료하면 행이 바로 지워진다).
-   `UPGRADE_STOP_CMD`가 그 인스턴스를 멈추지 못한 것이므로 명령도 함께 고친다.
-2. 프로세스가 이미 없는데 목록에 남아 있으면 비정상 종료한 인스턴스다. 마지막 하트비트에서
-   30초가 지나면 목록에서 빠지므로 기다린 뒤 다시 실행한다.
-3. `npm run upgrade`(또는 `npm run migrate`) 재실행
-
-결과적으로 "중지 없이 migrate"는 하트비트 검사로, "migrate 없이 기동"은 스키마 확인으로 막힌다.
-기동과 migrate는 같은 락 안에서 확인하고 기동은 락보다 하트비트를 먼저 기록하므로, migrate 도중에
-구버전 패키지를 기동해도 락을 기다렸다가 새 스키마와 달라 거부된다.
-
-마이그레이션 규칙
-
-- 테이블: `database/tables`의 버전 파일. 파일 하나에 DDL 구문 하나만 두며, 적용된 파일은 수정하지 않고 새 버전 파일을 추가한다.
-- SP: `database/procedures`의 파일. 내용이 바뀌면 다시 적용된다(DROP 후 CREATE). 삭제는 `DROP` 구문만 남긴 파일로 한다.
-- 로그 DB는 `database_log/`에 같은 규칙으로 둔다. `migrate`가 메인 다음에 적용한다. 기동 시 로그 DB에 접속할 수 없으면 경고만 남기고 기동하며, 접속되는데 스키마가 다르면 거부한다.
-- DB 변경이 있는 배포는 `package.json`의 `version`을 올린다. DB에 기록된 버전보다 낮은 패키지로는 `migrate`가 거부된다.
-  DB에 적용된 테이블 파일이 패키지에 없어도 거부된다. SP만 바뀐 롤백은 버전 비교로만 막히므로 버전을 올리지 않으면 막지 못한다.
+권장 대수, 배포(중단 패치·롤링), `npm run upgrade`, migrate 거부 대응, 마이그레이션 규칙은
+[`docs/09_OPERATIONS.md`](docs/09_OPERATIONS.md)에 있다.
 
 ---
 
