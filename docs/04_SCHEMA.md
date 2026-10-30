@@ -202,6 +202,8 @@ erDiagram
 
 관리자가 랭킹을 등록한 뒤 시즌 하나가 시작되고 보상 전달까지 끝나는 순서다. 화살표 옆 괄호는 그 단계에서 쓰는 테이블이다. 상태 이름은 `SeasonStatus`, 상세는 01_DESIGN 3~7장.
 
+시즌 상태 전이의 archify 다이어그램(workflow 형식): [diagrams/season-status.html](diagrams/season-status.html) (브라우저에서 열기, 원본 `diagrams/season-status.json`). 상태 정의는 [01_DESIGN 3.5](01_DESIGN.md#s-3-5)에 있으며, 바꾸면 이 그림도 고친다.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -269,7 +271,7 @@ sequenceDiagram
 
 3절의 단계를 기준으로 데이터가 어느 테이블에서 어디로 가는지 그린다. 화살표의 번호는 아래 표의 단계다. 굵은 화살표(`==>`)는 파티션 EXCHANGE로, 행 복사 없이 데이터 파일이 통째로 옮겨진다 (8.1).
 
-같은 흐름의 대화형 다이어그램: [diagrams/season-data.html](diagrams/season-data.html) (브라우저에서 열기, 원본 `diagrams/season-data.json`). 아래 Mermaid와 내용이 같으며, 흐름을 바꾸면 둘 다 고친다.
+같은 흐름의 archify 다이어그램(dataflow 형식): [diagrams/season-data.html](diagrams/season-data.html) (브라우저에서 열기, 원본 `diagrams/season-data.json`). 아래 Mermaid와 내용이 같으며, 흐름을 바꾸면 둘 다 고친다.
 
 ```mermaid
 flowchart LR
@@ -343,7 +345,7 @@ flowchart LR
 
 4절 ②의 "제출" 한 건이 처리되는 순서다. 점선 상자 안이 `SP_SUBMIT_SCORE`이고, 상세는 [01_DESIGN 2.3](01_DESIGN.md#s-2-3), [4.1](01_DESIGN.md#s-4-1)~[4.5](01_DESIGN.md#s-4-5), [5.3](01_DESIGN.md#s-5-3).
 
-같은 흐름을 레인별로 나눈 대화형 다이어그램: [diagrams/score-submit.html](diagrams/score-submit.html) (브라우저에서 열기, 원본 `diagrams/score-submit.json`). 아래 Mermaid와 내용이 같으며, 흐름을 바꾸면 둘 다 고친다.
+같은 흐름의 archify 다이어그램(workflow 형식, 레인별): [diagrams/score-submit.html](diagrams/score-submit.html) (브라우저에서 열기, 원본 `diagrams/score-submit.json`). 아래 Mermaid와 내용이 같으며, 흐름을 바꾸면 둘 다 고친다.
 
 ```mermaid
 flowchart TD
