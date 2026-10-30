@@ -159,18 +159,62 @@ API·워커·관리 API는 기동 시 DB 스키마가 패키지와 같은지 확
 
 ## 4.4 회귀 테스트
 
-```powershell
-npm run build
-node tests/recovery.mjs      # 기본 3회 반복, 약 10분
-```
+먼저 `npm run build`를 한다. 명령은 프로젝트 루트의 PowerShell에서 실행한다.
+
+| 대상 | 명령 | 1회 소요 |
+| --- | --- | --- |
+| 전체 3회 (커밋 전) | `Remove-Item Env:ONLY -ErrorAction Ignore; node tests/recovery.mjs` | 약 3분 15초 (3회 약 10분) |
+| 전체 1회 | `Remove-Item Env:ONLY -ErrorAction Ignore; node tests/recovery.mjs 1` | 약 3분 15초 |
+| 복구 시나리오 (S) | `$env:ONLY='복구'; node tests/recovery.mjs 1` | 49초 |
+| 락 대기 제한 (L) | `$env:ONLY='락 대기'; node tests/recovery.mjs 1` | 6초 |
+| API 경유 (A) | `$env:ONLY='API 경유'; node tests/recovery.mjs 1` | 6초 |
+| 시즌 스케줄러 (C, G) | `$env:ONLY='스케줄러'; node tests/recovery.mjs 1` | 12초 |
+| 정산·확정 (T, F) | `$env:ONLY='정산'; node tests/recovery.mjs 1` | 30초 |
+| 보상 전달 (R) | `$env:ONLY='보상'; node tests/recovery.mjs 1` | 10초 |
+| 로그 정리 (L) | `$env:ONLY='로그'; node tests/recovery.mjs 1` | 5초 |
+| 시즌 백업 분리 (B) | `$env:ONLY='백업'; node tests/recovery.mjs 1` | 3초 |
+| 관리 API (G) | `$env:ONLY='관리 API'; node tests/recovery.mjs 1` | 11초 |
+| 관리 랭킹 (K) | `$env:ONLY='관리 랭킹'; node tests/recovery.mjs 1` | 10초 |
+| 관리 제재 (J) | `$env:ONLY='제재'; node tests/recovery.mjs 1` | 9초 |
+| 관리 세 구간 | `$env:ONLY='관리'; node tests/recovery.mjs 1` | 30초 |
+| 장애 주입 API (X) | `$env:ONLY='장애 주입 API'; node tests/recovery.mjs 1` | 33초 |
+| 장애 주입 워커 (X) | `$env:ONLY='장애 주입 워커'; node tests/recovery.mjs 1` | 12초 |
+| 장애 주입 두 구간 | `$env:ONLY='장애'; node tests/recovery.mjs 1` | 45초 |
+
+- `$env:ONLY`는 그 PowerShell 창에 남는다. 전체 명령 앞의 `Remove-Item`이 지운다.
+- 반복 횟수는 마지막 인자다(기본 3). `KEEP_BACKUP_TABLES=1`은 아래 설명을 본다.
 
 로컬 DB·Redis에서 워커·API를 직접 띄워 확인한다. 테스트 랭킹 940\~977을 쓰고 끝나면 지운다(시즌 백업 테이블 포함). API 포트는 TEST_PORT(기본 3199)부터 6개(3199\~3204)를 쓴다. 끝난 뒤 30초 동안은 migrate가 거부된다(강제 종료로 남은 하트비트).
 관리 API는 그다음 포트 2개(3205, Redis 없는 관리 API 3206)를 쓰고, `rtest-`로 시작하는 관리 계정·세션·감사 로그를 만들고 지운다.
-고치는 중에는 `ONLY=관리`처럼 구간 이름 일부를 주면 그 구간만 돈다(PowerShell: `$env:ONLY='관리'`). 커밋 전에는 전체를 돌린다.
+`ONLY`는 구간 이름에 그 문자열이 든 구간만 돌린다. 고치는 중 확인용이고, 커밋 전에는 전체 3회를 돌린다.
 `KEEP_BACKUP_TABLES=1`로 실행하면 테스트가 만든 시즌 백업 테이블을 남긴다(확인용, 랭킹 정의·시즌 행은 지워진다). 다음 실행 시작 때 지워진다.
 
 진행 상황은 구간 시작·끝의 `[mm:ss]` 경과 시간과 30초마다 찍는 `... 진행 중: run N / 구간` 하트비트로 본다. 출력이 30초 넘게 멈추면 그 자리에서 멈춘 것이다. 구간이 5분을 넘거나 예외가 나면 `ABORTED`와 요약을 찍고 종료 코드 1로 끝난다. 워커·API가 스스로 종료하면(스키마 불일치로 기동 거부 등) err 로그의 마지막 ERROR 줄과 함께 FAIL로 찍는다.
 테스트가 도는 동안 SP·소스를 고치지 않는다. 새로 뜨는 워커·API가 스키마 불일치로 기동을 거부해 엉뚱한 구간이 실패한다.
+
+**결과 한 줄 읽기**
+
+```text
+PASS J6 시즌 제재 해제: SREM, 원장 값(재제출 7999)으로 바로 재반영 (200, {"bad":0,"expected":9,"redis":9,"ready":true})
+```
+
+| 부분 | 뜻 |
+| --- | --- |
+| `PASS` / `FAIL` | 판정 |
+| `J6` | 구간 표시와 번호. 글자는 아래 구분 표의 괄호와 같다. L(락 대기·로그 정리)과 G(시즌 스케줄러·관리 API)는 두 구간이 함께 쓰므로 구간 이름으로 구분한다 |
+| `시즌 제재 해제: ...` | 이 항목이 확인하는 것 (기대 결과) |
+| `( ... )` | 실제로 나온 값. 결과 코드·HTTP 상태, 건수, 걸린 시간(ms) 등. FAIL이면 여기를 기대 결과와 비교한다 |
+
+마지막 줄 `523/523 passed`는 통과 수/전체 수다. 3회 반복이면 회마다 센 수를 합친 값이다.
+
+**FAIL이 나오면**
+
+1. 그 줄의 괄호 값을 설명(기대 결과)과 비교해 어느 값이 틀렸는지 본다.
+2. 위 표의 명령으로 그 구간만 1회 다시 돌린다. 다시 통과하면 시간에 민감한 항목일 수 있으니 한 번 더 돌려 확인한다.
+3. 그래도 실패하면 그 구간이 띄운 프로세스의 로그를 본다. 로그 문구로 판정하는 항목도 있다.
+   - 앱 로그: `logs/app.log.<종류>.<ID>` (종류: `worker`, `api`, `admin`, `adminctl`)
+   - 오류만: `logs/err.log.<종류>.<ID>`
+   - `<ID>`는 테스트가 붙인 인스턴스 ID다(`t`로 시작, 예: 관리 제재 구간의 워커는 `texw`, 관리 API는 `texc`). 날짜가 지나면 파일 끝에 `.YYYYMMDD`가 붙는다.
 
 | 구분 | 내용 |
 | --- | --- |
