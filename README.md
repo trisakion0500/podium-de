@@ -232,7 +232,7 @@ MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 �
 
 - ✅ 1단계: 프로젝트 골격, 마이그레이션 러너, 스키마, 파티션 관리 SP, 스코어 적재 SP
   - ✅ 마이그레이션 러너(버전·반복 마이그레이션, 체크섬, 기동 시 스키마 확인), 하트비트, 중단 패치(`npm run upgrade`)
-  - ✅ 테이블 DDL — 메인 DB 13개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리)
+  - ✅ 테이블 DDL — 1단계 기준 메인 DB 13개, 로그 DB 2개 (DB 계정 분리, 로그 DB 물리 분리). 현재 목록은 [04_SCHEMA](docs/04_SCHEMA.md)
   - ✅ 파티션·정산 관리 SP (`SP_PARTITION_*`, `SP_SETTLING_EXCHANGE`, 로그 DB 일 파티션)
   - ✅ 로그 정리 잡 — 로그 DB 일 파티션을 오늘 + 7일까지 미리 만들고 보관 기간이 지난 파티션 정리(5단계부터 월 테이블로 이동), 1시간 주기, `p_max` 행 경고, 정체 감시(3시간)
   - ✅ 스코어 적재 SP `SP_SUBMIT_SCORE` (BEST/SUM, 멱등 키, 하드 검증)
