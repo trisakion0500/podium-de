@@ -578,8 +578,8 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 | `rk:{rankingId}:s:{seasonNo}:ver` | HASH | member별 version (SUM, LATEST) |
 | `rk:{rankingId}:s:{seasonNo}:ready` | STRING | 쓰기 허용 센티넬 ([5.3](#s-5-3)). 값은 따라잡은 DB 시각 T(ms) ([6.2](#s-6-2)) |
 | `rk:{rankingId}:rl:{memberId}` | STRING | 제출 빈도 카운터 (TTL) |
-| `rk:{rankingId}:s:{seasonNo}:excl` | SET | 이 시즌 제재 멤버 ([7.8](#s-7-8), [D-75](02_DECISIONS.md#d-75)) |
-| `rk:{rankingId}:excl` | SET | 전 시즌 제재 멤버 (`season_no = 0`) |
+| `rk:{rankingId}:s:{seasonNo}:excl` | SET | 이 시즌 제재 멤버 ([7.8](#s-7-8), [D-75](02_DECISIONS.md#d-75)). 정산 때 다른 시즌 키와 함께 삭제 |
+| `rk:{rankingId}:excl` | SET | 전 시즌 제재 멤버 (`season_no = 0`). 랭킹마다 하나, 지우지 않음 |
 
 `{rankingId}` 해시태그로 한 랭킹의 키를 같은 클러스터 슬롯에 둔다.
 
@@ -613,7 +613,7 @@ ASC:  score = floor(c / B),  t = c mod B
 | BEST | 센티넬 확인 → `ZADD key GT CH composite member` (ASC는 `LT`) |
 | SUM, LATEST | 센티넬 확인 → version 비교 → `ZADD` |
 
-두 경로 모두 센티넬 확인 다음에 제외 집합(`:excl`, 그 시즌과 전 시즌)을 확인해, 제재 멤버면 쓰지 않는다([7.8](#s-7-8)). 6단계 구현 예정.
+두 경로 모두 센티넬 확인 다음에 제외 집합(`:excl`, 그 시즌과 전 시즌)을 확인해, 제재 멤버면 쓰지 않는다([7.8](#s-7-8)).
 
 BEST는 더 좋은 기록일수록 composite가 DESC면 커지고 ASC면 작아지므로, `GT`(ASC는 `LT`)가 늦게 도착한 이전 값을 거부한다. 같은 점수를 나중에 다시 달성하면 composite가 나빠지는 쪽으로 바뀌어 원래 달성 시각이 유지된다.
 
@@ -701,7 +701,7 @@ Redis 반영 실패 시 짧은 백오프로 재시도한다.
 - 동기화 시각은 앱 시각이 아니라 DB 시각 T로 기록한다. `updated_at`도 DB 시각이라 호스트 시계 차이가 끼지 않는다.
 - 반드시 마스터에서 읽는다. 레플리카는 복제 지연으로 안전마진이 깨진다.
 - 동기화 시각은 `job_state.synced_at`(`job_name = 'reconciler'`)에 두고, `GET_LOCK('podium:recovery')`로 단일 실행을 보장한다.
-- 1분마다 대상 시즌의 제외 목록을 DB에서 읽어 제외 집합을 맞추고(`SADD`/`SREM`), 순위표에 남은 제재 멤버를 `ZREM`한다([D-75](02_DECISIONS.md#d-75), 6단계 구현 예정).
+- 1분마다 랭킹별로 제외 목록을 DB에서 읽어 제외 집합을 맞추고(`SADD`/`SREM`), 순위표에 남은 제재 멤버를 `ZREM`한다. Redis에만 남은 멤버(해제 때 Redis 실패)는 원장 값으로 다시 반영한다. Redis를 DB보다 먼저 읽는다 — 반대로 읽으면 그 사이 등록된 제재를 지운다([D-75](02_DECISIONS.md#d-75)).
 - 같은 스캔에서 어뷰징 소프트 탐지([9.2](#s-9-2))를 수행한다 (6단계 구현 예정).
 - 리컨실러도 라이브 키에 쓰므로 센티넬 확인 Lua를 사용한다. 그래야 정산의 키 삭제 후 키가 되살아나지 않는다. 예외는 재구축 따라잡기([6.3](#s-6-3))로, 센티넬과 무관한 임시 키에 쓴다.
 
@@ -711,7 +711,7 @@ Redis 유실(퍼시스턴스 없는 재시작, 페일오버 데이터 손실) �
 
 ```text
 감지: 대상 시즌(6.2)인데 rk:{id}:s:{n}:ready 센티넬 없음 (새로 열린 시즌 포함)
-  0. 제외 집합(:excl)을 ranking_exclusion으로 다시 채움 (D-75, 6단계 구현 예정)
+  0. 제외 집합(:excl)을 ranking_exclusion으로 다시 채움 (D-75)
   1. 임시 키 rk:{id}:s:{n}:rebuild(및 :rebuild:ver)에 MySQL 파티션을 PK 청크로 적재 (제외 대상 건너뜀)
   2. 재구축 시작 DB 시각 T − 안전마진부터 L2 방식으로 임시 키에 따라잡기
   3. Lua 하나로 교체: 임시 ZSET이 적재 수보다 작으면 거부 → 라이브 키 UNLINK → 임시 키 RENAME → 센티넬 = T (D-60)
@@ -933,7 +933,7 @@ CREATE TABLE `ranking_exclusion` (
     `season_no`     INT             UNSIGNED               NOT NULL        COMMENT '시즌 번호 (0:해당 랭킹 전 시즌, FK 없음)',
     `member_id`     VARCHAR(64)     COLLATE utf8mb4_bin    NOT NULL        COMMENT '멤버 ID (대소문자 구분)',
     `reason`        VARCHAR(255)                           NOT NULL        COMMENT '제재 사유',
-    `created_by`    VARCHAR(64)                            NOT NULL        COMMENT '등록한 GM 식별자',
+    `created_by`    INT             UNSIGNED               NOT NULL        COMMENT '등록한 관리자 계정 ID (0:SYSTEM, FK 없음)',
     `created_at`    DATETIME(3)                            NOT NULL        COMMENT '등록 시각 (UTC)',
     PRIMARY KEY (`ranking_id`, `season_no`, `member_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='제재로 순위에서 제외할 멤버';
@@ -941,7 +941,7 @@ CREATE TABLE `ranking_exclusion` (
 
 리컨실러와 재구축은 이 테이블을 확인해 제외 대상을 Redis에 다시 넣지 않는다.
 
-시즌 중 제재는 `ZREM`만으로 끝나지 않는다. 제재된 멤버가 다시 제출하면 API가 Redis에 다시 반영하기 때문이다. 그래서 제재 대상을 Redis 제외 집합에도 두고, 반영 Lua가 확인해 건너뛴다([5.3](#s-5-3)). 원장에는 그대로 기록한다. 제재 등록과 함께 6단계 구현 예정 ([D-75](02_DECISIONS.md#d-75)).
+시즌 중 제재는 `ZREM`만으로 끝나지 않는다. 제재된 멤버가 다시 제출하면 API가 Redis에 다시 반영하기 때문이다. 그래서 제재 대상을 Redis 제외 집합에도 두고, 반영 Lua가 확인해 건너뛴다([5.3](#s-5-3)). 원장에는 그대로 기록한다([D-75](02_DECISIONS.md#d-75)).
 
 - **등록:** DB 기록 → `SADD` → `ZREM` 순이다. Redis가 장애면 리컨실러의 1분 동기화가 맞춘다([6.2](#s-6-2)).
 - **해제:** DB 삭제 → `SREM` → (OPEN 시즌이면) 원장 값으로 다시 반영한다. 검수가 끝나기 전(REVIEW까지) 시즌의 제재와 전 시즌(`season_no = 0`) 제재만 풀 수 있다. 검수가 끝난 시즌에 이미 붙은 `sanctioned` 표시는 그대로 둔다.
@@ -1281,6 +1281,33 @@ CREATE TABLE `api_credential` (
 - 등록·구간 교체는 정의 → 보상 구간 순으로 한 트랜잭션이다. PATCH의 시즌 변경은 정의 → 시즌 순이다(TABLE_LOCK_ORDER).
 - 감사 로그 `action`은 `ranking.create`, `ranking.update`, `ranking.tiers`이고 변경 전·후를 남긴다.
 
+**제재** ([7.8](#s-7-8), [D-75](02_DECISIONS.md#d-75), [D-78](02_DECISIONS.md#d-78))
+
+| 메서드 | 경로 | 역할 | 설명 |
+| --- | --- | --- | --- |
+| GET | `/admin/v1/rankings/{id}/exclusions?seasonNo&memberId&offset&size` | viewer | 제재 목록 (최신 등록순) |
+| POST | `/admin/v1/rankings/{id}/exclusions` | operator | 등록 (`seasonNo`, `memberId`, `reason`). `seasonNo = 0`이면 전 시즌 |
+| DELETE | `/admin/v1/rankings/{id}/exclusions/{seasonNo}/{memberId}` | operator | 해제 |
+
+- `memberId`는 제출 API와 같은 규칙이다. `reason`은 1\~255자다.
+- 지정한 시즌이 없으면 거부한다(1602). 아직 만들어지지 않은 미래 시즌에는 시즌 번호로 걸 수 없으므로 전 시즌(0)으로 건다.
+- 목록의 `createdBy`는 계정 ID, `createdByName`은 그 계정의 지금 이름이다(0은 `SYSTEM`). 등록 당시 이름은 감사 로그에 있다.
+- 등록 SP는 시즌 행 공유 잠금 → `ranking_exclusion` 추가 → (DELIVERING 이후면) `sanctioned` 표시 순서로 한 트랜잭션에서 처리한다. 분리된 시즌은 `ranking_season_top`에만 표시한다.
+- SP가 커밋된 뒤 앱이 `SADD` → `ZREM`을 하고, 해제 때는 `SREM` → (OPEN 시즌이면) 원장 값 재반영을 한다. Redis가 실패해도 응답은 성공이고 `redisSynced: false`를 담는다. 리컨실러가 1분 안에 맞춘다.
+- 해제는 REVIEW까지인 시즌의 제재와 전 시즌 제재만 된다(1603). 이미 붙은 `sanctioned` 표시는 지우지 않는다.
+- 감사 로그 `action`은 `exclusion.create`, `exclusion.delete`이고 등록·삭제된 행을 남긴다.
+
+**결과 코드 (16xx: SP 제재)**
+
+| 코드 | 의미 | HTTP |
+| --- | --- | --- |
+| 1601 | 이미 같은 제재가 있음 | 409 |
+| 1602 | 시즌 없음 | 404 |
+| 1603 | 검수가 끝난 시즌이라 해제할 수 없음 | 409 |
+| 1604 | 해제할 제재 없음 | 404 |
+
+랭킹이 없으면 1501이다.
+
 **결과 코드 (14xx: SP 관리 계정)**
 
 | 코드 | 의미 | HTTP |
@@ -1606,6 +1633,7 @@ GET_LOCK('podium:migrate') → 하트비트 검사 → 역행 검사 → 적용 
 - 분포 기반 이상치 탐지, 섀도 보드
 - 탈퇴 유저 가명화
 - 보상 준비 완료 웹훅 (DELIVERING 진입 신호, [7.7](#s-7-7))
+- 기간 제재 (n시즌, 미래 시즌 번호로 등록)
 
 ### <a id="s-12-3"></a>12.3 구현 순서
 

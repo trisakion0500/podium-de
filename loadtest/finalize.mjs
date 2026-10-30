@@ -63,7 +63,8 @@ async function setup(id, tiers) {
     if (tiers)
         await q('INSERT INTO ranking_reward_tier (ranking_id, tier_no, range_type, range_from, range_to, reward_code) VALUES ?',
             [[[id, 1, 1, 1, 1, 'R1'], [id, 2, 1, 2, 10, 'R10'], [id, 3, 2, 1, 10, 'P10'], [id, 4, 2, 11, 50, 'P50']]]);
-    const banned = Array.from({ length: 100 }, (_, k) => [id, 1, `u${Math.floor((k + 0.5) * members / 100)}`, 'load', 'load', new Date()]);
+    // 검수 기간(review_until) 전에 등록한 제재라야 확정에서 빠진다 (D-78). 등록자 0은 SYSTEM이다.
+    const banned = Array.from({ length: 100 }, (_, k) => [id, 1, `u${Math.floor((k + 0.5) * members / 100)}`, 'load', 0, new Date(Date.now() - 3_600_000)]);
     await q('INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES ?', [banned]);
 }
 

@@ -8,6 +8,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_UPDATE_FINAL_EXCLUSION
     -- 작성 : 2026.10.11 trisakion
+    -- 수정 : 2026.10.30 trisakion review_until 전에 등록된 제재만 제외 (D-78)
     -- 내용 : FINALIZING 1·3단계 (01_DESIGN 7.6). 잡이 순위 재부여(SP_UPDATE_FINAL_RANK) 전에 매번 부른다.
     --        RESULT: 0 성공, 1001 파라미터, 1002 시즌 없음, 1003 상태가 FINALIZING 아님 [codes.SpResult]
     --        성공 데이터: participant_count (제재 제외 참가자 수), tier_snapshot (잡이 보상 공백을 점검한다)
@@ -15,6 +16,9 @@ BEGIN
     --        - ranking_exclusion의 이 시즌(season_no)과 전 시즌(0) 대상을 final_rank NULL, sanctioned 1, reward_status
     --          3(REJECTED)로 바꾼다. 가순위로 보상 구간 안이었는지는 따지지 않는다 — 구간 판정은 제재 제외 참가자
     --          수(PERCENT)가 정해진 뒤라야 하고, 제재된 행은 보상 대상이 아니라는 표시로 충분하다.
+    --        - 제외하는 제재는 review_until 전에 등록된 것뿐이다(D-78). 검수가 끝난 뒤의 제재는 순위·보상을 바꾸지 않고
+    --          DELIVERING 전이(SP_UPDATE_SEASON_DELIVERING)가 sanctioned만 붙인다. 그래서 확정 도중 제재가 추가돼도
+    --          재실행 결과가 같다.
     --        - 멱등: sanctioned = 0인 행만 바꾸고, 참가자 수는 매번 다시 센다. 재시작해도 결과가 같다.
     --        - 참가자 수 = final_rank가 있는 행 수다. 가순위가 모든 행에 매겨져 있고(SP_UPDATE_SEASON_REVIEW가 보장)
     --          제재 행만 NULL이 된다. ix_final_rank 범위로 센다.
@@ -22,6 +26,7 @@ BEGIN
     --          순서가 거꾸로 된다. 첫 문장은 exclusion(4) S 락, entry(7) X 락 순이다. 둘 사이에 끊겨도 다시 부르면 된다.
     -- ------------------------------------------------------------------------------------------------------------ --
     DECLARE v_status           TINYINT UNSIGNED;
+    DECLARE v_review_until     DATETIME(3);
     DECLARE v_count            INT UNSIGNED;
     DECLARE v_tiers            JSON;
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';
@@ -40,7 +45,7 @@ BEGIN
             LEAVE proc_block;
         END IF;
 
-        SELECT status, tier_snapshot INTO v_status, v_tiers FROM ranking_season WHERE ranking_id = i_ranking_id AND season_no = i_season_no;
+        SELECT status, review_until, tier_snapshot INTO v_status, v_review_until, v_tiers FROM ranking_season WHERE ranking_id = i_ranking_id AND season_no = i_season_no;
         IF v_status IS NULL THEN
             SELECT 1002 AS RESULT;
             LEAVE proc_block;
@@ -54,7 +59,8 @@ BEGIN
           JOIN ranking_exclusion x
             ON x.ranking_id = e.ranking_id AND x.season_no IN (0, e.season_no) AND x.member_id = e.member_id
            SET e.final_rank = NULL, e.sanctioned = 1, e.reward_code = NULL, e.reward_status = 3
-         WHERE e.ranking_id = i_ranking_id AND e.season_no = i_season_no AND e.sanctioned = 0;
+         WHERE e.ranking_id = i_ranking_id AND e.season_no = i_season_no AND e.sanctioned = 0
+           AND x.created_at < v_review_until;
 
         SELECT COUNT(member_id) INTO v_count
           FROM ranking_entry

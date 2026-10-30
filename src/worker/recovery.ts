@@ -2,11 +2,12 @@ import type { Pool, RowDataPacket } from 'mysql2/promise';
 import { SpResult } from '../core/codes.js';
 import { config } from '../core/config.js';
 import { callSp } from '../core/db.js';
+import { reapplyMember } from '../core/exclusion.js';
 import { logger } from '../core/logger.js';
 import { applyMode, composite, getRanking, type RankingRule } from '../core/rankings.js';
 import {
-    clearRebuild, countBoard, finishRebuild, markSynced, readComposites, readSentinel, reconcileScore,
-    seasonKeys, writeRebuild, type Redis, type SeasonKeys,
+    addExclusions, clearRebuild, countBoard, finishRebuild, markSynced, rankingExclKey, readComposites, readExclusions, readSentinel, reconcileScore,
+    removeExclusions, seasonKeys, writeRebuild, type Redis, type SeasonKeys,
 } from '../core/redis.js';
 import { startJob, type JobContext } from './loop.js';
 
@@ -16,6 +17,12 @@ export const RECOVERY_LOCK = 'podium:recovery';
 /** 보조 점검 주기 (01_DESIGN 6.4). 하루보다 짧은 시즌도 여러 번 점검되게 1시간으로 둔다 — 점검은 COUNT 한 번이라 가볍다 */
 // ponytail: 고정 1시간. 시즌이 1시간보다 짧은 랭킹이 생기면 min(1시간, 시즌 길이 ÷ 4)처럼 시즌 길이에 맞춘다.
 const AUDIT_INTERVAL_MS = 3_600_000;
+
+/** 제외 집합 동기화 주기 (D-75). 관리 API가 등록·해제 때 바로 맞추므로, Redis 장애로 놓친 것만 이 주기로 따라잡는다 */
+const EXCLUSION_SYNC_MS = 60_000;
+
+/** ranking_id → 마지막 제외 집합 동기화 시각(ms). 워커가 다시 뜨면 첫 주기에 모두 맞춘다 */
+const exclusionSyncedAt = new Map<number, number>();
 
 /** SP_LIST_RECOVERY_SEASON 행 */
 interface RecoverySeason {
@@ -215,6 +222,47 @@ async function audit(ctx: Context, season: RecoverySeason, rule: RankingRule, ke
 }
 
 /**
+ * 한 랭킹의 Redis 제외 집합(전 시즌, 대상 시즌들)을 ranking_exclusion에 맞춘다 (01_DESIGN 6.2, 7.8, D-75).
+ * DB에 있는 멤버는 SADD하고 순위표에서 ZREM한다 — 이미 집합에 있어도 뺀다. 집합에 넣기 전에 반영된 제출이 남아 있을 수 있어서다.
+ * DB에 없는 멤버는 SREM하고 원장 값으로 다시 반영한다(관리 API의 해제가 Redis 장애로 끝나지 못한 경우).
+ * Redis를 DB보다 먼저 읽는다 — 반대로 읽으면 그 사이 관리 API가 등록하고 SADD한 멤버를 DB에 없다고 보고 지운다.
+ * @param ctx 실행 문맥
+ * @param rankingId 랭킹 ID
+ * @param seasonNos 이 주기의 대상 시즌 번호 (복구 대상, CLOSED 이하)
+ * @returns 완료 Promise
+ */
+async function syncExclusions(ctx: Context, rankingId: number, seasonNos: number[]): Promise<void> {
+    const sets = [{ seasonNo: 0, key: rankingExclKey(rankingId), boards: seasonNos.map((n) => seasonKeys(rankingId, n).board) },
+        ...seasonNos.map((n) => ({ seasonNo: n, key: seasonKeys(rankingId, n).excl, boards: [seasonKeys(rankingId, n).board] }))];
+    const inRedis = await Promise.all(sets.map((s) => readExclusions(ctx.redis, s.key)));
+    const { result, rows } = await callSp(ctx.conn, 'SP_LIST_EXCLUSION_LIVE', [rankingId]);
+    if (result !== SpResult.OK)
+        throw new Error(`SP_LIST_EXCLUSION_LIVE result ${result}`);
+    const inDb = new Map<number, Set<string>>();
+    for (const r of rows)
+        inDb.set(r.season_no, (inDb.get(r.season_no) ?? new Set()).add(r.member_id));
+
+    let added = 0;
+    const released: { seasonNo: number; memberId: string }[] = [];
+    for (const [i, s] of sets.entries()) {
+        const want = inDb.get(s.seasonNo) ?? new Set<string>();
+        const have = new Set(inRedis[i]);
+        const remove = [...have].filter((m) => !want.has(m));
+        if (want.size)
+            await addExclusions(ctx.redis, s.key, [...want], s.boards);
+        if (remove.length)
+            await removeExclusions(ctx.redis, s.key, remove);
+        added += [...want].filter((m) => !have.has(m)).length;
+        released.push(...remove.map((memberId) => ({ seasonNo: s.seasonNo, memberId })));
+    }
+    for (const r of released)
+        for (const n of r.seasonNo === 0 ? seasonNos : [r.seasonNo])
+            await reapplyMember(ctx.conn, ctx.redis, rankingId, n, r.memberId);
+    if (added || released.length)
+        logger.info(`exclusions synced ranking=${rankingId} added=${added} released=${released.length}`);
+}
+
+/**
  * job_state에 진행 상태를 남긴다 (SP_UPSERT_JOB_STATE).
  * @param ctx 실행 문맥
  * @param job 잡 이름
@@ -230,13 +278,26 @@ async function saveJobState(ctx: Context, job: string, season: RecoverySeason, s
 
 /**
  * 한 주기: 대상 시즌마다 센티넬이 없으면 재구축, 있으면 L2, 1시간이 지났으면 보조 점검.
+ * 제외 집합은 랭킹마다 1분에 한 번, 그리고 재구축 전에 맞춘다 — 센티넬을 세우기 전에 집합이 있어야 제재 멤버의 반영을 막는다(D-75).
  * @param ctx 실행 문맥
  * @returns 완료 Promise
+ * @modified 2026-10-30 trisakion 제외 집합 동기화 추가
  */
 async function runCycle(ctx: Context): Promise<void> {
     const { result, rows } = await callSp(ctx.conn, 'SP_LIST_RECOVERY_SEASON', []);
     if (result !== SpResult.OK)
         throw new Error(`SP_LIST_RECOVERY_SEASON result ${result}`);
+    const seasonsOf = new Map<number, number[]>();
+    for (const r of rows)
+        seasonsOf.set(r.ranking_id, [...(seasonsOf.get(r.ranking_id) ?? []), r.season_no]);
+    const syncedNow = new Set<number>();
+    const sync = async (rankingId: number) => {
+        if (syncedNow.has(rankingId))
+            return;
+        syncedNow.add(rankingId);
+        await syncExclusions(ctx, rankingId, seasonsOf.get(rankingId)!);
+        exclusionSyncedAt.set(rankingId, Date.now());
+    };
     // ponytail: 한 시즌이 실패하면 이번 주기의 나머지 시즌도 건너뛴다. 특정 시즌이 계속 실패해 다른 시즌을 막으면 시즌별 격리로 바꾼다.
     for (const r of rows) {
         const season: RecoverySeason = {
@@ -251,8 +312,11 @@ async function runCycle(ctx: Context): Promise<void> {
         }
         const keys = seasonKeys(season.rankingId, season.seasonNo);
         await ctx.checkpoint();
+        if (Date.now() - (exclusionSyncedAt.get(season.rankingId) ?? 0) >= EXCLUSION_SYNC_MS)
+            await sync(season.rankingId);
         const redisSyncedAt = await readSentinel(ctx.redis, keys);
         if (redisSyncedAt === null) {
+            await sync(season.rankingId);
             await rebuild(ctx, season, rule, keys);
             continue;
         }

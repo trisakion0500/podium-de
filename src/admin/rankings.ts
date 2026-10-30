@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolConnection, RowDataPacket } from 'mysql2/promise';
-import { auditBase, type AuditEntry, type AuditWriter } from './audit.js';
+import { auditBase, withAudit, type AuditWriter } from './audit.js';
 import { adminErrors } from './auth.js';
 import { requireRole } from './session.js';
 import { AdminRole, ApiResult, CycleType, PartitionTarget, RangeType, RankingStatus, SpResult, TimeUnit } from '../core/codes.js';
@@ -216,29 +216,6 @@ const okSchema = (data: object) => ({ type: 'object', properties: { result: { ty
  */
 function reject(code: ErrorCode, reason: string): never {
     throw new BusinessException(code, `ranking validation: ${reason}`, { publicDetail: `(${reason})` });
-}
-
-/**
- * 조작 하나의 감사 로그를 한 번 남긴다. SP를 부른 뒤에는 작업이 write로 전·후 값과 함께 남기고,
- * 그 전에 앱이 거부하면(검증 2009~2012, 상태 1503, 없음 1501, 락 2013) 여기서 base(요청 값)와 거부 코드로 남긴다.
- * @param audit 감사 로그 적재기
- * @param base 결과 코드를 뺀 감사 로그 값
- * @param work 작업. write는 SP 결과를 남길 때 부른다
- * @returns 작업 결과
- */
-async function withAudit<T>(audit: AuditWriter, base: Omit<AuditEntry, 'result'>,
-    work: (write: (e: Pick<AuditEntry, 'result' | 'targetId' | 'before' | 'after'>) => void) => Promise<T>): Promise<T> {
-    let written = false;
-    try {
-        return await work((e) => {
-            written = true;
-            audit.write({ ...base, ...e });
-        });
-    } catch (err) {
-        if (!written && err instanceof BusinessException)
-            audit.write({ ...base, result: err.result });
-        throw err;
-    }
 }
 
 /**

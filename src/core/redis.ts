@@ -14,16 +14,20 @@ const RATE_WINDOW_MS = 60_000;
 /**
  * Lua 스크립트. 클라이언트가 EVALSHA로 보내고 서버에 없으면 EVAL로 대체한다 (D-53).
  * 반영 스크립트는 센티넬(:ready)이 없으면 -1을 돌려주고 쓰지 않는다 — 정산이 지운 키를 늦은 반영이 되살리지 않게 한다 (5.3).
+ * 그다음 제외 집합(그 시즌, 전 시즌)에 든 멤버면 -2를 돌려주고 쓰지 않는다 — 제재된 멤버의 재제출이 순위표에 다시 오르지 않게 한다 (7.8, D-75).
  */
 const scripts = {
     /** BEST: composite가 더 좋을 때만 쓴다. DESC는 GT, ASC는 LT. 결과는 바뀐 멤버 수(0/1) */
     applyBest: defineScript({
-        NUMBER_OF_KEYS: 2,
+        NUMBER_OF_KEYS: 4,
         SCRIPT: `if redis.call('EXISTS', KEYS[2]) == 0 then return -1 end
+if redis.call('SISMEMBER', KEYS[3], ARGV[3]) == 1 or redis.call('SISMEMBER', KEYS[4], ARGV[3]) == 1 then return -2 end
 return redis.call('ZADD', KEYS[1], ARGV[1], 'CH', ARGV[2], ARGV[3])`,
-        parseCommand(parser: CommandParser, board: string, ready: string, cmp: 'GT' | 'LT', composite: number, member: string) {
-            parser.pushKey(board);
-            parser.pushKey(ready);
+        parseCommand(parser: CommandParser, keys: SeasonKeys, cmp: 'GT' | 'LT', composite: number, member: string) {
+            parser.pushKey(keys.board);
+            parser.pushKey(keys.ready);
+            parser.pushKey(keys.excl);
+            parser.pushKey(keys.rankingExcl);
             parser.push(cmp, String(composite), member);
         },
         transformReply: (reply: unknown) => Number(reply),
@@ -34,18 +38,21 @@ return redis.call('ZADD', KEYS[1], ARGV[1], 'CH', ARGV[2], ARGV[3])`,
      * 빠진 경우에도 고칠 수 있어야 한다. 더 큰 version이 이미 있으면 그대로 거부된다.
      */
     applyVersioned: defineScript({
-        NUMBER_OF_KEYS: 3,
+        NUMBER_OF_KEYS: 5,
         SCRIPT: `if redis.call('EXISTS', KEYS[3]) == 0 then return -1 end
+if redis.call('SISMEMBER', KEYS[4], ARGV[1]) == 1 or redis.call('SISMEMBER', KEYS[5], ARGV[1]) == 1 then return -2 end
 local cur = tonumber(redis.call('HGET', KEYS[2], ARGV[1]) or '0')
 local v = tonumber(ARGV[3])
 if v < cur or (v == cur and ARGV[4] ~= '1') then return 0 end
 redis.call('HSET', KEYS[2], ARGV[1], v)
 redis.call('ZADD', KEYS[1], ARGV[2], ARGV[1])
 return 1`,
-        parseCommand(parser: CommandParser, board: string, ver: string, ready: string, member: string, composite: number, version: number, allowEqual: boolean) {
-            parser.pushKey(board);
-            parser.pushKey(ver);
-            parser.pushKey(ready);
+        parseCommand(parser: CommandParser, keys: SeasonKeys, member: string, composite: number, version: number, allowEqual: boolean) {
+            parser.pushKey(keys.board);
+            parser.pushKey(keys.ver);
+            parser.pushKey(keys.ready);
+            parser.pushKey(keys.excl);
+            parser.pushKey(keys.rankingExcl);
             parser.push(member, String(composite), String(version), allowEqual ? '1' : '0');
         },
         transformReply: (reply: unknown) => Number(reply),
@@ -174,13 +181,27 @@ export async function closeRedis(client: Redis): Promise<void> {
  * 시즌 순위표 키 (01_DESIGN 5.1). {rankingId} 해시태그로 한 랭킹의 키를 같은 클러스터 슬롯에 둔다.
  * @param rankingId 랭킹 ID
  * @param seasonNo 시즌 번호
- * @returns ZSET, version HASH, 센티넬, 재구축 임시 키 (01_DESIGN 6.3)
+ * @returns ZSET, version HASH, 센티넬, 재구축 임시 키 (01_DESIGN 6.3), 제외 집합 (7.8)
  * @author trisakion
  * @modified 2026-10-09 trisakion 재구축 임시 키 추가
+ * @modified 2026-10-30 trisakion 제외 집합(시즌, 전 시즌) 추가 (D-75)
  */
 export function seasonKeys(rankingId: number, seasonNo: number): SeasonKeys {
     const board = `${config.redis.keyPrefix}rk:{${rankingId}}:s:${seasonNo}`;
-    return { board, ver: `${board}:ver`, ready: `${board}:ready`, rebuild: `${board}:rebuild`, rebuildVer: `${board}:rebuild:ver` };
+    return {
+        board, ver: `${board}:ver`, ready: `${board}:ready`, rebuild: `${board}:rebuild`, rebuildVer: `${board}:rebuild:ver`,
+        excl: `${board}:excl`, rankingExcl: rankingExclKey(rankingId),
+    };
+}
+
+/**
+ * 전 시즌 제외 집합 키 (01_DESIGN 5.1, ranking_exclusion.season_no = 0). 시즌마다 지우지 않고 랭킹에 하나만 둔다.
+ * @param rankingId 랭킹 ID
+ * @returns SET 키
+ * @author trisakion
+ */
+export function rankingExclKey(rankingId: number): string {
+    return `${config.redis.keyPrefix}rk:{${rankingId}}:excl`;
 }
 
 /**
@@ -198,6 +219,10 @@ export interface SeasonKeys {
     rebuild: string;
     /** 재구축 임시 version HASH */
     rebuildVer: string;
+    /** 이 시즌 제외 멤버 SET */
+    excl: string;
+    /** 전 시즌 제외 멤버 SET (랭킹 공용) */
+    rankingExcl: string;
 }
 
 /**
@@ -306,19 +331,19 @@ export interface ScoreUpdate {
  * @param keys 시즌 키
  * @param u 반영 대상
  * @param allowEqual SUM에서 같은 version도 쓸지 (리컨실러만 true)
- * @returns -1 센티넬 없음, 0 거부(이전 값), 1 이상 반영
+ * @returns -1 센티넬 없음, -2 제외 대상, 0 거부(이전 값), 1 이상 반영
  */
 async function applyLive(client: Redis, keys: SeasonKeys, u: ScoreUpdate, allowEqual: boolean): Promise<number> {
     return u.best
-        ? withTimeout(client.applyBest(keys.board, keys.ready, u.cmp, u.composite, u.memberId))
-        : withTimeout(client.applyVersioned(keys.board, keys.ver, keys.ready, u.memberId, u.composite, u.version, allowEqual));
+        ? withTimeout(client.applyBest(keys, u.cmp, u.composite, u.memberId))
+        : withTimeout(client.applyVersioned(keys, u.memberId, u.composite, u.version, allowEqual));
 }
 
 /**
  * 반영을 한 번 시도한다.
  * @param client Redis 클라이언트
  * @param u 반영 대상
- * @returns 성공 여부 (센티넬이 없어 버린 경우도 성공 — 버리는 것이 의도된 동작이다)
+ * @returns 성공 여부 (센티넬이 없거나 제외 대상이라 버린 경우도 성공 — 버리는 것이 의도된 동작이다)
  */
 async function tryApply(client: Redis, u: ScoreUpdate): Promise<boolean> {
     const keys = seasonKeys(u.rankingId, u.seasonNo);
@@ -326,6 +351,8 @@ async function tryApply(client: Redis, u: ScoreUpdate): Promise<boolean> {
         const r = await applyLive(client, keys, u, false);
         if (r === -1)
             logger.debug(`redis apply skipped (no sentinel) ${keys.board}`);
+        else if (r === -2)
+            logger.debug(`redis apply skipped (excluded member) ${keys.board}`);
         return true;
     } catch (err) {
         logger.warn(`redis apply failed ${keys.board} version=${u.version}`, err);
@@ -405,8 +432,9 @@ export async function readComposites(client: Redis, board: string, members: stri
  * @param client Redis 클라이언트
  * @param keys 시즌 키
  * @param u 반영 대상
- * @returns -1 센티넬 없음, 0 거부(Redis가 더 새 값), 1 이상 반영. 실패는 예외
+ * @returns -1 센티넬 없음, -2 제외 대상, 0 거부(Redis가 더 새 값), 1 이상 반영. 실패는 예외
  * @author trisakion
+ * @modified 2026-10-30 trisakion 제외 대상 -2
  */
 export async function reconcileScore(client: Redis, keys: SeasonKeys, u: ScoreUpdate): Promise<number> {
     return applyLive(client, keys, u, true);
@@ -458,16 +486,56 @@ export async function finishRebuild(client: Redis, keys: SeasonKeys, syncedAt: D
 }
 
 /**
- * 정산이 끝난 시즌의 키를 모두 지운다 (01_DESIGN 5.6). 센티넬, 순위표, version HASH, 재구축 임시 키를 UNLINK 한 번으로 지운다 —
+ * 정산이 끝난 시즌의 키를 모두 지운다 (01_DESIGN 5.6). 센티넬, 순위표, version HASH, 재구축 임시 키, 시즌 제외 집합을 UNLINK 한 번으로 지운다 —
  * 한 명령이라 센티넬만 남거나 순위표만 남는 순간이 없고, 큰 ZSET은 백그라운드 스레드가 해제해 Redis가 멈추지 않는다(1.7).
  * 센티넬이 사라진 뒤 늦게 도착한 반영은 센티넬 확인 Lua가 버린다(5.3). 호출자는 복구 잡 락을 쥐고 부른다(D-60).
+ * 전 시즌 제외 집합은 다른 시즌이 함께 쓰므로 남긴다.
  * @param client Redis 클라이언트
  * @param keys 시즌 키
  * @returns 완료 Promise
  * @author trisakion
+ * @modified 2026-10-30 trisakion 시즌 제외 집합도 삭제
  */
 export async function deleteSeasonKeys(client: Redis, keys: SeasonKeys): Promise<void> {
-    await withTimeout(client.unlink([keys.ready, keys.board, keys.ver, keys.rebuild, keys.rebuildVer]));
+    await withTimeout(client.unlink([keys.ready, keys.board, keys.ver, keys.rebuild, keys.rebuildVer, keys.excl]));
+}
+
+/**
+ * 제외 집합의 멤버를 읽는다 (복구 잡 동기화, D-75).
+ * @param client Redis 클라이언트
+ * @param key 제외 집합 키 (SeasonKeys.excl 또는 rankingExcl)
+ * @returns 멤버 ID 목록
+ * @author trisakion
+ */
+export async function readExclusions(client: Redis, key: string): Promise<string[]> {
+    return withTimeout(client.sMembers(key));
+}
+
+/**
+ * 멤버를 제외 집합에 넣고 순위표에서 뺀다 (01_DESIGN 7.8, D-75). SADD가 ZREM보다 먼저다 — SADD 전에 반영된 제출은 ZREM이 지우고,
+ * 그 뒤의 제출은 반영 Lua가 막는다. ZREM은 키가 없으면 아무것도 하지 않아 정산이 지운 순위표를 되살리지 않는다.
+ * @param client Redis 클라이언트
+ * @param key 제외 집합 키
+ * @param members 멤버 ID 목록 (1개 이상)
+ * @param boards 멤버를 뺄 순위표 키
+ * @returns 완료 Promise
+ * @author trisakion
+ */
+export async function addExclusions(client: Redis, key: string, members: string[], boards: string[]): Promise<void> {
+    await withTimeout(client.sAdd(key, members));
+    await withTimeout(Promise.all(boards.map((b) => client.zRem(b, members))));
+}
+
+/**
+ * 멤버를 제외 집합에서 뺀다. 순위표 재반영은 호출자가 원장 값으로 한다 (exclusion.reapplyMember).
+ * @param client Redis 클라이언트
+ * @param key 제외 집합 키
+ * @param members 멤버 ID 목록 (1개 이상)
+ * @returns 완료 Promise
+ * @author trisakion
+ */
+export async function removeExclusions(client: Redis, key: string, members: string[]): Promise<void> {
+    await withTimeout(client.sRem(key, members));
 }
 
 /**

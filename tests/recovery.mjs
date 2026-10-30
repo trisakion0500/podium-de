@@ -50,7 +50,8 @@ const { createClient } = await import('redis');
 /** 복구 시나리오(BEST·SUM), 락 대기, API 경유(BEST·SUM), 스케줄러(FIXED, 단일 시즌, 종료), 정산(DESC, ASC 이어받기, 빈 시즌), 보상 전달 */
 const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
     finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964,
-    fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969, arc: 970, arcLast: 971, rkShort: 972, rkExtend: 973, rkOver: 974, rkEnd: 975 };
+    fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969, arc: 970, arcLast: 971, rkShort: 972, rkExtend: 973, rkOver: 974, rkEnd: 975,
+    exc: 976, excDlv: 977 };
 const ALL_IDS = Object.values(IDS);
 /** 관리 API로 등록한 테스트 랭킹의 코드 접두어. ID는 AUTO_INCREMENT라 코드로 찾아 지운다 */
 const RK_CODE = 'rtk-';
@@ -443,7 +444,7 @@ async function recoveryScenarios() {
     await R.del([best.ready, best.board, sum.ready, sum.board, sum.ver]);
     await waitConsistent('S2 Redis 키 유실 → 재구축 결과가 MySQL과 일치');
 
-    await q("INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES (?, 1, 'm10', 'test', 'rt', NOW(3)), (?, 0, 'm11', 'test', 'rt', NOW(3))", [IDS.best, IDS.best]);
+    await q("INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES (?, 1, 'm10', 'test', 0, NOW(3)), (?, 0, 'm11', 'test', 0, NOW(3))", [IDS.best, IDS.best]);
     await submit(IDS.best, 'm10', 7999);
     await R.del(best.ready);
     await waitConsistent('S3 제외 대상(시즌·전 시즌) 재구축·L2에서 제외');
@@ -979,8 +980,10 @@ async function finalizeScenarios(redisOrder) {
     const tiers = [[1, 1, 1, 10, 'TOP10'], [2, 2, 1, 10, 'P10'], [3, 1, 5, 400, 'R400'], [4, 2, 11, 30, 'P30']];
     await q('INSERT INTO ranking_reward_tier (ranking_id, tier_no, range_type, range_from, range_to, reward_code) VALUES ?', [tiers.map((x) => [id, ...x])]);
     const banned = [redisOrder[2], redisOrder[49]];
+    // 검수 기간(review_until, 아래에서 1초 전으로 둔다) 전에 등록한 제재라야 확정에서 빠진다 (D-78)
     await q(`INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at)
-             VALUES (?, 1, ?, 'test', 'rt', NOW(3)), (?, 0, ?, 'test', 'rt', NOW(3)), (?, 1, 'nobody', 'test', 'rt', NOW(3))`, [id, banned[0], id, banned[1], id]);
+             VALUES (?, 1, ?, 'test', 0, NOW(3) - INTERVAL 1 HOUR), (?, 0, ?, 'test', 0, NOW(3) - INTERVAL 1 HOUR), (?, 1, 'nobody', 'test', 0, NOW(3) - INTERVAL 1 HOUR)`,
+    [id, banned[0], id, banned[1], id]);
 
     await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 1 SECOND, review_hold = 1 WHERE ranking_id IN (?) AND season_no = 1', [[id, IDS.settleAsc]]);
     await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 1 SECOND WHERE ranking_id = ? AND season_no = 1', [IDS.settleEmpty]);
@@ -1054,14 +1057,15 @@ async function createReviewSeason(id, n, tiers = []) {
 }
 
 /**
- * 제재를 이 시즌(1)에 등록한다.
+ * 제재를 이 시즌(1)에 등록한다. 기본은 검수 기간 전(1시간 전) 등록이라 확정에서 빠진다 (D-78).
  * @param id 랭킹 ID
  * @param members 멤버 ID 목록
+ * @param late true면 지금 등록 — review_until 뒤라 검수 뒤 제재가 된다
  * @returns 없음
  */
-async function ban(id, members) {
-    await q("INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES ?",
-        [members.map((m) => [id, 1, m, 'test', 'rt', new Date()])]);
+async function ban(id, members, late = false) {
+    await q(`INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES
+             ${members.map(() => "(?, 1, ?, 'test', 0, NOW(3) - INTERVAL ? SECOND)").join(', ')}`, members.flatMap((m) => [id, m, late ? 0 : 3600]));
 }
 
 /**
@@ -1097,12 +1101,15 @@ async function finalizeEdges() {
     await ban(IDS.finAdd, ['f9']);
     await runFinalize(IDS.finAdd, 50, 1);
     const early = await callSp(A, 'SP_UPDATE_SEASON_DELIVERING', [IDS.finAdd, 1]);
-    await ban(IDS.finAdd, ['f20', 'f99']); // f20은 처리한 청크(새 20위), f99는 남은 구간
+    await ban(IDS.finAdd, ['f20', 'f99'], true); // 확정 도중(검수 뒤) 등록. f20은 처리한 청크, f99는 남은 구간
     const done = await runFinalize(IDS.finAdd);
-    const out = await q('SELECT member_id, final_rank FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND final_rank IS NOT NULL ORDER BY final_rank', [IDS.finAdd]);
-    const expect = Array.from({ length: 200 }, (_, j) => `f${j}`).filter((m) => !['f9', 'f20', 'f99'].includes(m));
-    check('F9 재부여 도중 DELIVERING 1015, 도중 추가된 제재는 다시 돌아 반영 (1..197 연속, 원래 순서)', early.result === 1015 && done === 0
-        && out.length === 197 && out.every((r, i) => r.final_rank === i + 1 && r.member_id === expect[i]), `(${early.result}, ${done}, ${out.length}행)`);
+    const out = await q('SELECT member_id, final_rank, sanctioned, reward_status FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND final_rank IS NOT NULL ORDER BY final_rank', [IDS.finAdd]);
+    const expect = Array.from({ length: 200 }, (_, j) => `f${j}`).filter((m) => m !== 'f9');
+    const lateRows = out.filter((r) => r.sanctioned === 1).map((r) => r.member_id).join();
+    const lateTop = (await q('SELECT member_id FROM ranking_season_top WHERE ranking_id = ? AND sanctioned = 1 ORDER BY final_rank', [IDS.finAdd])).map((r) => r.member_id).join();
+    check('F9 재부여 도중 DELIVERING 1015, 이어서 끝까지 (1..199), 확정 도중 제재는 순위 유지·DELIVERING 전이에 sanctioned 표시 (entry·Top N, D-78)',
+        early.result === 1015 && done === 0 && out.length === 199 && out.every((r, i) => r.final_rank === i + 1 && r.member_id === expect[i])
+        && lateRows === 'f20,f99' && lateTop === 'f20,f99', `(${early.result}, ${done}, ${out.length}행, 표시 ${lateRows} / Top ${lateTop})`);
 
     const again = [(await callSp(A, 'SP_START_FINALIZING', [IDS.finAdd, 1])).result, (await callSp(A, 'SP_UPDATE_SEASON_DELIVERING', [IDS.finAdd, 1])).result];
     const [{ n: topN }] = await q('SELECT COUNT(final_rank) n FROM ranking_season_top WHERE ranking_id = ?', [IDS.finAdd]);
@@ -2567,6 +2574,179 @@ async function rankingAdminScenarios() {
         `(${audit.length}건, 빠짐 ${JSON.stringify(failed)})`);
 }
 
+/**
+ * 관리 API 제재 회귀 (01_DESIGN 7.8, 10.4, D-75, D-78): 등록과 Redis 제외 집합·순위표, 제재 멤버 재제출 차단(반영 Lua),
+ * 전 시즌 제재, 거부 코드, 목록과 등록자 이름, 해제와 원장 값 재반영, 검수 뒤 해제 거부, FINALIZING 중 제재의 DELIVERING 표시,
+ * DELIVERING·분리된 시즌 표시, 복구 잡의 제외 집합 동기화(재구축 전), Redis 장애 중 등록, 감사 로그.
+ * 포트: TEST_PORT(API), TEST_PORT+6(관리 API), TEST_PORT+7(Redis 없는 관리 API).
+ * @returns 없음
+ */
+async function exclusionAdminScenarios() {
+    const E = IDS.exc;
+    const D = IDS.excDlv;
+    const keys = seasonKeys(E, 1);
+    const rankingExcl = `${config.redis.keyPrefix}rk:{${E}}:excl`;
+    await createRanking(E, 1);
+    await q('INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at) VALUES ?',
+        [Array.from({ length: 10 }, (_, i) => [E, 1, `m${i}`, 100 + i, new Date(Date.now() - 60_000), 1, new Date()])]);
+    // D: 1 DELIVERING(u0~u4, PENDING), 2 SETTLED·분리됨(Top N만), 3 FINALIZING(v0~v4, 재부여 끝, 검수 기간 지남)
+    await createDefinition(D);
+    await createSeason(D, 1, -7200, -3600, 7);
+    await createSeason(D, 2, -3600, -1800, 8, false);
+    await createSeason(D, 3, -1800, -600, 6);
+    await q('UPDATE ranking_season SET review_until = NOW(3) - INTERVAL 60 SECOND, participant_count = 5 WHERE ranking_id = ? AND season_no IN (1, 3)', [D]);
+    const entry = (no, p, i) => [D, no, `${p}${i}`, 50 - i, new Date(), 1, new Date(), i + 1, no === 1 ? 'R' : null, no === 1 ? 1 : 0];
+    await q('INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at, final_rank, reward_code, reward_status) VALUES ?',
+        [[0, 1, 2, 3, 4].flatMap((i) => [entry(1, 'u', i), entry(3, 'v', i)])]);
+    await q('INSERT INTO ranking_season_top (ranking_id, season_no, final_rank, member_id, score, sanctioned) VALUES ?',
+        [[...[0, 1, 2, 3, 4].map((i) => [D, 1, i + 1, `u${i}`, 50 - i, 0]), ...[0, 1, 2].map((i) => [D, 2, i + 1, `u${i}`, 50 - i, 0])]]);
+
+    const writeKey = randomBytes(32).toString('base64url');
+    await callSp(M, 'SP_INSERT_API_CREDENTIAL', ['rtest-exc', hashApiKey(writeKey), ApiScope.WRITE]);
+    spawnTracked('texc', 'admin', { ADMIN_PORT: String(ADMIN_PORT) });
+    spawnTracked('texa', 'api', { API_PORT: String(PORT) });
+    startWorker('texw');
+    await admUp();
+    const root = await admRoot('rtest-exroot');
+    const [{ rid }] = await q("SELECT admin_account_id rid FROM admin_account WHERE login_id = 'rtest-exroot'");
+    const vInit = (await adm('POST', '/accounts', { token: root, body: { loginId: 'rtest-exview', name: 'Viewer', role: 1 } })).body.data.initialPassword;
+    const vFirst = await admLogin('rtest-exview', vInit);
+    const viewer = (await adm('POST', '/auth/password', { token: vFirst.token, body: { currentPassword: vInit, newPassword: 'rtest-exview-password' } })).token;
+    const ready = await until(async () => {
+        const d = await diff(E);
+        return d.ready && d.bad === 0 && d.redis === 10;
+    }, 30000);
+    const post = async (body) => {
+        for (;;) {
+            try {
+                return await (await fetch(`${BASE}/v1/rankings/${E}/scores`, {
+                    method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': writeKey }, body: JSON.stringify(body),
+                })).json();
+            } catch {
+                await sleep(200);
+            }
+        }
+    };
+    const inSet = async (key, m) => await R.sIsMember(key, m) === 1;
+    const onBoard = async (m) => await R.zScore(keys.board, m) !== null;
+    const reg = (id, body, token = root) => adm('POST', `/rankings/${id}/exclusions`, { token, body: { reason: 'speed hack', ...body } });
+    const unban = (id, no, m) => adm('DELETE', `/rankings/${id}/exclusions/${no}/${m}`, { token: root });
+
+    const j1 = await reg(E, { seasonNo: 1, memberId: 'm3' });
+    const [j1Row] = await q("SELECT created_by cb FROM ranking_exclusion WHERE ranking_id = ? AND season_no = 1 AND member_id = 'm3'", [E]);
+    check('J1 시즌 제재 등록: 제외 집합 SADD·순위표 ZREM, 등록자 계정 ID와 이름', ready >= 0 && j1.status === 200 && j1.body.data?.redisSynced === true
+        && j1.body.data?.createdByName === 'Root' && j1Row?.cb === rid && await inSet(keys.excl, 'm3') && !await onBoard('m3'),
+        `(${ready}ms, ${j1.status} ${JSON.stringify(j1.body.data ?? j1.body)})`);
+
+    const resubmit = await post({ memberId: 'm3', value: 7999, seasonNo: 1, requestId: `exc-${Date.now()}-1` });
+    const normal = await post({ memberId: 'm4', value: 7000, seasonNo: 1, requestId: `exc-${Date.now()}-2` });
+    await sleep(2500);
+    const [{ s: ledger }] = await q("SELECT score s FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = 'm3'", [E]);
+    check('J2 제재 멤버 재제출: 원장에는 기록, 순위표에는 안 오름 (반영 Lua·리컨실러), 다른 멤버는 반영',
+        resubmit.result === 0 && Number(ledger) === 7999 && !await onBoard('m3') && normal.result === 0 && await onBoard('m4'),
+        `(${resubmit.result}, 원장 ${ledger}, 순위표 ${await onBoard('m3')})`);
+
+    const j3 = await reg(E, { seasonNo: 0, memberId: 'm5' });
+    await post({ memberId: 'm5', value: 7998, seasonNo: 1, requestId: `exc-${Date.now()}-3` });
+    check('J3 전 시즌 제재: 랭킹 제외 집합, 순위표 제거, 재제출 차단', j3.status === 200 && await inSet(rankingExcl, 'm5') && !await onBoard('m5'), `(${j3.status})`);
+
+    const [{ vid }] = await q("SELECT admin_account_id vid FROM admin_account WHERE login_id = 'rtest-exview'");
+    const codes = {
+        dup: (await reg(E, { seasonNo: 1, memberId: 'm3' })).body.result,
+        season: (await reg(E, { seasonNo: 99, memberId: 'm1' })).body.result,
+        ranking: (await reg(4000000000, { seasonNo: 0, memberId: 'm1' })).body.result,
+        viewer: (await reg(E, { seasonNo: 1, memberId: 'm1' }, viewer)).body.result,
+        reason: (await reg(E, { seasonNo: 1, memberId: 'm1', reason: '' })).body.result,
+        unknown: (await reg(E, { seasonNo: 1, memberId: 'm1', expiresAt: 1 })).body.result,
+        sp: (await callSp(A, 'SP_INSERT_RANKING_EXCLUSION', [vid, E, 1, 'm1', 'x'])).result,
+    };
+    const expectJ4 = { dup: 1601, season: 1602, ranking: 1501, viewer: 2003, reason: 2001, unknown: 2001, sp: 1405 };
+    check('J4 거부: 중복 1601, 없는 시즌 1602, 없는 랭킹 1501, viewer 2003, 형식·모르는 필드 2001, SP 역할 재확인 1405',
+        Object.entries(expectJ4).every(([k, v]) => codes[k] === v), JSON.stringify(codes));
+
+    const list = await adm('GET', `/rankings/${E}/exclusions`, { token: viewer });
+    const onlyAll = await adm('GET', `/rankings/${E}/exclusions?seasonNo=0`, { token: viewer });
+    const byMember = await adm('GET', `/rankings/${E}/exclusions?memberId=m3`, { token: viewer });
+    check('J5 목록: 최신순, 등록자 지금 이름, 시즌·멤버 필터 (viewer)', list.body.data?.total === 2 && list.body.data.items[0].memberId === 'm5'
+        && list.body.data.items.every((x) => x.createdByName === 'Root' && x.createdBy === rid) && onlyAll.body.data?.total === 1 && byMember.body.data?.items[0]?.seasonNo === 1,
+        `(${JSON.stringify(list.body.data)})`);
+
+    const j6 = await unban(E, 1, 'm3');
+    const after6 = await diff(E);
+    check('J6 시즌 제재 해제: SREM, 원장 값(재제출 7999)으로 바로 재반영', j6.status === 200 && j6.body.data?.redisSynced === true && !await inSet(keys.excl, 'm3')
+        && after6.bad === 0 && await onBoard('m3'), `(${j6.status}, ${JSON.stringify(after6)})`);
+    const j7 = await unban(E, 0, 'm5');
+    const after7 = await diff(E);
+    check('J7 전 시즌 제재 해제: 진행 중 시즌에 재반영', j7.status === 200 && !await inSet(rankingExcl, 'm5') && after7.bad === 0 && await onBoard('m5'), `(${JSON.stringify(after7)})`);
+
+    const again = await unban(E, 1, 'm3');
+    const fin = await reg(D, { seasonNo: 3, memberId: 'v1' });
+    const [{ s: finMark }] = await q("SELECT sanctioned s FROM ranking_entry WHERE ranking_id = ? AND season_no = 3 AND member_id = 'v1'", [D]);
+    const finUnban = await unban(D, 3, 'v1');
+    const dlvUnban = await (async () => {
+        await q("INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES (?, 1, 'u4', 'test', 0, NOW(3))", [D]);
+        return unban(D, 1, 'u4');
+    })();
+    check('J8 해제 거부: 없는 제재 1604, FINALIZING·DELIVERING 시즌 1603 / FINALIZING 중 등록은 기록만 (표시 없음, Redis 키 없음)',
+        again.body.result === 1604 && fin.status === 200 && fin.body.data?.redisSynced === true && finMark === 0 && finUnban.body.result === 1603
+        && dlvUnban.body.result === 1603 && await R.exists(seasonKeys(D, 3).excl) === 0, `(${again.body.result}, ${fin.status}, ${finMark}, ${finUnban.body.result}, ${dlvUnban.body.result})`);
+
+    const dlv = await callSp(A, 'SP_UPDATE_SEASON_DELIVERING', [D, 3]);
+    const s3 = await q('SELECT member_id m, final_rank r, sanctioned s FROM ranking_entry WHERE ranking_id = ? AND season_no = 3 ORDER BY final_rank', [D]);
+    const t3 = await q('SELECT member_id m, sanctioned s FROM ranking_season_top WHERE ranking_id = ? AND season_no = 3 ORDER BY final_rank', [D]);
+    check('J9 FINALIZING 중(검수 뒤) 제재: DELIVERING 전이가 entry·Top N에 sanctioned, 순위 유지',
+        dlv.result === 0 && s3.map((x) => `${x.m}:${x.r}:${x.s}`).join() === 'v0:1:0,v1:2:1,v2:3:0,v3:4:0,v4:5:0' && t3.map((x) => `${x.m}:${x.s}`).join() === 'v0:0,v1:1,v2:0,v3:0,v4:0',
+        `(${dlv.result}, ${s3.map((x) => `${x.m}:${x.r}:${x.s}`)}, Top ${t3.map((x) => `${x.m}:${x.s}`)})`);
+
+    const d1 = await reg(D, { seasonNo: 1, memberId: 'u1' });
+    const d2 = await reg(D, { seasonNo: 2, memberId: 'u0' });
+    const d0 = await reg(D, { seasonNo: 0, memberId: 'u2' });
+    const marks = async (table, no) => (await q(`SELECT member_id m FROM ${table} WHERE ranking_id = ? AND season_no = ? AND sanctioned = 1 ORDER BY member_id`, [D, no])).map((x) => x.m).join();
+    const [u1] = await q("SELECT final_rank r, reward_status rs, reward_code rc FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = 'u1'", [D]);
+    const m = { e1: await marks('ranking_entry', 1), t1: await marks('ranking_season_top', 1), t2: await marks('ranking_season_top', 2) };
+    check('J10 DELIVERING 이후 등록: 즉시 표시(순위·PENDING 유지), 분리된 시즌은 Top N만, 전 시즌 제재는 DELIVERING 시즌에만 (SETTLED 제외)',
+        [d1, d2, d0].every((r) => r.status === 200) && u1?.r === 2 && u1.rs === 1 && u1.rc === 'R' && m.e1 === 'u1,u2' && m.t1 === 'u1,u2' && m.t2 === 'u0',
+        `(${[d1, d2, d0].map((r) => r.status)}, ${JSON.stringify(m)}, u1 ${JSON.stringify(u1)})`);
+
+    // 복구 잡 동기화: DB에만 있는 제재(m7)와 Redis에만 남은 제재(m8 — 해제 때 Redis 실패 흉내)를 재구축 전에 맞춘다
+    await q("INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES (?, 1, 'm7', 'test', 0, NOW(3))", [E]);
+    await R.sAdd(rankingExcl, 'm8');
+    await R.zRem(keys.board, 'm8');
+    await R.del(keys.ready);
+    const synced = await until(async () => await inSet(keys.excl, 'm7') && !await inSet(rankingExcl, 'm8') && (await diff(E)).bad === 0 && (await diff(E)).ready, 20000);
+    check('J11 복구 잡: 재구축 전에 제외 집합을 DB에 맞춤 (DB에만 있는 제재 SADD·제외, Redis에만 남은 제재 SREM·재반영)',
+        synced >= 0 && !await onBoard('m7') && await onBoard('m8') && logCount('texw', `exclusions synced ranking=${E}`) >= 1, `(${synced}ms)`);
+
+    // Redis가 없는 관리 API: 등록은 성공하고 redisSynced false, 다음 재구축 전 동기화가 맞춘다
+    const deadPort = ADMIN_PORT + 1;
+    spawnTracked('texd', 'admin', { ADMIN_PORT: String(deadPort), REDIS_URL: `redis://127.0.0.1:${DEAD_PORT}` });
+    let dead;
+    const deadUp = await until(async () => {
+        try {
+            dead = await (await fetch(`http://localhost:${deadPort}/admin/v1/rankings/${E}/exclusions`, {
+                method: 'POST', headers: { 'content-type': 'application/json', cookie: `__Host-podium_admin=${root}` },
+                body: JSON.stringify({ seasonNo: 1, memberId: 'm9', reason: 'redis down' }),
+            })).json();
+            return true;
+        } catch {
+            return false;
+        }
+    }, 20000);
+    const stillOn = await onBoard('m9');
+    await R.del(keys.ready);
+    const caught = await until(async () => await inSet(keys.excl, 'm9') && !await onBoard('m9') && (await diff(E)).ready, 20000);
+    check('J12 Redis 장애 중 등록: DB 반영·redisSynced false, 복구 잡이 제외 집합·순위표를 맞춤', deadUp >= 0 && dead?.result === 0 && dead.data?.redisSynced === false
+        && stillOn && caught >= 0, `(${JSON.stringify(dead)}, ${caught}ms)`);
+
+    await sleep(300);
+    const audit = (await LM.query("SELECT action, result_code r, before_json b, after_json a FROM log_admin_audit WHERE admin_account_id = ? AND action LIKE 'exclusion.%'", [rid]))[0];
+    const created = audit.find((x) => x.action === 'exclusion.create' && x.r === 0 && x.a?.memberId === 'm3' && x.a?.seasonStatus === 2);
+    const removed = audit.find((x) => x.action === 'exclusion.delete' && x.r === 0 && x.b?.memberId === 'm3' && x.b?.reason === 'speed hack');
+    const failed = [['exclusion.create', 1601], ['exclusion.create', 1602], ['exclusion.delete', 1604], ['exclusion.delete', 1603]]
+        .filter(([action, r]) => !audit.some((x) => x.action === action && x.r === r));
+    check('J13 감사 로그: 등록(시즌 상태)·해제(지운 행), 거부도 기록', created && removed && failed.length === 0, `(${audit.length}건, 빠짐 ${JSON.stringify(failed)})`);
+}
+
 // ------------------------------------------------------------------------------------------------ 실행
 
 /** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
@@ -2590,7 +2770,7 @@ try {
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
         for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios], ['시즌 백업 분리', archiveScenarios],
-            ['관리 API', adminScenarios], ['관리 랭킹', rankingAdminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
+            ['관리 API', adminScenarios], ['관리 랭킹', rankingAdminScenarios], ['관리 제재', exclusionAdminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);

@@ -3,6 +3,7 @@ import type { Pool } from 'mysql2/promise';
 import { requireRole, type AdminIdentity } from './session.js';
 import { AdminRole } from '../core/codes.js';
 import { callSp, callSpRows } from '../core/db.js';
+import { BusinessException } from '../core/errors.js';
 import { logger } from '../core/logger.js';
 import { maskSensitive } from '../core/server.js';
 
@@ -81,6 +82,31 @@ export function createAuditWriter(logPool: Pool): AuditWriter {
  */
 export function auditBase(req: FastifyRequest, admin: AdminIdentity): Pick<AuditEntry, 'actor' | 'requestId' | 'clientIp'> {
     return { actor: { id: admin.accountId, loginId: admin.loginId, role: admin.role }, requestId: req.id, clientIp: req.ip };
+}
+
+/**
+ * 조작 하나의 감사 로그를 한 번 남긴다. SP를 부른 뒤에는 작업이 write로 전·후 값과 함께 남기고,
+ * 그 전에 앱이 거부하면(검증, 상태, 없음, 락) 여기서 base(요청 값)와 거부 코드로 남긴다.
+ * @param audit 감사 로그 적재기
+ * @param base 결과 코드를 뺀 감사 로그 값
+ * @param work 작업. write는 SP 결과를 남길 때 부른다
+ * @returns 작업 결과
+ * @author trisakion
+ * @modified 2026-10-30 trisakion rankings.ts에서 옮김 (제재 라우트와 공용)
+ */
+export async function withAudit<T>(audit: AuditWriter, base: Omit<AuditEntry, 'result'>,
+    work: (write: (e: Pick<AuditEntry, 'result' | 'targetId' | 'before' | 'after'>) => void) => Promise<T>): Promise<T> {
+    let written = false;
+    try {
+        return await work((e) => {
+            written = true;
+            audit.write({ ...base, ...e });
+        });
+    } catch (err) {
+        if (!written && err instanceof BusinessException)
+            audit.write({ ...base, result: err.result });
+        throw err;
+    }
 }
 
 /**

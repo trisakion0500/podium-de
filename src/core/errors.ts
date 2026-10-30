@@ -21,6 +21,7 @@ export interface ErrorEntry {
  * @modified 2026-10-14 trisakion 시즌 없음(1002)과 확정 전(1003) 추가 (결과·보상 API)
  * @modified 2026-10-22 trisakion 관리 API 코드(1401~1407, 2008) 추가, 2002·2003 메시지를 관리 API와 공용으로
  * @modified 2026-10-23 trisakion 관리 랭킹 코드(1501~1503, 2009~2013) 추가
+ * @modified 2026-10-30 trisakion 제재 코드(1601~1604) 추가
  */
 export const ERROR_MAP = {
     [SpResult.INVALID_PARAM]: { message: '요청 값이 허용 범위를 벗어났습니다.', httpStatus: 400 },
@@ -44,6 +45,10 @@ export const ERROR_MAP = {
     [SpResult.ADMIN_RANKING_NOT_FOUND]: { message: '존재하지 않는 랭킹입니다.', httpStatus: 404 },
     [SpResult.ADMIN_RANKING_CODE_TAKEN]: { message: '이미 사용 중인 랭킹 코드입니다.', httpStatus: 409 },
     [SpResult.ADMIN_RANKING_LOCKED]: { message: '지금 랭킹 상태에서는 이 값을 바꿀 수 없습니다.', httpStatus: 409 },
+    [SpResult.EXCLUSION_EXISTS]: { message: '이미 같은 제재가 있습니다.', httpStatus: 409 },
+    [SpResult.EXCLUSION_SEASON_NOT_FOUND]: { message: '존재하지 않는 시즌입니다. 아직 만들어지지 않은 시즌은 전 시즌(seasonNo 0)으로 제재하세요.', httpStatus: 404 },
+    [SpResult.EXCLUSION_LOCKED]: { message: '검수가 끝난 시즌의 제재는 풀 수 없습니다.', httpStatus: 409 },
+    [SpResult.EXCLUSION_NOT_FOUND]: { message: '해제할 제재가 없습니다.', httpStatus: 404 },
     [ApiResult.BIT_BUDGET_EXCEEDED]: { message: '스코어 상한과 시즌 길이가 비트 예산(53비트)을 넘습니다. score_max를 낮추거나 time_unit을 거칠게 하세요.', httpStatus: 400 },
     [ApiResult.SCHEDULE_INVALID]: { message: '시즌 일정이 규칙에 맞지 않습니다.', httpStatus: 400 },
     [ApiResult.SETTLE_PERIOD_TOO_LONG]: { message: '정산 시작 지연과 검수 기간의 합이 시즌 길이보다 길거나 같습니다.', httpStatus: 400 },

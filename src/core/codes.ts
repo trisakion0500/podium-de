@@ -211,7 +211,7 @@ export const PartitionTarget = {
 /**
  * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
  * SP는 같은 숫자를 리터럴로 쓴다. API 응답 result로 그대로 나가며, API 계층 코드(ApiResult 20xx)와 겹치지 않게
- * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회, 1400번대 관리 계정, 1500번대 관리 랭킹). 도메인당 99개, 넘치면 예비 대역을 준다.
+ * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회, 1400번대 관리 계정, 1500번대 관리 랭킹, 1600번대 제재). 도메인당 99개, 넘치면 예비 대역을 준다.
  * @author trisakion
  * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
  * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
@@ -222,6 +222,7 @@ export const PartitionTarget = {
  * @modified 2026-10-14 trisakion SETTLED 전이 코드(1016) 추가
  * @modified 2026-10-22 trisakion 관리 계정 SP 코드(1401~1407) 추가
  * @modified 2026-10-23 trisakion 관리 랭킹 SP 코드(1501~1503) 추가, 대역 설명에 1500번대 추가
+ * @modified 2026-10-30 trisakion 제재 SP 코드(1601~1604) 추가, 대역 설명에 1600번대 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -298,6 +299,14 @@ export const SpResult = {
     ADMIN_RANKING_CODE_TAKEN: 1502,
     /** 관리 랭킹: 지금 상태에서 바꿀 수 없음 — 시즌 시작 뒤 일정 변경, ENDED 뒤 상태·일정·종료 변경, 지난 시각으로 줄이기, 끝난 랭킹 늘리기 (01_DESIGN 2.8) */
     ADMIN_RANKING_LOCKED: 1503,
+    /** 제재: 같은 (시즌, 멤버) 제재가 이미 있음 */
+    EXCLUSION_EXISTS: 1601,
+    /** 제재: 지정한 시즌이 없음. 아직 만들어지지 않은 시즌은 전 시즌(0)으로 건다 */
+    EXCLUSION_SEASON_NOT_FOUND: 1602,
+    /** 제재 해제: 검수가 끝난 시즌(FINALIZING 이후)이라 풀 수 없음 (D-75) */
+    EXCLUSION_LOCKED: 1603,
+    /** 제재 해제: 해제할 제재가 없음 */
+    EXCLUSION_NOT_FOUND: 1604,
 } as const;
 
 /**

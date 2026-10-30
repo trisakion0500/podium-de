@@ -417,7 +417,7 @@ migrate가 하트비트로 거부되면
 - ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
   - ✅ 관리 API 기반 — `start:admin` 프로세스, 계정·세션·감사 로그, 로그인·비밀번호 변경·잠금, 첫 admin CLI, 역할 확인 ([D-74](docs/02_DECISIONS.md#d-74), [D-80](docs/02_DECISIONS.md#d-80))
   - ✅ 랭킹 등록·수정 — 등록 검증(비트 예산, 일정 시험 계산, 정산 기간, 보상 구간), 묶음별 수정, 늘리기·줄이기·조기 종료·ENDED·PAUSED, 스케줄러 락 직렬화, 현재 시즌 캐시 30초 상한 ([D-79](docs/02_DECISIONS.md#d-79), [D-81](docs/02_DECISIONS.md#d-81))
-  - ⬜ 제재 — 반영 Lua 제외 집합, 등록·해제, 리컨실러 동기화, 재구축 때 다시 채우기, 검수 후 제재 표시 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
+  - ✅ 제재 — 반영 Lua 제외 집합, 등록·해제·목록 API, 리컨실러 1분 동기화, 재구축 전 다시 채우기, 검수 전 제재만 확정 제외·검수 후 제재는 표시만 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
   - ⬜ 검수·전달 조작 — 검수 보류·해제·조기 확정, 장기 보류 알림, 검수 목록, DELIVERING 강제 종료
   - ⬜ Anti-cheat — 소프트 탐지 4규칙, 탐지 중복 방지, 검수 목록 포인트 정렬 ([D-76](docs/02_DECISIONS.md#d-76), [D-77](docs/02_DECISIONS.md#d-77))
   - ⬜ 정리 — `reward_held` 조건 제거(SP, 회귀 테스트, 03_DEV_SETUP 문구)
