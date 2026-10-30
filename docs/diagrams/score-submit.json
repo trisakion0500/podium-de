@@ -1,0 +1,120 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "스코어 적용 (제출 한 건)",
+    "locale": "ko",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/score-submit.html",
+    "legend": {
+      "entries": {
+        "external": { "label": "게임 서버" },
+        "backend": { "label": "판정·처리" },
+        "security": { "label": "거부 응답 (반영 없음)" },
+        "database": { "label": "MySQL 쓰기 (메인·로그 DB)" },
+        "messagebus": { "label": "Redis 반영" }
+      }
+    }
+  },
+  "lanes": [
+    { "id": "app", "label": "API 앱 · SP 호출 전" },
+    { "id": "check", "label": "SP_SUBMIT_SCORE · 검증" },
+    { "id": "apply", "label": "SP_SUBMIT_SCORE · 반영 (한 트랜잭션)" },
+    { "id": "resp", "label": "API 앱 · SP 응답 후" }
+  ],
+  "groups": [
+    { "id": "sp_check", "label": "SP_SUBMIT_SCORE", "lane": "check", "fromCol": 0, "toCol": 5, "variant": "dashed" },
+    { "id": "sp_apply", "label": "SP_SUBMIT_SCORE", "lane": "apply", "fromCol": 0, "toCol": 4, "variant": "dashed" }
+  ],
+  "mainPath": ["in", "def", "rate", "act", "season", "idem", "hard", "rule", "best", "keyw", "ret", "redis"],
+  "nodes": [
+    { "id": "in", "lane": "app", "col": 1, "yOffset": -90, "type": "external", "label": "스코어 제출", "sublabel": "인증·형식 검사 통과", "tag": "memberId·value·seasonNo·requestId" },
+    { "id": "def", "lane": "app", "col": 1, "yOffset": 0, "type": "backend", "icon": "decision", "label": "랭킹 정의 캐시", "sublabel": "30초 재조회 (D-56)" },
+    { "id": "rate", "lane": "app", "col": 1, "yOffset": 90, "type": "backend", "icon": "decision", "label": "제출 빈도", "sublabel": "max_submit_per_min, 장애 시 통과" },
+    { "id": "xn", "lane": "app", "col": 0, "yOffset": 0, "type": "security", "icon": "failure", "label": "1101", "sublabel": "RANKING_NOT_FOUND" },
+    { "id": "x0", "lane": "app", "col": 0, "yOffset": 90, "type": "security", "icon": "failure", "label": "2006", "sublabel": "멱등 키 없음" },
+
+    { "id": "act", "lane": "check", "col": 1, "yOffset": -135, "type": "backend", "icon": "decision", "label": "status = ACTIVE?", "sublabel": "ranking_definition" },
+    { "id": "season", "lane": "check", "col": 1, "yOffset": -45, "type": "backend", "icon": "decision", "label": "현재 시즌?", "sublabel": "UTC_TIMESTAMP(3) ∈ [start_at, end_at)" },
+    { "id": "idem", "lane": "check", "col": 1, "yOffset": 45, "type": "backend", "icon": "decision", "label": "같은 requestId?", "sublabel": "ranking_submit_key" },
+    { "id": "hard", "lane": "check", "col": 1, "yOffset": 135, "type": "backend", "icon": "decision", "label": "하드 검증", "sublabel": "범위·max_delta·SUM ≤ score_max" },
+    { "id": "x1", "lane": "check", "col": 0, "yOffset": -135, "type": "security", "icon": "failure", "label": "RANKING_INACTIVE", "sublabel": "멱등 키 없음" },
+    { "id": "x2", "lane": "check", "col": 0, "yOffset": -45, "type": "security", "icon": "failure", "label": "SEASON_MISMATCH", "sublabel": "시즌 밖, 멱등 키 없음" },
+    { "id": "x3", "lane": "check", "col": 0, "yOffset": 45, "type": "security", "icon": "failure", "label": "IDEMPOTENCY_CONFLICT", "sublabel": "같은 키, 다른 내용" },
+    { "id": "rej", "lane": "check", "col": 0, "yOffset": 135, "type": "database", "icon": "failure", "label": "거부 기록 후 반환", "sublabel": "submit_key INSERT, rejected=사유" },
+    { "id": "replay", "lane": "check", "col": 5, "yOffset": 45, "type": "backend", "icon": "waiting", "label": "재전송", "sublabel": "반영 안 함, 현재 entry 반환", "tag": "replayed = 1" },
+
+    { "id": "rule", "lane": "apply", "col": 1, "yOffset": -90, "type": "backend", "icon": "decision", "label": "update_rule" },
+    { "id": "best", "lane": "apply", "col": 2, "yOffset": -90, "type": "database", "label": "BEST: entry ODKU", "sublabel": "더 좋을 때만 갱신, score는 마지막 (4.3)" },
+    { "id": "sumq", "lane": "apply", "col": 1, "yOffset": 0, "type": "backend", "icon": "decision", "label": "SUM: entry 행 있음?" },
+    { "id": "sumi", "lane": "apply", "col": 2, "yOffset": 0, "type": "database", "label": "entry INSERT", "sublabel": "score = 증분, version = 1" },
+    { "id": "sumu", "lane": "apply", "col": 1, "yOffset": 90, "type": "database", "label": "entry UPDATE", "sublabel": "GREATEST(score + 증분, 0), 바뀔 때만" },
+    { "id": "norow", "lane": "apply", "col": 0, "yOffset": 0, "type": "backend", "label": "행 만들지 않음", "sublabel": "score = 0, version = 0 (D-32)" },
+    { "id": "keyw", "lane": "apply", "col": 3, "yOffset": 0, "type": "database", "label": "submit_key INSERT", "sublabel": "member_id, input_value" },
+    { "id": "ret", "lane": "apply", "col": 4, "yOffset": 0, "type": "database", "label": "COMMIT", "sublabel": "score·achieved_at·version", "tag": "replayed = 0" },
+
+    { "id": "redis", "lane": "resp", "col": 4, "type": "messagebus", "label": "Redis Lua (5.3)", "sublabel": "version 0 생략, 센티넬 없으면 버림", "tag": "BEST ZADD GT/LT · SUM version 비교" },
+    { "id": "ok", "lane": "resp", "col": 3, "type": "backend", "icon": "success", "label": "성공 응답", "sublabel": "Redis 실패여도 성공" },
+    { "id": "hist", "lane": "resp", "col": 2, "type": "database", "label": "제출 이력 (로그 DB)", "sublabel": "성공·거부 모든 결과, 응답 후" }
+  ],
+  "edges": [
+    { "id": "in-def", "from": "in", "to": "def" },
+    { "id": "def-rate", "from": "def", "to": "rate", "label": "있음" },
+    { "id": "def-xn", "from": "def", "to": "xn", "label": "없음", "variant": "security", "role": "error" },
+    { "id": "rate-x0", "from": "rate", "to": "x0", "label": "초과", "variant": "security", "role": "error" },
+    { "id": "rate-act", "from": "rate", "to": "act", "label": "통과", "variant": "emphasis" },
+
+    { "id": "act-season", "from": "act", "to": "season", "label": "예" },
+    { "id": "act-x1", "from": "act", "to": "x1", "label": "아니오", "variant": "security", "role": "error" },
+    { "id": "season-idem", "from": "season", "to": "idem", "label": "예" },
+    { "id": "season-x2", "from": "season", "to": "x2", "label": "아니오", "variant": "security", "role": "error" },
+    { "id": "idem-hard", "from": "idem", "to": "hard", "label": "없음" },
+    { "id": "idem-x3", "from": "idem", "to": "x3", "label": "다른 내용", "variant": "security", "role": "error" },
+    { "id": "idem-replay", "from": "idem", "to": "replay", "label": "같은 내용", "role": "branch" },
+    { "id": "hard-rej", "from": "hard", "to": "rej", "label": "위반", "variant": "security", "role": "error" },
+    { "id": "hard-rule", "from": "hard", "to": "rule", "label": "통과", "variant": "emphasis" },
+
+    { "id": "rule-best", "from": "rule", "to": "best", "label": "BEST" },
+    { "id": "rule-sumq", "from": "rule", "to": "sumq", "label": "SUM" },
+    { "id": "sumq-sumi", "from": "sumq", "to": "sumi", "label": "없음, 증분 > 0", "role": "branch" },
+    { "id": "sumq-sumu", "from": "sumq", "to": "sumu", "label": "있음", "role": "branch" },
+    { "id": "sumq-norow", "from": "sumq", "to": "norow", "label": "없음, ≤ 0", "role": "branch" },
+    { "id": "best-keyw", "from": "best", "to": "keyw" },
+    { "id": "sumi-keyw", "from": "sumi", "to": "keyw" },
+    { "id": "sumu-keyw", "from": "sumu", "to": "keyw" },
+    { "id": "norow-keyw", "from": "norow", "to": "keyw" },
+    { "id": "keyw-ret", "from": "keyw", "to": "ret" },
+
+    { "id": "ret-redis", "from": "ret", "to": "redis", "label": "composite", "variant": "emphasis" },
+    { "id": "replay-redis", "from": "replay", "to": "redis", "label": "재반영 시도", "role": "branch" },
+    { "id": "redis-ok", "from": "redis", "to": "ok", "variant": "emphasis" },
+    { "id": "ok-hist", "from": "ok", "to": "hist", "label": "응답 후", "variant": "dashed", "role": "async" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "거부와 멱등 키",
+      "items": [
+        "1101·2006·RANKING_INACTIVE·SEASON_MISMATCH는 submit_key를 남기지 않는다",
+        "하드 검증 위반은 submit_key에 rejected 사유를 남겨, 재전송에 같은 거부를 돌려준다",
+        "거부도 제출 이력(로그 DB)에 모두 남는다"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "값이 그대로면 갱신 없음",
+      "items": [
+        "BEST에서 같거나 나쁜 기록, SUM에서 0점에 음수 증분이면 version·achieved_at·updated_at 유지",
+        "시각은 MySQL UTC_TIMESTAMP(3) (D-66), ASC 정렬의 더 좋은 기록은 더 작은 값"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Redis는 투영",
+      "items": [
+        "Redis 반영 실패 시 L1 재시도 (6.1), 그래도 실패하면 리컨실러가 updated_at 변경분으로 맞춘다 (6.2)",
+        "재전송도 현재 entry를 돌려주므로 Redis 반영을 다시 시도하고, 오래된 값은 version 비교로 무시된다 (D-43)"
+      ]
+    }
+  ]
+}

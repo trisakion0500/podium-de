@@ -341,6 +341,8 @@ flowchart LR
 
 4절 ②의 "제출" 한 건이 처리되는 순서다. 점선 상자 안이 `SP_SUBMIT_SCORE`이고, 상세는 [01_DESIGN 2.3](01_DESIGN.md#s-2-3), [4.1](01_DESIGN.md#s-4-1)~[4.5](01_DESIGN.md#s-4-5), [5.3](01_DESIGN.md#s-5-3).
 
+같은 흐름을 레인별로 나눈 대화형 다이어그램: [diagrams/score-submit.html](diagrams/score-submit.html) (브라우저에서 열기, 원본 `diagrams/score-submit.json`). 아래 Mermaid와 내용이 같으며, 흐름을 바꾸면 둘 다 고친다.
+
 ```mermaid
 flowchart TD
     IN["게임 서버 제출 (인증·형식 검사 통과)<br/>memberId, value, seasonNo, requestId, meta"] --> DEF{"랭킹 정의 캐시에 있음?<br/>(30초 재조회, D-56)"}

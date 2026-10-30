@@ -8,3 +8,4 @@ CLAUDE.local.md
 .mcp.json
 tmp/
 logs/
+.archify/
