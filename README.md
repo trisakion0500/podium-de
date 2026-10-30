@@ -161,6 +161,7 @@ API, 워커, 관리 API는 같은 코드베이스의 별도 엔트리다. 테이
 | [05_TROUBLESHOOTING.md](docs/05_TROUBLESHOOTING.md) | 운영 장애 대응, 개발 중 겪은 문제와 해결 |
 | [06_LOAD_TEST.md](docs/06_LOAD_TEST.md) | 부하 테스트 결과 보고서 (처리량, 지연, 병목, 재현 방법) |
 | [07_K6_LOAD_TEST.md](docs/07_K6_LOAD_TEST.md) | k6 부하 테스트 결과와 따라 하기 (설치, 실행, 결과 해석, 정리) |
+| [08_TEST_CASES.md](docs/08_TEST_CASES.md) | 회귀 테스트 항목 번호별 설명 (tests/cases-doc.mjs가 생성) |
 
 ---
 
@@ -224,6 +225,7 @@ podiumDE/
 ├── loadtest/load.mjs    # 부하 테스트 스크립트(로컬 전용, docs/06_LOAD_TEST.md)
 ├── loadtest/k6-submit.js # k6 제출 부하 스크립트(로컬 전용, docs/07_K6_LOAD_TEST.md)
 ├── tests/recovery.mjs   # 회귀 테스트(로컬 전용, 자가 복구·시즌 스케줄러·정산·관리 API. npm run build 후 실행)
+├── tests/cases-doc.mjs  # 회귀 테스트 항목 문서(docs/08_TEST_CASES.md) 생성·검사
 └── docs/                # 설계 문서(위 목록)
 ```
 

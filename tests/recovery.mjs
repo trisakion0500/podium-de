@@ -22,6 +22,7 @@
  *   그 자리에서 멈춘 것이다. 구간이 5분을 넘거나 예외가 나면 ABORTED와 요약을 찍고 종료 코드 1로 끝난다. 워커·API가
  *   스스로 종료하면(기동 실패 등) err 로그의 마지막 ERROR 줄과 함께 FAIL로 찍는다.
  * - 규모는 시즌당 2,500명이다. 100만 명 규모 수치는 01_DESIGN 1.7의 실측값을 본다.
+ * - 항목 번호(S0, C1 등)를 고치거나 추가하면 node tests/cases-doc.mjs로 docs/08_TEST_CASES.md를 다시 만든다. 마지막 항목이 일치 여부를 본다.
  * @author trisakion
  */
 import { spawn } from 'node:child_process';
@@ -2802,6 +2803,7 @@ try {
     await LA.end();
 }
 check('unhandled rejection 없음', unhandled.length === 0, unhandled.map(String).join('; '));
+check('테스트 항목 문서(docs/08_TEST_CASES.md)가 테스트와 일치', (await import('./cases-doc.mjs')).casesDocUpToDate(), '(다르면 node tests/cases-doc.mjs)');
 const failed = results.filter((ok) => !ok).length;
 console.log(`\n${clock()} ${aborted ? 'ABORTED — ' : ''}${results.length - failed}/${results.length} passed`);
 (await import(root + 'core/logger.js')).shutdownLogger();
