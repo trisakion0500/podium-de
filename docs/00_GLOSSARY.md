@@ -72,6 +72,7 @@
 | 백업 테이블 | EXCHANGE로 떼어 낸 시즌 데이터를 담은 일반 테이블 `{원본}_r{id}_s{n}` | [01_DESIGN 8.2](01_DESIGN.md#s-8-2) |
 | 로그 DB (`podium_de_log`) | 제출 이력·감사 로그를 두는 별도 DB. 기록에 실패해도 본 처리는 성공한다 | [01_DESIGN 4.5](01_DESIGN.md#s-4-5) |
 | 일 파티션 / 월 테이블 / `p_max` | 로그 DB의 보관 구조. 이력은 날짜별 파티션에 쌓이고, 보관 기간이 지나면 월 테이블로 옮겨진다. `p_max`는 미리 만든 날짜 밖의 행을 받는 안전망이며, 행이 생기면 경고한다 | [01_DESIGN 4.5](01_DESIGN.md#s-4-5) |
+| 메타데이터 수준 | 행 데이터를 건드리지 않고 테이블 정의만 바꾸는 작업. 크기와 무관하게 바로 끝나지만, 그동안 MDL이 잠깐 걸린다 | [01_DESIGN 8.1](01_DESIGN.md#s-8-1) |
 | MDL | Metadata Lock. DDL(테이블 구조 변경)이 잡는 MySQL 잠금. DDL이 MDL을 기다리는 동안 그 테이블의 다른 쿼리도 뒤에서 막힌다 | [01_DESIGN 11.1](01_DESIGN.md#s-11-1) |
 | INSTANT | `ALGORITHM=INSTANT`. 데이터를 다시 쓰지 않고 테이블 정의만 바꾸는 DDL 방식이라 즉시 끝난다 | [01_DESIGN 11.1](01_DESIGN.md#s-11-1) |
 | backfill | 컬럼 추가 등의 뒤에 기존 행 값을 한꺼번에 채우는 대량 UPDATE | [01_DESIGN 11.1](01_DESIGN.md#s-11-1) |
@@ -92,6 +93,9 @@
 | 리컨실러 | 워커가 N초마다 MySQL에서 최근 바뀐 행을 읽어 Redis와 다르면 다시 반영하는 잡(L2) | [01_DESIGN 6.2](01_DESIGN.md#s-6-2) |
 | 동기화 시각 (`synced_at`) | 리컨실러가 "이 시각까지 바뀐 행은 Redis에 맞췄다"고 남기는 `updated_at` 기준 시각. MySQL `job_state.synced_at`과 Redis 센티넬 값에 함께 둔다 | [01_DESIGN 6.2](01_DESIGN.md#s-6-2) |
 | 재구축 | Redis 순위표를 MySQL에서 처음부터 다시 만드는 것(L3) | [01_DESIGN 6.3](01_DESIGN.md#s-6-3) |
+| 안전마진 (`RECOVERY_MARGIN_SEC`) | 리컨실러가 동기화 시각보다 이만큼 앞부터 다시 읽는 여유. 기본 60초이고, 최대 트랜잭션 시간보다 길어야 한다 | [01_DESIGN 6.2](01_DESIGN.md#s-6-2) |
+| 청크 / 키셋 | 청크는 대량의 행을 일정 개수씩 나눠 처리하는 단위다. 키셋은 마지막으로 읽은 키 다음부터 읽는 방식으로, `OFFSET`과 달리 뒤로 갈수록 느려지지 않는다 | [01_DESIGN 6.2](01_DESIGN.md#s-6-2) |
+| 복구 잡 | 워커가 센티넬 없는 대상 시즌을 찾아 재구축(L3)하고 센티넬을 설정하는 잡. 시작 60초 전 시즌도 대상이라, 비어 있으면 센티넬만 설정한다 | [01_DESIGN 5.3](01_DESIGN.md#s-5-3), [6.3](01_DESIGN.md#s-6-3) |
 | 보조 점검 | 시즌마다 1시간에 한 번 순위표 인원과 MySQL 인원을 비교해, 순위표가 모자라면 L2로 다시 채우는 점검 | [01_DESIGN 6.4](01_DESIGN.md#s-6-4) |
 | ZSET / HASH | Redis 자료형. ZSET은 점수순으로 정렬되는 집합(순위표), HASH는 필드·값 묶음이다 | [01_DESIGN 5.1](01_DESIGN.md#s-5-1) |
 | version 경로 (version Lua, version HASH) | SUM 랭킹의 Redis 반영 방식. HASH에 멤버별 `version`을 두고, 늦게 도착한 옛 값은 Lua가 버린다 | [01_DESIGN 5.3](01_DESIGN.md#s-5-3) |
