@@ -42,7 +42,7 @@
 | 시즌 (`season_no`) | 랭킹의 기간 단위. 번호는 1부터다. 제재에서 `season_no = 0`은 "그 랭킹의 전 시즌"을 뜻한다 | [01_DESIGN 3.1](01_DESIGN.md#s-3-1) |
 | 시즌 상태 | SCHEDULED(예정) → OPEN(제출 받음) → CLOSED(마감) → SETTLING(가순위) → REVIEW(검수) → FINALIZING(확정) → DELIVERING(보상 전달) → SETTLED(끝) | [01_DESIGN 3.5](01_DESIGN.md#s-3-5) |
 | 스케줄러 | 워커 안에서 시즌을 미리 만들고(진행 중 + 예정 3개 유지) 시각에 맞춰 OPEN·CLOSED로 넘기는 잡 | [01_DESIGN 3.3](01_DESIGN.md#s-3-3) |
-| 정산 | 마감한 시즌의 순위를 매기고 보상을 정해 게임 서버에 넘기기까지의 과정. SETTLING부터 SETTLED까지다 | [01_DESIGN 7장](01_DESIGN.md#7-정산) |
+| 정산 | 마감한 시즌의 순위를 매기고 보상을 정해 게임 서버에 넘기기까지의 과정. SETTLING부터 SETTLED까지다 | [01_DESIGN 7장](01_DESIGN.md#s-7) |
 | 가순위 | 시즌 마감 후 제재를 반영하기 전에 매기는 임시 순위. 검수 뒤 확정한다 | [01_DESIGN 7.3](01_DESIGN.md#s-7-3) |
 | 작업 테이블 (`ranking_entry_settling`) | 가순위를 매기는 동안 시즌 데이터를 잠시 옮겨 두는 빈 테이블. 정렬 인덱스를 여기에만 만들어 운영 테이블을 건드리지 않는다 | [01_DESIGN 7.3](01_DESIGN.md#s-7-3) |
 | 검수 (`review_until`) | 순위 확정 전에 GM이 어뷰징을 확인하는 기간(`review_period`). `review_until`이 그 끝 시각이다 | [01_DESIGN 7.5](01_DESIGN.md#s-7-5) |
@@ -88,7 +88,7 @@
 | 순위표 | 시즌마다 하나인 Redis ZSET. 실시간 순위 조회는 여기서 읽는다 | [01_DESIGN 5.1](01_DESIGN.md#s-5-1) |
 | 반영 Lua | 제출 결과를 순위표에 쓰는 Redis 스크립트. 센티넬과 제외 집합을 확인한 뒤에만 쓴다 | [01_DESIGN 5.3](01_DESIGN.md#s-5-3) |
 | 센티넬 (`:ready`) | Redis에 "이 시즌 순위표에 써도 된다"고 표시하는 키. 없으면 반영은 버리고 조회는 2007로 응답한다. 값은 Redis가 따라잡은 DB 시각 T(ms)다 | [01_DESIGN 5.3](01_DESIGN.md#s-5-3), [6.2](01_DESIGN.md#s-6-2) |
-| 자가 복구 L1·L2·L3 | Redis가 MySQL과 어긋났을 때 맞추는 3단계. L1 즉시 재시도, L2 리컨실러, L3 전체 재구축 | [01_DESIGN 6장](01_DESIGN.md#6-정합성과-자가-복구) |
+| 자가 복구 L1·L2·L3 | Redis가 MySQL과 어긋났을 때 맞추는 3단계. L1 즉시 재시도, L2 리컨실러, L3 전체 재구축 | [01_DESIGN 6장](01_DESIGN.md#s-6) |
 | 리컨실러 | 워커가 N초마다 MySQL에서 최근 바뀐 행을 읽어 Redis와 다르면 다시 반영하는 잡(L2) | [01_DESIGN 6.2](01_DESIGN.md#s-6-2) |
 | 동기화 시각 (`synced_at`) | 리컨실러가 "이 시각까지 바뀐 행은 Redis에 맞췄다"고 남기는 `updated_at` 기준 시각. MySQL `job_state.synced_at`과 Redis 센티넬 값에 함께 둔다 | [01_DESIGN 6.2](01_DESIGN.md#s-6-2) |
 | 재구축 | Redis 순위표를 MySQL에서 처음부터 다시 만드는 것(L3) | [01_DESIGN 6.3](01_DESIGN.md#s-6-3) |
