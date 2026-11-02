@@ -223,6 +223,7 @@ export const PartitionTarget = {
  * @modified 2026-10-22 trisakion 관리 계정 SP 코드(1401~1407) 추가
  * @modified 2026-10-23 trisakion 관리 랭킹 SP 코드(1501~1503) 추가, 대역 설명에 1500번대 추가
  * @modified 2026-10-30 trisakion 제재 SP 코드(1601~1604) 추가, 대역 설명에 1600번대 추가
+ * @modified 2026-11-02 trisakion 쓰지 않는 코드 1005(PARTITION_NOT_FOUND) 제거
  */
 export const SpResult = {
     /** 성공 */
@@ -235,8 +236,7 @@ export const SpResult = {
     SEASON_STATUS_INVALID: 1003,
     /** ranking_entry 분리 조건 미충족: 다음 시즌이 SETTLED가 아님, 또는 마지막 시즌이 아닌데 다음 시즌 행이 없음 (D-52) */
     NEXT_SEASON_NOT_SETTLED: 1004,
-    /** 운영 테이블에 시즌 파티션이 없음. 현재 이 코드를 내는 SP는 없다 — SP_SETTLING_EXCHANGE는 파티션 없는 시즌을 빈 시즌으로 본다(D-63). 번호는 재사용하지 않는다 */
-    PARTITION_NOT_FOUND: 1005,
+    // 1005는 비워 둔다: 파티션 없는 시즌을 빈 시즌으로 처리하면서 없앤 코드다(D-63). 번호는 재사용하지 않는다.
     /** 삭제하려는 파티션에 행이 있음 (먼저 백업으로 분리해야 함) */
     PARTITION_NOT_EMPTY: 1006,
     /** ranking_entry_settling에 다른 시즌 행이 있음 — 사람이 확인해야 함 */
