@@ -16,6 +16,8 @@
 | 게임 서버 | 이 랭킹 서버를 부르는 쪽. 점수를 제출하고, 순위를 조회하고, 보상 목록을 가져가 실제로 지급한다 | [01_DESIGN 10.2](01_DESIGN.md#s-10-2) |
 | GM | Game Master, 게임 운영자. 제재 등록, 검수 보류 같은 사람의 조작을 한다 | [01_DESIGN 7.5](01_DESIGN.md#s-7-5) |
 | 결과 코드 (`result`) | 모든 응답에 있는 정수. 0은 성공, 그 밖은 실패 이유다(예: 1101 랭킹 없음, 50001 DB 오류) | [01_DESIGN 10.3](01_DESIGN.md#s-10-3) |
+| SP | Stored Procedure. MySQL 안에 저장해 두고 호출하는 프로시저. 이 시스템의 DB 로직은 모두 SP에 있다 | [01_DESIGN 1.3](01_DESIGN.md#s-1-3) |
+| S2S | Server to Server, 서버 간 호출. 여기서는 게임 서버가 API를 부르는 경로다 | [01_DESIGN 10.2](01_DESIGN.md#s-10-2) |
 
 ## 랭킹과 점수
 
@@ -30,6 +32,8 @@
 | composite score | 점수와 달성 시각을 정수 하나로 합친 값. Redis 정렬만으로 "같은 점수면 먼저 달성한 쪽이 위"가 된다 | [01_DESIGN 5.2](01_DESIGN.md#s-5-2) |
 | 비트 예산 | composite가 정확하려면 53비트(double의 정수 정밀도) 안에 들어가야 한다. 점수 비트 + 시간 비트 ≤ 53을 등록 시 검사한다 | [01_DESIGN 2.4](01_DESIGN.md#s-2-4) |
 | 시간 슬롯 | 달성 시각을 `time_unit`(초, 분 등)으로 내림한 값. 같은 점수·같은 슬롯이면 `member_id` 순이다 | [01_DESIGN 5.2](01_DESIGN.md#s-5-2) |
+| 랭킹 유형 (시즌 / 이벤트 / 영구) | `cycle_type`과 `end_at`으로 나뉜다. 시즌 랭킹은 주기 반복, 이벤트 랭킹은 시즌 하나(단일 시즌), 영구 랭킹은 끝이 없고 정산도 없다 | [01_DESIGN 2.5](01_DESIGN.md#s-2-5) |
+| 벽시계 | 그 시간대의 달력·시계 기준 시각. 서머타임(DST)으로 하루가 25시간이 되는 날도 자정에서 끊으려고 쓴다 | [01_DESIGN 3.3](01_DESIGN.md#s-3-3) |
 
 ## 시즌과 정산
 
@@ -72,6 +76,10 @@
 | INSTANT | `ALGORITHM=INSTANT`. 데이터를 다시 쓰지 않고 테이블 정의만 바꾸는 DDL 방식이라 즉시 끝난다 | [01_DESIGN 11.1](01_DESIGN.md#s-11-1) |
 | backfill | 컬럼 추가 등의 뒤에 기존 행 값을 한꺼번에 채우는 대량 UPDATE | [01_DESIGN 11.1](01_DESIGN.md#s-11-1) |
 | ODKU | `INSERT ... ON DUPLICATE KEY UPDATE`. 행이 없으면 넣고 있으면 갱신하는 MySQL 구문(upsert) | [01_DESIGN 4.3](01_DESIGN.md#s-4-3) |
+| DDL | 테이블 구조를 바꾸는 SQL(`CREATE`, `ALTER`, `DROP`) | [01_DESIGN 11.1](01_DESIGN.md#s-11-1) |
+| entry / submit_key / settling | `ranking_entry` / `ranking_submit_key` / `ranking_entry_settling`의 줄임 | [04_SCHEMA](04_SCHEMA.md) |
+| 앱 계정 / migrate 계정 | 앱 계정은 SP 실행 권한(`EXECUTE`)만 있고, migrate 계정은 테이블·SP를 만들고 바꾼다 | [D-44](02_DECISIONS.md#d-44) |
+| DEFINER / INVOKER | SP를 누구 권한으로 실행할지 정하는 설정. DEFINER는 만든 계정, INVOKER는 호출한 계정의 권한이다 | [D-51](02_DECISIONS.md#d-51) |
 
 ## Redis와 자가 복구
 
@@ -85,6 +93,9 @@
 | 동기화 시각 (`synced_at`) | 리컨실러가 "이 시각까지 바뀐 행은 Redis에 맞췄다"고 남기는 `updated_at` 기준 시각. MySQL `job_state.synced_at`과 Redis 센티넬 값에 함께 둔다 | [01_DESIGN 6.2](01_DESIGN.md#s-6-2) |
 | 재구축 | Redis 순위표를 MySQL에서 처음부터 다시 만드는 것(L3) | [01_DESIGN 6.3](01_DESIGN.md#s-6-3) |
 | 보조 점검 | 시즌마다 1시간에 한 번 순위표 인원과 MySQL 인원을 비교해, 순위표가 모자라면 L2로 다시 채우는 점검 | [01_DESIGN 6.4](01_DESIGN.md#s-6-4) |
+| ZSET / HASH | Redis 자료형. ZSET은 점수순으로 정렬되는 집합(순위표), HASH는 필드·값 묶음이다 | [01_DESIGN 5.1](01_DESIGN.md#s-5-1) |
+| version 경로 (version Lua, version HASH) | SUM 랭킹의 Redis 반영 방식. HASH에 멤버별 `version`을 두고, 늦게 도착한 옛 값은 Lua가 버린다 | [01_DESIGN 5.3](01_DESIGN.md#s-5-3) |
+| RDB / AOF | Redis 저장 방식. RDB는 주기적 스냅샷이고 기본값이다. AOF는 쓰기 기록 방식이며 쓰지 않는다 | [D-04](02_DECISIONS.md#d-04) |
 
 ## 프로세스와 운영
 
