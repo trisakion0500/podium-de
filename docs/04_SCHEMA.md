@@ -89,7 +89,7 @@ erDiagram
         datetime start_at
         datetime end_at
         tinyint status "SeasonStatus"
-        varchar forced_by "GM 강제 종료"
+        int forced_by "GM 강제 종료 (계정 ID)"
     }
     ranking_entry {
         int ranking_id PK

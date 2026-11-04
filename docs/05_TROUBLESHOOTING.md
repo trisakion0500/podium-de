@@ -85,7 +85,8 @@
 | `SP_UPDATE_SEASON_DELIVERING result 1015` (`settlement cycle failed`) | 순위 재부여가 끝나지 않았다 (재부여 도중 워커가 멈춤 등) | 다음 주기에 제재 제외부터 다시 돌아 해소된다. 반복되면 그 시즌의 `MAX(final_rank)`와 `participant_count`를 비교한다 |
 | `reward tiers leave ranks a..b without reward` (warn) | 보상받는 순위 사이에 어느 구간에도 들지 않는 순위가 있다. 흔한 원인은 RANK 1~10위 + PERCENT 11%부터 | 의도한 공백이면 무시한다. 아니면 다음 시즌부터 `ranking_reward_tier`를 고친다(이미 확정에 들어간 시즌은 `tier_snapshot`에 고정됨) |
 | `reward ack stalled ranking=… season=…: N pending unchanged …` (warn) | DELIVERING 시즌의 남은 전달 대상이 `DELIVERY_STALL_SEC` 동안 줄지 않았다 (게임 서버 pull 중단, ack 실패) | 게임 서버의 보상 수신·ack 로그를 확인한다. 다시 줄면 `reward ack resumed`가 남는다 |
-| `DELIVERING backlog: N seasons > M` (warn) | 전달이 끝나지 않은 시즌이 임계치를 넘었다. 시즌마다 파티션이 남아 상한(8192)에 다가간다 | 게임 서버 연동 상태 확인. 포기할 시즌은 GM 강제 종료(6단계 구현 예정) |
+| `DELIVERING backlog: N seasons > M` (warn) | 전달이 끝나지 않은 시즌이 임계치를 넘었다. 시즌마다 파티션이 남아 상한(8192)에 다가간다 | 게임 서버 연동 상태 확인. 포기할 시즌은 GM 강제 종료(`POST /admin/v1/rankings/{id}/seasons/{n}/force-settle`) |
+| `review hold overdue ranking=… season=…: … min past review_until` (warn) | 보류한 시즌의 검수 기간이 `REVIEW_HOLD_WARN_SEC`보다 오래 지나, 그 시즌 전체의 보상이 늦어지고 있다 | 판단을 끝내고 보류를 해제한다. 해제되면 `review hold cleared`가 남는다 |
 | `delivery cycle failed` | 전달 잡 DB 오류 | 다음 주기(`DELIVERY_INTERVAL_MS`, 기본 30초)에 다시 시도한다. 반복되면 DB 연결 확인 |
 | `SP_PARTITION_DROP` 1006 | 비어 있지 않은 파티션 | 먼저 `SP_PARTITION_EXCHANGE`로 백업에 분리 |
 | `... refresh failed N times in a row` (error) | API 키·랭킹 정의 재조회 연속 실패 | 기존 목록으로 동작 중이다. 폐기한 키와 빈도 한도 변경이 반영되지 않으므로 DB 연결을 확인 |

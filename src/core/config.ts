@@ -150,6 +150,8 @@ export const config = {
         stallSec: int('DELIVERY_STALL_SEC', 3600, 1),
         /** DELIVERING 시즌 수가 이보다 많으면 적체로 경고한다. 시즌마다 파티션이 남아 테이블당 상한(8192)에 다가간다 */
         backlogMax: int('DELIVERY_BACKLOG_MAX', 100, 1),
+        /** 보류 중인 REVIEW 시즌의 review_until이 이 시간(초)보다 오래 지나면 경고한다 (01_DESIGN 7.5, D-82) */
+        reviewHoldWarnSec: int('REVIEW_HOLD_WARN_SEC', 86400, 1),
     },
     /** 관리 API (01_DESIGN 10.4, D-74) */
     admin: {

@@ -9,6 +9,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_UPDATE_REWARD_DELIVERED
     -- 작성 : 2026.10.14 trisakion
+    -- 수정 : 2026.11.04 trisakion 강제 종료한 시즌의 늦은 ack 설명 (동작 변경 없음, D-82)
     -- 내용 : POST /v1/rankings/{id}/seasons/{n}/rewards/ack (01_DESIGN 7.7).
     --        RESULT: 0 성공, 1001 파라미터, 1002 시즌 없음, 1003 아직 DELIVERING 전 [codes.SpResult]
     --        성공 데이터: 반영되지 않은 member_id (보류, REJECTED, 보상 없음, 시즌에 없음). 0행이면 전부 반영
@@ -16,7 +17,8 @@ BEGIN
     --        - 조건부 UPDATE(reward_status = 1, reward_held = 0)라 재시도해도 DELIVERED 행은 다시 바뀌지 않고
     --          delivered_at도 처음 ack 시각 그대로다. 이미 DELIVERED인 행은 성공으로 보고 반환 목록에 넣지 않는다.
     --        - DELIVERING 전에는 FINALIZING이 reward_status를 다시 쓰는 중일 수 있어 거부한다. DELIVERING은 되돌아가지
-    --          않으므로 상태를 먼저 읽고 갱신해도 된다. SETTLED는 남은 PENDING이 없어 갱신 0행, 재시도 ack는 성공이다.
+    --          않으므로 상태를 먼저 읽고 갱신해도 된다. SETTLED의 재시도 ack는 성공이다. 강제 종료한 시즌의 늦은 ack는
+    --          이미 발송한 건의 기록이라 운영 테이블에 행이 있으면 반영한다(D-82).
     --        - member_id 목록은 JSON 배열로 받아 JSON_TABLE로 펼친다 — 동적 SQL 없이 한 문장으로 처리한다(11.2).
     --          member_id가 utf8mb4_bin이라 펼친 값도 같은 콜레이션으로 비교한다(대소문자 구분).
     --        - 잠금 순서: ranking_entry(7) X만 잡는다. ranking_season은 잠그지 않고 읽는다.

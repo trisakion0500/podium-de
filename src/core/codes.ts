@@ -211,7 +211,7 @@ export const PartitionTarget = {
 /**
  * SP의 RESULT 코드 (개발 컨벤션 4.4). 50001(SP 내부 시스템 오류)은 db.ts의 callSp가 예외로 바꾼다.
  * SP는 같은 숫자를 리터럴로 쓴다. API 응답 result로 그대로 나가며, API 계층 코드(ApiResult 20xx)와 겹치지 않게
- * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회, 1400번대 관리 계정, 1500번대 관리 랭킹, 1600번대 제재). 도메인당 99개, 넘치면 예비 대역을 준다.
+ * 1000번대를 쓴다(1000번대 관리, 1100번대 제출, 1200번대 API 키, 1300번대 조회, 1400번대 관리 계정, 1500번대 관리 랭킹, 1600번대 제재, 1700번대 검수·전달 조작). 도메인당 99개, 넘치면 예비 대역을 준다.
  * @author trisakion
  * @modified 2026-10-04 trisakion 제출 SP 코드(1101~1107) 추가
  * @modified 2026-10-06 trisakion API 키 SP 코드(1201~1202) 추가
@@ -224,6 +224,7 @@ export const PartitionTarget = {
  * @modified 2026-10-23 trisakion 관리 랭킹 SP 코드(1501~1503) 추가, 대역 설명에 1500번대 추가
  * @modified 2026-10-30 trisakion 제재 SP 코드(1601~1604) 추가, 대역 설명에 1600번대 추가
  * @modified 2026-11-02 trisakion 쓰지 않는 코드 1005(PARTITION_NOT_FOUND) 제거
+ * @modified 2026-11-04 trisakion 검수·전달 조작 SP 코드(1701~1703) 추가, 대역 설명에 1700번대 추가
  */
 export const SpResult = {
     /** 성공 */
@@ -307,6 +308,12 @@ export const SpResult = {
     EXCLUSION_LOCKED: 1603,
     /** 제재 해제: 해제할 제재가 없음 */
     EXCLUSION_NOT_FOUND: 1604,
+    /** 검수 조작: 검수 중인 시즌이 아님 (보류는 REVIEW만, 해제·조기 확정은 REVIEW 이후의 재시도까지 허용) */
+    SEASON_NOT_IN_REVIEW: 1701,
+    /** 조기 확정: 보류 중. 먼저 해제한다 (D-82) */
+    REVIEW_ON_HOLD: 1702,
+    /** 강제 종료: 전달 중인 시즌이 아님 (정상 종료된 시즌 포함) */
+    SEASON_NOT_DELIVERING: 1703,
 } as const;
 
 /**

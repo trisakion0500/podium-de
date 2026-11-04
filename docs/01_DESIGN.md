@@ -290,7 +290,7 @@ CREATE TABLE `ranking_season` (
     `participant_count`    INT             UNSIGNED                DEFAULT NULL    COMMENT '제재 제외 후 확정 참가자 수 (FINALIZING에서 기록)',
     `tier_snapshot`        JSON                                    DEFAULT NULL    COMMENT '정산 시 적용된 보상 구간 스냅샷',
     `settled_at`           DATETIME(3)                             DEFAULT NULL    COMMENT '정산 완료(SETTLED) 시각 (UTC)',
-    `forced_by`            VARCHAR(64)                             DEFAULT NULL    COMMENT 'DELIVERING 강제 종료한 GM 식별자 (NULL:정상 종료) — 남은 PENDING은 그대로 백업으로 분리됨',
+    `forced_by`            INT             UNSIGNED                DEFAULT NULL    COMMENT 'DELIVERING 강제 종료한 관리자 계정 ID (NULL:정상 종료, FK 없음) — 남은 PENDING은 그대로 백업으로 분리됨',
     `forced_reason`        VARCHAR(255)                            DEFAULT NULL    COMMENT 'DELIVERING 강제 종료 사유',
     PRIMARY KEY (`ranking_id`, `season_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='랭킹별 시즌';
@@ -811,10 +811,12 @@ UPDATE ranking_entry_settling s
 ### <a id="s-7-5"></a>7.5 REVIEW: 검수
 
 - `review_until`이 지나면 자동으로 FINALIZING으로 진행한다. GM 승인을 기다리지 않는다.
-- GM 조작 (운영 도구와 함께 6단계 구현 예정, [D-64](02_DECISIONS.md#d-64)):
-  - **보류:** `review_hold = 1`. 해제 전까지 확정하지 않는다. 장기 보류 시 알림. 해제할 때 `review_until`이 지났으면 지금으로 맞춘다.
-  - **조기 확정:** 기간을 기다리지 않고 진행. `review_until = 지금` ([D-78](02_DECISIONS.md#d-78)).
+- GM 조작 ([D-64](02_DECISIONS.md#d-64), [D-82](02_DECISIONS.md#d-82)):
+  - **보류:** `review_hold = 1`. 해제 전까지 확정하지 않는다. 해제할 때 `review_until`이 지났으면 지금으로 맞춘다.
+  - **조기 확정:** 기간을 기다리지 않고 진행. `review_until = 지금` ([D-78](02_DECISIONS.md#d-78)). 보류 중이면 거부한다(1702). 먼저 해제한다.
+- **장기 보류 알림:** 보류 중인 REVIEW 시즌의 `review_until`이 `REVIEW_HOLD_WARN_SEC`(기본 86400초)보다 오래 지나면 워커 전달 잡이 경고한다. 검수 기간 안의 보류는 보상을 아직 늦추지 않으므로 경고하지 않는다. 시작과 해소 때 로그를 한 번씩 남기고, 워커가 재시작하면 조건이 이어지는 시즌을 한 번 다시 경고한다.
 - 검수 목록은 자동 생성한다: 보상 구간 내 유저 중 어뷰징 포인트 보유자, 하드 검증 위반 이력자. 포인트 내림차순으로 보여 준다.
+  - REVIEW 시즌만 조회할 수 있다. 구간은 현재 `ranking_reward_tier`와 가순위로 판정한다. 제재로 순위가 당겨져 구간에 새로 들어오는 유저는 나오지 않는다.
 - 어뷰징 판단은 검수 기간에 끝낸다. GM이 제재하면 확정 때 REJECTED, 두면 그대로 지급된다. 시간이 더 필요하면 보류(`review_hold`)로 연장한다. 확정 뒤 보상 보류는 없다 ([D-77](02_DECISIONS.md#d-77)).
 
 ### <a id="s-7-6"></a>7.6 FINALIZING: 확정
@@ -865,11 +867,12 @@ UPDATE ranking_entry_settling s
 
 두 기준은 설정값이다: `DELIVERY_STALL_SEC`(기본 3600초), `DELIVERY_BACKLOG_MAX`(기본 100). 워커 전달 잡이 정체·적체가 시작될 때와 풀릴 때 로그를 한 번씩 남긴다. 정체 기준 시각은 워커가 그 시즌을 처음 본 때 또는 남은 수가 마지막으로 바뀐 때라, 워커가 재시작하면 다시 잰다.
 
-**강제 종료 (GM, 6단계 구현 예정)**
+**강제 종료 (GM)**
 
 - 게임 서버가 끝내 가져가지 않는 경우(연동 폐기, 보상 포기 결정)에만 GM이 DELIVERING 시즌을 SETTLED로 넘긴다. 자동으로는 실행하지 않는다.
-- `ranking_season.forced_by`, `forced_reason`에 실행자와 사유를 기록한다.
+- `ranking_season.forced_by`(계정 ID), `forced_reason`에 실행자와 사유를 기록한다.
 - 남은 PENDING은 상태를 바꾸지 않은 채, 백업 분리 잡의 차례가 오면 백업 테이블로 옮겨진다. 백업 테이블에서 미전달 건을 확인할 수 있다.
+- 강제 종료한 시즌의 보상 목록은 빈 목록이다. 포기한 보상이 뒤늦게 발송되지 않게 하기 위해서다. 이미 발송한 건의 늦은 ack는 운영 테이블에 행이 있으면 반영한다.
 
 **실패와 재시도**
 
@@ -1137,6 +1140,7 @@ CREATE TABLE `api_credential` (
 | 14xx | SP: 관리 계정 (로그인·잠금·역할 재확인 등, [10.4](#s-10-4)) | 400·401·403·404·409·423 (코드별) |
 | 15xx | SP: 관리 랭킹 (없음·코드 중복·수정 불가, [2.8](#s-2-8)) | 404·409 |
 | 16xx | SP: 제재 (중복·시즌 없음·해제 불가·제재 없음, [7.8](#s-7-8)) | 404·409 |
+| 17xx | SP: 검수·전달 조작 (검수 중 아님·보류 중·전달 중 아님, [7.5](#s-7-5), [7.7](#s-7-7)) | 409 |
 | 20xx | API 계층: 2001 요청 형식 400(바디는 타입 변환 없음 — `"10"`은 정수가 아니다. 쿼리·경로는 숫자 문자열을 변환), 2002 인증 401, 2003 권한 403, 2004 경로 없음 404, 2005 시간 초과 503, 2006 제출 빈도 초과 429, 2007 순위 집계 중 503, 2008\~2013 관리 API([10.4](#s-10-4)의 표) | 코드별 |
 | 5000 | 앱 미분류 예외 | 500 |
 | 50001 | DB 시스템 오류 (SP EXIT HANDLER, 연결 거부·끊김·무응답·풀 대기열 초과 등 SP 호출 자체의 실패) | 500 |
@@ -1269,6 +1273,30 @@ CREATE TABLE `api_credential` (
 - 해제는 REVIEW까지인 시즌의 제재와 전 시즌 제재만 된다(1603). 이미 붙은 `sanctioned` 표시는 지우지 않는다.
 - 감사 로그 `action`은 `exclusion.create`, `exclusion.delete`이고 등록·삭제된 행을 남긴다.
 
+**검수·전달 조작** ([7.5](#s-7-5), [7.7](#s-7-7), [D-82](02_DECISIONS.md#d-82))
+
+| 메서드 | 경로 | 역할 | 설명 |
+| --- | --- | --- | --- |
+| GET | `/admin/v1/seasons/actionable?offset&size` | viewer | 작업 대기 시즌 (REVIEW·DELIVERING, 전 랭킹) |
+| GET | `/admin/v1/rankings/{id}/seasons/{n}/review?offset&size` | viewer | 검수 목록 |
+| POST | `/admin/v1/rankings/{id}/seasons/{n}/review/hold` | operator | 검수 보류 |
+| DELETE | `/admin/v1/rankings/{id}/seasons/{n}/review/hold` | operator | 보류 해제 |
+| POST | `/admin/v1/rankings/{id}/seasons/{n}/review/finalize` | operator | 조기 확정 |
+| POST | `/admin/v1/rankings/{id}/seasons/{n}/force-settle` | operator | 강제 종료 (`reason` 1\~255자) |
+
+- 네 조작은 재시도해도 안전하다. 이미 보류·해제·확정 진행·강제 종료된 상태면 성공을 돌려주고 값을 바꾸지 않는다.
+- 감사 로그 `action`은 `review.hold`, `review.release`, `review.finalize`, `season.force_settle`이다. 강제 종료는 사유와 남은 PENDING 수를 남긴다.
+
+**결과 코드 (17xx: SP 검수·전달 조작)**
+
+| 코드 | 의미 | HTTP |
+| --- | --- | --- |
+| 1701 | 검수 중인 시즌이 아님 | 409 |
+| 1702 | 보류 중이라 조기 확정할 수 없음 | 409 |
+| 1703 | 전달 중인 시즌이 아님 | 409 |
+
+랭킹이나 시즌이 없으면 1002다.
+
 **결과 코드 (16xx: SP 제재)**
 
 | 코드 | 의미 | HTTP |
@@ -1393,7 +1421,7 @@ CREATE TABLE `log_admin_audit` (
 | `SP_LOG_ARCHIVE_DROP(archive_months)` | 로그 DB. 끝난 지 `archive_months`(1 이상)개월이 지난 가장 오래된 월 테이블 삭제 (호출당 하나) | 앱 |
 
 - 대상 코드(`code`, TINYINT): 1 = `ranking_entry`, 2 = `ranking_submit_key`
-- SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다([10.3](#s-10-3)). 관리 SP는 1001\~1016, `SP_SUBMIT_SCORE`는 1101\~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105\~1107), API 키 SP는 1201\~1202, 조회 SP는 1301, 관리 계정 SP는 1401\~1407, 관리 랭킹 SP는 1501\~1503, 제재 SP는 1601\~1604다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
+- SP의 RESULT 코드는 `src/core/codes.ts`의 `SpResult`이며 API 응답 코드로 그대로 나간다([10.3](#s-10-3)). 관리 SP는 1001\~1016, `SP_SUBMIT_SCORE`는 1101\~1107(4.1의 결과 표, 하드 검증 거부는 사유별 1105\~1107), API 키 SP는 1201\~1202, 조회 SP는 1301, 관리 계정 SP는 1401\~1407, 관리 랭킹 SP는 1501\~1503, 제재 SP는 1601\~1604, 검수·전달 조작 SP는 1701\~1703이다. 1007, 1008은 사람이 확인해야 하는 상태라 알린다.
 - 관리 SP는 상태를 관측해 다음 단계만 실행하므로 같은 인자로 다시 호출해도 안전하다.
 - 관리 SP는 `ranking_id`, `season_no`를 `INT UNSIGNED`로, 대상 테이블은 코드로만 받아 SP 안에서 이름을 조립한다. 문자열을 받아 DDL에 넣지 않기 위해서다.
 - 데이터 경로 SP(제출, 조회, 결과 적재, 보상)는 전부 정적 SQL이다.

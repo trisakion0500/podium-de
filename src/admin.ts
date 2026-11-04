@@ -3,6 +3,7 @@ import { createAuditWriter, registerAuditRoutes } from './admin/audit.js';
 import { registerAuthRoutes } from './admin/auth.js';
 import { registerExclusionRoutes } from './admin/exclusions.js';
 import { registerRankingRoutes } from './admin/rankings.js';
+import { registerReviewRoutes } from './admin/review.js';
 import { originGuard, SESSION_COOKIE } from './admin/session.js';
 import { bootstrap } from './core/bootstrap.js';
 import { ProcessType } from './core/codes.js';
@@ -32,6 +33,7 @@ registerAccountRoutes(app, { pool, audit });
 registerAuditRoutes(app, { pool, logPool });
 registerRankingRoutes(app, { pool, audit });
 registerExclusionRoutes(app, { pool, audit, redis });
+registerReviewRoutes(app, { pool, audit });
 
 // 새 요청 수신을 멈추고 진행 중 요청이 끝날 때까지 기다린 뒤, 남은 감사 로그를 적재하고 Redis와 로그 DB 풀을 닫는다.
 const shutdown = onShutdown(async () => {

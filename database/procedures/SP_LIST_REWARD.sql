@@ -10,12 +10,13 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_LIST_REWARD
     -- 작성 : 2026.10.14 trisakion
+    -- 수정 : 2026.11.04 trisakion SETTLED 시즌은 빈 목록 (강제 종료로 남은 PENDING을 내보내지 않는다, D-82)
     -- 내용 : GET /v1/rankings/{id}/seasons/{n}/rewards (01_DESIGN 7.7).
     --        RESULT: 0 성공, 1001 파라미터, 1002 시즌 없음, 1003 아직 DELIVERING 전 [codes.SpResult]
     --        성공 데이터: member_id, final_rank, score, reward_code (0행이면 남은 대상 없음)
     --
-    --        - DELIVERING 전에는 FINALIZING이 reward_status를 다시 쓰는 중일 수 있어 거부한다. SETTLED는 남은 PENDING이
-    --          없으므로 빈 목록이 나간다(보류 행은 6단계 전환 전까지 대상이 아니다).
+    --        - DELIVERING 전에는 FINALIZING이 reward_status를 다시 쓰는 중일 수 있어 거부한다. SETTLED는 빈 목록이 나간다.
+    --          강제 종료한 시즌에 PENDING이 남아 있어도 포기한 보상이므로 내보내지 않는다(D-82).
     --        - ix_reward_status (ranking_id, season_no, reward_status, member_id)를 member_id 커서로 범위 스캔한다.
     --          reward_held만 행에서 읽는다. ack된 행은 PENDING에서 빠지므로 게임 서버는 커서 없이 처음부터 다시 읽어도 된다.
     --        - member_id는 utf8mb4_bin이라 커서 비교도 바이트 순서다.
@@ -54,7 +55,7 @@ BEGIN
         SELECT member_id, final_rank, score, reward_code
           FROM ranking_entry
          WHERE ranking_id = i_ranking_id AND season_no = i_season_no AND reward_status = 1
-           AND member_id > i_cursor AND reward_held = 0
+           AND member_id > i_cursor AND reward_held = 0 AND v_status = 7
          ORDER BY member_id
          LIMIT i_size;
     END proc_block;

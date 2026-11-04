@@ -71,15 +71,17 @@ export function createDeliveryWatch(stallMs: number, backlogMax: number): (seaso
 }
 
 /**
- * 보상 전달 잡을 시작한다 (01_DESIGN 7.7): 남은 대상이 없는 DELIVERING 시즌을 SETTLED로 넘기고, ack 정체와 적체를 경고한다.
+ * 보상 전달 잡을 시작한다 (01_DESIGN 7.5, 7.7): 남은 대상이 없는 DELIVERING 시즌을 SETTLED로 넘기고, ack 정체·적체와 장기 보류를 경고한다.
  * 전달 자체는 게임 서버가 API로 pull·ack한다. 이 잡은 끝을 맺고 연동 장애를 알리기만 한다.
  * @param pool 메인 DB 풀
  * @returns 정지 함수. DB 풀을 닫기 전에 불러야 한다 (개발 컨벤션 5.2)
  * @author trisakion
+ * @modified 2026-11-04 trisakion 장기 보류 경고 추가 (D-82)
  */
 export function startDelivery(pool: Pool): () => Promise<void> {
-    const { intervalMs, stallSec, backlogMax } = config.delivery;
+    const { intervalMs, stallSec, backlogMax, reviewHoldWarnSec } = config.delivery;
     const watch = createDeliveryWatch(stallSec * 1000, backlogMax);
+    let overdueHolds = new Set<string>();
     const stop = startJob(pool, { name: 'delivery', lock: DELIVERY_LOCK, intervalMs }, async (ctx) => {
         const { result, rows } = await callSp(ctx.conn, 'SP_LIST_REWARD_PENDING', []);
         if (result !== SpResult.OK)
@@ -108,7 +110,22 @@ export function startDelivery(pool: Pool): () => Promise<void> {
             logger.warn(`DELIVERING backlog: ${rows.length} seasons > ${backlogMax} — each keeps ranking_entry/ranking_submit_key partitions (limit 8192 per table)`);
         else if (ev.backlog === false)
             logger.info(`DELIVERING backlog cleared: ${rows.length} seasons`);
+
+        const holds = await callSp(ctx.conn, 'SP_LIST_REVIEW_HOLD_OVERDUE', [reviewHoldWarnSec]);
+        if (holds.result !== SpResult.OK)
+            throw new Error(`SP_LIST_REVIEW_HOLD_OVERDUE result ${holds.result}`);
+        const current = new Set<string>();
+        for (const r of holds.rows) {
+            const label = `ranking=${r.ranking_id} season=${r.season_no}`;
+            current.add(label);
+            if (!overdueHolds.has(label))
+                logger.warn(`review hold overdue ${label}: ${Math.floor(Number(r.overdue_sec) / 60)} min past review_until — rewards for the whole season are delayed until the hold is released`);
+        }
+        for (const label of overdueHolds)
+            if (!current.has(label))
+                logger.info(`review hold cleared ${label}`);
+        overdueHolds = current;
     });
-    logger.info(`delivery started (interval ${intervalMs}ms, ack stall ${stallSec}s, backlog > ${backlogMax} seasons)`);
+    logger.info(`delivery started (interval ${intervalMs}ms, ack stall ${stallSec}s, backlog > ${backlogMax} seasons, review hold > ${reviewHoldWarnSec}s)`);
     return stop;
 }

@@ -12,7 +12,7 @@
  *
  * - 워커와 API·관리 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199)부터 6개, 관리 API는 그다음 2개(Redis 없는 관리 API 포함). 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
- * - 테스트 랭킹 940~977을 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션·시즌 백업 테이블, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키,
+ * - 테스트 랭킹 940~979를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션·시즌 백업 테이블, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키,
  *   rtest- 관리 계정·세션·감사 로그).
  * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 월 테이블로 옮긴다.
  *   테스트가 쓰는 달(100일 전 무렵, 12·13개월 전)의 월 테이블은 시작 전과 끝난 뒤에 지운다.
@@ -52,7 +52,7 @@ const { createClient } = await import('redis');
 const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
     finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964,
     fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969, arc: 970, arcLast: 971, rkShort: 972, rkExtend: 973, rkOver: 974, rkEnd: 975,
-    exc: 976, excDlv: 977 };
+    exc: 976, excDlv: 977, rev: 978, revDlv: 979 };
 const ALL_IDS = Object.values(IDS);
 /** 관리 API로 등록한 테스트 랭킹의 코드 접두어. ID는 AUTO_INCREMENT라 코드로 찾아 지운다 */
 const RK_CODE = 'rtk-';
@@ -111,7 +111,7 @@ async function clean() {
                 await q(`ALTER TABLE ${t} DROP PARTITION ${ps.join(', ')}`);
         }
     }
-    for (const t of ['ranking_season', 'ranking_definition', 'ranking_reward_tier', 'ranking_season_top', 'ranking_exclusion', 'job_state', 'ranking_entry_settling'])
+    for (const t of ['ranking_season', 'ranking_definition', 'ranking_reward_tier', 'ranking_season_top', 'ranking_exclusion', 'ranking_suspicion', 'job_state', 'ranking_entry_settling'])
         await q(`DELETE FROM ${t} WHERE ranking_id IN (?)`, [ids]);
     // 정산 도중 끊긴 테스트가 남긴 정렬 인덱스·가상 컬럼 (작업 테이블이 비어 있을 때만 — 다른 시즌 정산 중이면 건드리지 않는다)
     if ((await q('SELECT COUNT(member_id) n FROM ranking_entry_settling'))[0].n === 0) {
@@ -2748,6 +2748,177 @@ async function exclusionAdminScenarios() {
     check('J13 감사 로그: 등록(시즌 상태)·해제(지운 행), 거부도 기록', created && removed && failed.length === 0, `(${audit.length}건, 빠짐 ${JSON.stringify(failed)})`);
 }
 
+/**
+ * 관리 API 검수·전달 조작 회귀 (01_DESIGN 7.5, 7.7, 10.4, D-78, D-82): 보류·해제·조기 확정의 기준 시각과 멱등, 거부 코드, 검수 목록(구간·정렬·페이징),
+ * 작업 대기 시즌, 강제 종료(기록, 재시도, 빈 보상 목록, 늦은 ack, 백업 분리), 장기 보류 경고와 해제 뒤 확정, 감사 로그.
+ * 포트: TEST_PORT+6.
+ * @returns 없음
+ */
+async function reviewAdminScenarios() {
+    const R = IDS.rev;
+    const D = IDS.revDlv;
+    // R: 1 SETTLED(직전 시즌 포인트만), 2 REVIEW(n0~n9, 가순위 1~10), 3 SCHEDULED. 구간은 1~2위 A, 상위 3~50% B(10명 중 3~5위)
+    await createDefinition(R);
+    await q('INSERT INTO ranking_reward_tier (ranking_id, tier_no, range_type, range_from, range_to, reward_code) VALUES ?', [[[R, 1, 1, 1, 2, 'A'], [R, 2, 2, 3, 50, 'B']]]);
+    await createSeason(R, 1, -10800, -7200, 8, false);
+    await createSeason(R, 2, -7200, -3600, 5);
+    await createSeason(R, 3, 3600, 7200, 1, false);
+    await q('UPDATE ranking_season SET review_until = UTC_TIMESTAMP(3) + INTERVAL 1 HOUR WHERE ranking_id = ? AND season_no = 2', [R]);
+    await q('INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at, final_rank) VALUES ?',
+        [Array.from({ length: 10 }, (_, i) => [R, 2, `n${i}`, 100 - i, new Date(), 1, new Date(), i + 1])]);
+    const sus = (no, m, rule, weight) => [R, no, m, rule, weight, '{}', new Date()];
+    await q('INSERT INTO ranking_suspicion (ranking_id, season_no, member_id, rule_code, weight, evidence, created_at) VALUES ?',
+        [[sus(2, 'n1', 'VELOCITY', 40), sus(2, 'n1', 'RANK_JUMP', 30), sus(2, 'n2', 'REJECTED', 30), sus(1, 'n2', 'VELOCITY', 10), sus(2, 'n7', 'VELOCITY', 99)]]);
+    const key = (rid, m, rejected) => [R, 2, rid, m, 1, rejected, new Date()];
+    await q('INSERT INTO ranking_submit_key (ranking_id, season_no, request_id, member_id, input_value, rejected, created_at) VALUES ?',
+        [[key('r1', 'n4', 'SCORE_RANGE'), key('r2', 'n4', 'SCORE_RANGE'), key('r3', 'n3', null), key('r4', 'n6', 'SCORE_RANGE')]]);
+    await q("INSERT INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at) VALUES (?, 0, 'n1', 'test', 0, UTC_TIMESTAMP(3))", [R]);
+    // D: 1 DELIVERING(w0~w2 PENDING, w3 DELIVERED), 2 SETTLED(정상 종료)
+    await createDefinition(D);
+    await createSeason(D, 1, -7200, -3600, 7);
+    await createSeason(D, 2, -3600, -1800, 8, false);
+    await q('INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at, final_rank, reward_code, reward_status) VALUES ?',
+        [[0, 1, 2, 3].map((i) => [D, 1, `w${i}`, 50 - i, new Date(), 1, new Date(), i + 1, 'R', i === 3 ? 2 : 1])]);
+
+    spawnTracked('trev', 'admin', { ADMIN_PORT: String(ADMIN_PORT) });
+    await admUp();
+    const root = await admRoot('rtest-rvroot');
+    const [{ rid }] = await q("SELECT admin_account_id rid FROM admin_account WHERE login_id = 'rtest-rvroot'");
+    const vInit = (await adm('POST', '/accounts', { token: root, body: { loginId: 'rtest-rvview', name: 'Viewer', role: 1 } })).body.data.initialPassword;
+    const vFirst = await admLogin('rtest-rvview', vInit);
+    const viewer = (await adm('POST', '/auth/password', { token: vFirst.token, body: { currentPassword: vInit, newPassword: 'rtest-rvview-password' } })).token;
+    const [{ vid }] = await q("SELECT admin_account_id vid FROM admin_account WHERE login_id = 'rtest-rvview'");
+
+    const act = (method, id, no, path, opt = {}) => adm(method, `/rankings/${id}/seasons/${no}/${path}`, { token: root, ...opt });
+    const season = async (id = R, no = 2) => (await q(`SELECT status st, review_hold h, CAST(review_until AS CHAR) u, TIMESTAMPDIFF(SECOND, review_until, UTC_TIMESTAMP(3)) age,
+                                                              forced_by fb, forced_reason fr FROM ranking_season WHERE ranking_id = ? AND season_no = ?`, [id, no]))[0];
+    const setUntil = (sec) => q('UPDATE ranking_season SET review_until = UTC_TIMESTAMP(3) + INTERVAL ? SECOND WHERE ranking_id = ? AND season_no = 2', [sec, R]);
+
+    const held = await act('POST', R, 2, 'review/hold');
+    const heldAgain = await act('POST', R, 2, 'review/hold');
+    const s1 = await season();
+    check('V1 보류: review_hold = 1, 재시도는 값을 바꾸지 않고 성공', held.body.data?.changed === true && held.body.data?.reviewHold === 1 && heldAgain.status === 200
+        && heldAgain.body.data?.changed === false && s1.h === 1, `(${JSON.stringify(held.body)}, ${JSON.stringify(heldAgain.body)})`);
+
+    const beforeRelease = (await season()).u;
+    const released = await act('DELETE', R, 2, 'review/hold');
+    const releasedAgain = await act('DELETE', R, 2, 'review/hold');
+    const s2 = await season();
+    check('V2 기간 안의 해제: 남은 review_until 유지, 재시도 성공', released.body.data?.changed === true && releasedAgain.body.data?.changed === false && s2.h === 0 && s2.u === beforeRelease,
+        `(${beforeRelease} → ${s2.u}, ${JSON.stringify(releasedAgain.body)})`);
+
+    await act('POST', R, 2, 'review/hold');
+    await setUntil(-60);
+    const onHold = await act('POST', R, 2, 'review/finalize');
+    const overdueRelease = await act('DELETE', R, 2, 'review/hold');
+    const s3 = await season();
+    const u3 = s3.u;
+    await sleep(20);
+    const retryRelease = await act('DELETE', R, 2, 'review/hold');
+    check('V3 보류 중 조기 확정 1702 / 기간이 지난 해제: review_until을 지금으로, 재시도해도 밀리지 않음', onHold.body.result === 1702 && onHold.status === 409 && overdueRelease.body.data?.changed === true
+        && s3.h === 0 && s3.age >= 0 && s3.age < 5 && retryRelease.body.data?.changed === false && (await season()).u === u3, `(${onHold.body.result}, age ${s3.age}, ${u3})`);
+
+    await setUntil(3600);
+    const ended = await act('POST', R, 2, 'review/finalize');
+    const s4 = await season();
+    await sleep(20);
+    const endedAgain = await act('POST', R, 2, 'review/finalize');
+    check('V4 조기 확정: review_until = 지금, 재시도해도 기준 시각 유지', ended.body.data?.changed === true && s4.age >= 0 && s4.age < 5 && endedAgain.body.data?.changed === false && (await season()).u === s4.u,
+        `(${JSON.stringify(ended.body)}, age ${s4.age}, ${JSON.stringify(endedAgain.body)})`);
+    await setUntil(3600);
+
+    const codes = {
+        missing: (await act('POST', R, 99, 'review/hold')).body.result,
+        missingRanking: (await act('POST', 4000000000, 1, 'review/hold')).body.result,
+        holdEarly: (await act('POST', R, 3, 'review/hold')).body.result,
+        releaseEarly: (await act('DELETE', R, 3, 'review/hold')).body.result,
+        endEarly: (await act('POST', R, 3, 'review/finalize')).body.result,
+        holdLate: (await act('POST', D, 1, 'review/hold')).body.result,
+        listLate: (await act('GET', D, 1, 'review')).body.result,
+        forceReview: (await act('POST', R, 2, 'force-settle', { body: { reason: 'x' } })).body.result,
+        forceDone: (await act('POST', D, 2, 'force-settle', { body: { reason: 'x' } })).body.result,
+        forceEmpty: (await act('POST', D, 1, 'force-settle', { body: { reason: '' } })).body.result,
+        forceUnknown: (await act('POST', D, 1, 'force-settle', { body: { reason: 'x', by: 1 } })).body.result,
+        viewerHold: (await act('POST', R, 2, 'review/hold', { token: viewer })).body.result,
+        viewerForce: (await act('POST', D, 1, 'force-settle', { token: viewer, body: { reason: 'x' } })).body.result,
+        spHold: (await callSp(A, 'SP_UPDATE_SEASON_REVIEW_HOLD', [vid, R, 2, 1])).result,
+        spEnd: (await callSp(A, 'SP_UPDATE_SEASON_REVIEW_END', [vid, R, 2])).result,
+        spForce: (await callSp(A, 'SP_UPDATE_SEASON_FORCE_SETTLED', [vid, D, 1, 'x'])).result,
+    };
+    const expectV5 = { missing: 1002, missingRanking: 1002, holdEarly: 1701, releaseEarly: 1701, endEarly: 1701, holdLate: 1701, listLate: 1701, forceReview: 1703, forceDone: 1703,
+        forceEmpty: 2001, forceUnknown: 2001, viewerHold: 2003, viewerForce: 2003, spHold: 1405, spEnd: 1405, spForce: 1405 };
+    check('V5 거부: 없는 시즌·랭킹 1002, 검수 전·후 조작 1701, REVIEW·정상 종료 시즌 강제 종료 1703, 형식 2001, viewer 2003, SP 역할 재확인 1405',
+        Object.entries(expectV5).every(([k, v]) => codes[k] === v), JSON.stringify(codes));
+
+    const list = await act('GET', R, 2, 'review', { token: viewer });
+    const items = list.body.data?.items ?? [];
+    const summary = items.map((x) => `${x.memberId}:${x.rank}:${x.rewardCode}:${x.points}:${x.previousPoints}:${x.rejectedCount}:${x.excluded}`).join();
+    check('V6 검수 목록: 구간 안의 포인트·거부 보유자만, 포인트 내림차순, 직전 시즌 포인트·제재 표시 (구간 밖·이력 없는 멤버 제외)',
+        list.status === 200 && list.body.data?.total === 3 && summary === 'n1:2:A:70:0:0:true,n2:3:B:30:10:0:false,n4:5:B:0:0:2:false', summary);
+    const paged = await act('GET', R, 2, 'review?offset=1&size=1');
+    const past = await act('GET', R, 2, 'review?offset=9&size=5');
+    check('V7 검수 목록 페이징: 범위 밖이어도 total 유지', paged.body.data?.total === 3 && paged.body.data.items.map((x) => x.memberId).join() === 'n2'
+        && past.body.data?.total === 3 && past.body.data.items.length === 0, `(${JSON.stringify(paged.body.data)}, ${JSON.stringify(past.body.data)})`);
+
+    await act('POST', R, 2, 'review/hold');
+    const actionable = await adm('GET', '/seasons/actionable?size=100', { token: viewer });
+    const pick = (id) => actionable.body.data?.items?.find((x) => x.rankingId === id);
+    check('V8 작업 대기 시즌: REVIEW(보류·검수 종료), DELIVERING(남은 PENDING), 그 외 상태 제외', pick(R)?.seasonNo === 2 && pick(R).status === 5 && pick(R).reviewHold === 1 && pick(R).reviewUntil !== null
+        && pick(R).remaining === null && pick(D)?.seasonNo === 1 && pick(D).status === 7 && pick(D).remaining === 3
+        && actionable.body.data.items.filter((x) => x.rankingId === R || x.rankingId === D).length === 2, JSON.stringify([pick(R), pick(D)]));
+    await act('DELETE', R, 2, 'review/hold');
+
+    const rewardsBefore = await callSp(A, 'SP_LIST_REWARD', [D, 1, '', 100]);
+    const forced = await act('POST', D, 1, 'force-settle', { body: { reason: 'integration retired' } });
+    const forcedAgain = await act('POST', D, 1, 'force-settle', { body: { reason: 'second' } });
+    const s9 = await season(D, 1);
+    const status9 = await q('SELECT member_id m, reward_status r FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 ORDER BY member_id', [D]);
+    check('V9 강제 종료: SETTLED, 계정 ID·사유 기록, 남은 PENDING 수, 행은 그대로, 재시도는 처음 기록 유지',
+        forced.status === 200 && forced.body.data?.remaining === 3 && forced.body.data?.forcedBy === rid && forced.body.data?.changed === true && s9.st === 8 && s9.fb === rid && s9.fr === 'integration retired'
+        && status9.map((x) => x.r).join() === '1,1,1,2' && forcedAgain.status === 200 && forcedAgain.body.data?.changed === false && forcedAgain.body.data?.remaining === null
+        && forcedAgain.body.data?.forcedReason === 'integration retired', `(${JSON.stringify(forced.body)}, ${JSON.stringify(forcedAgain.body)}, ${JSON.stringify(s9)})`);
+
+    const rewardsAfter = await callSp(A, 'SP_LIST_REWARD', [D, 1, '', 100]);
+    const pendingList = await callSp(A, 'SP_LIST_REWARD_PENDING', []);
+    const lateAck = await callSp(A, 'SP_UPDATE_REWARD_DELIVERED', [D, 1, JSON.stringify(['w0'])]);
+    const [w0] = await q("SELECT reward_status r FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = 'w0'", [D]);
+    check('V10 강제 종료 뒤: 보상 목록 빈 목록, 전달 대기에서 빠짐, 늦은 ack는 반영', rewardsBefore.rows.length === 3 && rewardsAfter.result === 0 && rewardsAfter.rows.length === 0
+        && !pendingList.rows.some((x) => x.ranking_id === D) && lateAck.result === 0 && lateAck.rows.length === 0 && w0.r === 2, `(${rewardsBefore.rows.length} → ${rewardsAfter.rows.length}, ack ${lateAck.result}, w0 ${w0?.r})`);
+
+    const exchanged = await callSp(A, 'SP_PARTITION_EXCHANGE', [1, D, 1]);
+    const backup = await q(`SELECT member_id m, reward_status r FROM \`ranking_entry_r${D}_s1\` ORDER BY member_id`);
+    check('V11 백업 분리: 남은 PENDING이 상태 그대로 백업 테이블로', exchanged.result === 0 && backup.map((x) => `${x.m}:${x.r}`).join() === 'w0:2,w1:1,w2:1,w3:2', `(${exchanged.result}, ${backup.map((x) => `${x.m}:${x.r}`)})`);
+
+    // 보류 중 등록한 제재(n2)는 지난 review_until 뒤에 만들어졌지만, 해제가 기준 시각을 맞춰 확정에서 제외된다 (D-78)
+    await act('POST', R, 2, 'review/hold');
+    await setUntil(-120);
+    const lateBan = await adm('POST', `/rankings/${R}/exclusions`, { token: root, body: { seasonNo: 2, memberId: 'n2', reason: 'found during hold' } });
+    const texts = [`review hold overdue ranking=${R} season=2`, `review hold cleared ranking=${R} season=2`];
+    const base = texts.map((t) => logCount('trvw', t));
+    startWorker('trvw', { REVIEW_HOLD_WARN_SEC: '1', DELIVERY_INTERVAL_MS: '500' });
+    const warned = await until(async () => logCount('trvw', texts[0]) > base[0], 20000);
+    await sleep(2000);
+    const warnCount = logCount('trvw', texts[0]) - base[0];
+    const held12 = await season();
+    check('V12 장기 보류 경고: 시작 때 한 번, 보류 중에는 확정하지 않음', warned >= 0 && warnCount === 1 && held12.st === 5 && held12.h === 1, `(${warned}ms, ${warnCount}번, 상태 ${held12.st})`);
+
+    await act('DELETE', R, 2, 'review/hold');
+    const delivered = await until(async () => (await season()).st === 7, 30000);
+    const cleared = await until(async () => logCount('trvw', texts[1]) > base[1], 20000);
+    const rows13 = await q('SELECT member_id m, final_rank r, reward_status s FROM ranking_entry WHERE ranking_id = ? AND season_no = 2 ORDER BY member_id', [R]);
+    const banned = rows13.filter((x) => x.r === null).map((x) => `${x.m}:${x.s}`).join();
+    check('V13 해제 뒤: 경고 해소 로그, 정산 잡이 확정, 보류 중 등록한 제재도 제외', lateBan.status === 200 && delivered >= 0 && cleared >= 0 && banned === 'n1:3,n2:3'
+        && rows13.filter((x) => x.r !== null).map((x) => x.r).sort((a, b) => a - b).join() === '1,2,3,4,5,6,7,8', `(${delivered}ms, ${cleared}ms, 제외 ${banned})`);
+
+    await sleep(300);
+    const audit = (await LM.query("SELECT action, target_id t, result_code r, after_json a FROM log_admin_audit WHERE admin_account_id = ? AND (action LIKE 'review.%' OR action = 'season.force_settle')", [rid]))[0];
+    const forceLog = audit.find((x) => x.action === 'season.force_settle' && x.r === 0 && x.a?.changed === true);
+    const missing = [['review.hold', 0], ['review.hold', 1701], ['review.release', 0], ['review.finalize', 0], ['review.finalize', 1702], ['season.force_settle', 1703]]
+        .filter(([action, r]) => !audit.some((x) => x.action === action && x.r === r));
+    check('V14 감사 로그: 보류·해제·조기 확정, 강제 종료의 사유·남은 수, 거부도 기록', forceLog?.t === `${D}:1` && forceLog.a?.reason === 'integration retired' && forceLog.a?.remaining === 3 && missing.length === 0,
+        `(${audit.length}건, 빠짐 ${JSON.stringify(missing)})`);
+}
+
 // ------------------------------------------------------------------------------------------------ 실행
 
 /** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
@@ -2771,7 +2942,7 @@ try {
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
         for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios], ['시즌 백업 분리', archiveScenarios],
-            ['관리 API', adminScenarios], ['관리 랭킹', rankingAdminScenarios], ['관리 제재', exclusionAdminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
+            ['관리 API', adminScenarios], ['관리 랭킹', rankingAdminScenarios], ['관리 제재', exclusionAdminScenarios], ['관리 검수', reviewAdminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);
