@@ -2917,7 +2917,12 @@ async function reviewAdminScenarios() {
 
     const exchanged = await callSp(A, 'SP_PARTITION_EXCHANGE', [1, D, 1]);
     const backup = await q(`SELECT member_id m, reward_status r FROM \`ranking_entry_r${D}_s1\` ORDER BY member_id`);
-    check('V11 백업 분리: 남은 PENDING이 상태 그대로 백업 테이블로', exchanged.result === 0 && backup.map((x) => `${x.m}:${x.r}`).join() === 'w0:2,w1:1,w2:1,w3:2', `(${exchanged.result}, ${backup.map((x) => `${x.m}:${x.r}`)})`);
+    // 분리 뒤 ack: 운영 테이블에 행이 없어 이미 DELIVERED(w0)든 PENDING(w1)이든 모두 notApplied (01_DESIGN 7.7)
+    const goneAck = await callSp(A, 'SP_UPDATE_REWARD_DELIVERED', [D, 1, JSON.stringify(['w0', 'w1'])]);
+    const gone = goneAck.rows.map((x) => x.member_id).sort().join();
+    check('V11 백업 분리: 남은 PENDING이 상태 그대로 백업 테이블로, 분리 뒤 ack는 결과 0·전원 notApplied(이미 DELIVERED 포함)',
+        exchanged.result === 0 && backup.map((x) => `${x.m}:${x.r}`).join() === 'w0:2,w1:1,w2:1,w3:2' && goneAck.result === 0 && gone === 'w0,w1',
+        `(${exchanged.result}, ${backup.map((x) => `${x.m}:${x.r}`)}, ack ${goneAck.result} [${gone}])`);
 
     // 보류 중 등록한 제재(n2)는 지난 review_until 뒤에 만들어졌지만, 해제가 기준 시각을 맞춰 확정에서 제외된다 (D-78)
     await act('POST', R, 2, 'review/hold');
