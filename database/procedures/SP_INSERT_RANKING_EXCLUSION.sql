@@ -11,6 +11,7 @@ BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_INSERT_RANKING_EXCLUSION
     -- 작성 : 2026.10.30 trisakion
+    -- 수정 : 2026.11.22 trisakion 등록 시각을 시즌 행 잠금 뒤에 읽음 (잠금 대기 중 FINALIZING 전이 경합)
     -- 내용 : POST /admin/v1/rankings/{id}/exclusions (01_DESIGN 7.8, 10.4, D-75, D-78).
     --        RESULT: 0 성공, 1001 파라미터, 1405 권한 부족, 1501 랭킹 없음, 1601 이미 같은 제재, 1602 시즌 없음 [codes.SpResult]
     --        성공 데이터: season_status (지정 시즌의 상태, 전 시즌은 NULL), live_seasons (Redis 순위표가 있을 수 있는 시즌 번호,
@@ -24,10 +25,13 @@ BEGIN
     --        - 시즌 행을 먼저 공유 잠금한다. DELIVERING 전이(X 락)와 줄을 세워, 전이가 읽기 전에 등록하면 전이가 표시하고
     --          전이 뒤에 등록하면 여기서 표시한다 — 어느 쪽에서도 빠지지 않는다(D-78). 전 시즌은 그 랭킹의 시즌 행 전체를 잠근다.
     --          잠그는 동안 스케줄러 상태 전이가 기다리지만 트랜잭션이 짧다.
+    --        - 등록 시각(created_at)은 잠금을 얻은 뒤에 읽는다. FINALIZING 전이는 review_until ≤ 지금일 때만 일어나므로,
+    --          전이 뒤에 잠금을 얻은 등록은 created_at ≥ review_until이 되어 DELIVERING 표시 대상이 된다. 시작 시각을 쓰면
+    --          잠금을 기다리는 사이 전이가 끝났을 때 review_until 전 시각이 박혀 확정 제외도 표시도 받지 못한다.
     --        - 중복은 INSERT IGNORE + ROW_COUNT로 판정한다. 길이는 앞에서 검사해 IGNORE가 잘림을 경고로 숨기지 않게 한다.
     --        - 잠금 순서: ranking_season(3) S → ranking_exclusion(4) X → ranking_entry(7) X → ranking_season_top(9) X.
     -- ------------------------------------------------------------------------------------------------------------ --
-    DECLARE v_now              DATETIME(3)     DEFAULT UTC_TIMESTAMP(3);
+    DECLARE v_now              DATETIME(3);
     DECLARE v_found            INT UNSIGNED;
     DECLARE v_status           TINYINT UNSIGNED;
     DECLARE v_live             TEXT;
@@ -78,6 +82,7 @@ BEGIN
              WHERE ranking_id = i_ranking_id
                FOR SHARE;
         END IF;
+        SET v_now = UTC_TIMESTAMP(3);
 
         INSERT IGNORE INTO ranking_exclusion (ranking_id, season_no, member_id, reason, created_by, created_at)
         VALUES (i_ranking_id, i_season_no, i_member_id, i_reason, i_requester_id, v_now);

@@ -2578,7 +2578,7 @@ async function rankingAdminScenarios() {
 /**
  * 관리 API 제재 회귀 (01_DESIGN 7.8, 10.4, D-75, D-78): 등록과 Redis 제외 집합·순위표, 제재 멤버 재제출 차단(반영 Lua),
  * 전 시즌 제재, 거부 코드, 목록과 등록자 이름, 해제와 원장 값 재반영, 검수 뒤 해제 거부, FINALIZING 중 제재의 DELIVERING 표시,
- * DELIVERING·분리된 시즌 표시, 복구 잡의 제외 집합 동기화(재구축 전), Redis 장애 중 등록, 감사 로그.
+ * DELIVERING·분리된 시즌 표시, 복구 잡의 제외 집합 동기화(재구축 전), Redis 장애 중 등록, 감사 로그, 잠금 대기 중 FINALIZING 전이 경합.
  * 포트: TEST_PORT(API), TEST_PORT+6(관리 API), TEST_PORT+7(Redis 없는 관리 API).
  * @returns 없음
  */
@@ -2601,6 +2601,34 @@ async function exclusionAdminScenarios() {
         [[0, 1, 2, 3, 4].flatMap((i) => [entry(1, 'u', i), entry(3, 'v', i)])]);
     await q('INSERT INTO ranking_season_top (ranking_id, season_no, final_rank, member_id, score, sanctioned) VALUES ?',
         [[...[0, 1, 2, 3, 4].map((i) => [D, 1, i + 1, `u${i}`, 50 - i, 0]), ...[0, 1, 2].map((i) => [D, 2, i + 1, `u${i}`, 50 - i, 0])]]);
+
+    // 경합(J14): 등록이 시즌 행 잠금을 기다리는 사이 FINALIZING 전이가 끝나면 등록 시각은 review_until 이후여야 한다.
+    // 워커가 시즌 4를 확정하지 않게 워커를 띄우기 전에 재고 지운다.
+    await adminCli(['create', '--login-id', 'rtest-exrace', '--name', 'Race']);
+    const [{ race }] = await q("SELECT admin_account_id race FROM admin_account WHERE login_id = 'rtest-exrace'");
+    await createSeason(D, 4, -600, -300, 5, false);
+    await q('UPDATE ranking_season SET review_until = UTC_TIMESTAMP(3) + INTERVAL 1 HOUR WHERE ranking_id = ? AND season_no = 4', [D]);
+    const holder = await M.getConnection();
+    let raced;
+    try {
+        await holder.query('START TRANSACTION');
+        await holder.query('SELECT status FROM ranking_season WHERE ranking_id = ? AND season_no = 4 FOR UPDATE', [D]);
+        const t0 = Date.now();
+        const pending = callSp(A, 'SP_INSERT_RANKING_EXCLUSION', [race, D, 4, 'w1', 'race']);
+        await sleep(300);
+        await holder.query('UPDATE ranking_season SET status = 6, review_until = UTC_TIMESTAMP(3) WHERE ranking_id = ? AND season_no = 4', [D]);
+        await holder.query('COMMIT');
+        const sp = await pending;
+        const [row] = await q(`SELECT x.created_at >= s.review_until late FROM ranking_exclusion x
+                                 JOIN ranking_season s ON s.ranking_id = x.ranking_id AND s.season_no = x.season_no
+                                WHERE x.ranking_id = ? AND x.season_no = 4 AND x.member_id = 'w1'`, [D]);
+        raced = { sp: sp.result, waited: Date.now() - t0, late: row?.late };
+    } finally {
+        await holder.query('ROLLBACK');
+        holder.release();
+    }
+    await q('DELETE FROM ranking_exclusion WHERE ranking_id = ? AND season_no = 4', [D]);
+    await q('DELETE FROM ranking_season WHERE ranking_id = ? AND season_no = 4', [D]);
 
     const writeKey = randomBytes(32).toString('base64url');
     await callSp(M, 'SP_INSERT_API_CREDENTIAL', ['rtest-exc', hashApiKey(writeKey), ApiScope.WRITE]);
@@ -2746,6 +2774,8 @@ async function exclusionAdminScenarios() {
     const failed = [['exclusion.create', 1601], ['exclusion.create', 1602], ['exclusion.delete', 1604], ['exclusion.delete', 1603]]
         .filter(([action, r]) => !audit.some((x) => x.action === action && x.r === r));
     check('J13 감사 로그: 등록(시즌 상태)·해제(지운 행), 거부도 기록', created && removed && failed.length === 0, `(${audit.length}건, 빠짐 ${JSON.stringify(failed)})`);
+    check('J14 잠금 대기 중 FINALIZING 전이: 등록 시각을 잠금 뒤에 읽어 review_until 이후 (DELIVERING 표시 대상, 빠지지 않음)',
+        raced.sp === 0 && raced.waited >= 250 && raced.late === 1, JSON.stringify(raced));
 }
 
 /**

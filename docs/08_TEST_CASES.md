@@ -201,6 +201,7 @@
 | J11 | 복구 잡: 재구축 전에 제외 집합을 DB에 맞춤 (DB에만 있는 제재 SADD·제외, Redis에만 남은 제재 SREM·재반영) |
 | J12 | Redis 장애 중 등록: DB 반영·redisSynced false, 복구 잡이 제외 집합·순위표를 맞춤 |
 | J13 | 감사 로그: 등록(시즌 상태)·해제(지운 행), 거부도 기록 |
+| J14 | 잠금 대기 중 FINALIZING 전이: 등록 시각을 잠금 뒤에 읽어 review_until 이후 (DELIVERING 표시 대상, 빠지지 않음) |
 
 ## 관리 검수
 
