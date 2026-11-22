@@ -23,7 +23,7 @@ export async function reapplyMember(db: Pool | PoolConnection, redis: Redis, ran
     const r = rows[0];
     if (!r)
         return null;
-    const rule: RankingRule = { updateRule: r.update_rule, sortOrder: r.sort_order, timeUnit: r.time_unit, timeBits: r.time_bits, maxSubmitPerMin: null };
+    const rule: RankingRule = { updateRule: r.update_rule, sortOrder: r.sort_order, timeUnit: r.time_unit, timeBits: r.time_bits, maxSubmitPerMin: null, suspicion: null };
     return reconcileScore(redis, seasonKeys(rankingId, seasonNo), {
         rankingId, seasonNo, memberId, composite: composite(rule, Number(r.score), r.achieved_at, r.start_at), version: r.version, ...applyMode(rule),
     });

@@ -30,7 +30,7 @@ GM 도구(관리 API)로 행을 만든다. `api_credential`은 CLI로 만든다.
 | `ranking_submit_key` | 제출 멱등 키 (재전송 판별, 하드 검증 거부 사유) | 제출 API | — | 시즌 | 자기 시즌 SETTLED에 분리 | [4.4](01_DESIGN.md#s-4-4), [8.2](01_DESIGN.md#s-8-2) |
 | `ranking_entry_settling` | 정산 작업 테이블 (entry 시즌 파티션을 꺼내 가순위를 매긴 뒤 되돌림) | 정산 잡 | — | — | 평소 비어 있음 | [7.3](01_DESIGN.md#s-7-3) |
 | `ranking_season_top` | 시즌별 상위 `top_size` | 정산 잡 (FINALIZING) | — (검수 후 제재 시 `sanctioned`는 제재 처리가 갱신, [D-78](02_DECISIONS.md#d-78)) | — | 영구 | [8.4](01_DESIGN.md#s-8-4) |
-| `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지) | — | — | 영구 | [9.2](01_DESIGN.md#s-9-2), [9.3](01_DESIGN.md#s-9-3) |
+| `ranking_suspicion` | 어뷰징 포인트 근거 (규칙별 가중치) | 리컨실러 (소프트 탐지), 제출 SP (하드 검증 거부) | — | — | 영구 | [9.2](01_DESIGN.md#s-9-2), [9.3](01_DESIGN.md#s-9-3) |
 | `log_ddl_audit` | `SP_EXEC_DDL` 실행 감사 로그 | 관리 SP | — | — | 영구 | [11.4](01_DESIGN.md#s-11-4) |
 | `job_state` | 워커 잡별 동기화 시각 (리컨실러 등) | 워커 잡 | — | — | 영구 | [11.4](01_DESIGN.md#s-11-4) |
 | `instance_heartbeat` | 실행 중인 API·워커·관리 API 인스턴스 | API·워커·관리 API 하트비트 | — | — | 정상 종료 시 삭제, 1시간 경과 행 정리 | [11.4](01_DESIGN.md#s-11-4) |

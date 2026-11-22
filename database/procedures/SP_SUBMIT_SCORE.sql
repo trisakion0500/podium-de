@@ -46,6 +46,10 @@ BEGIN
     --          같은 requestId로 재시도). 세션 변수라 풀 커넥션의 다른 SP에 남지 않게 끝에서 되돌린다.
     -- 수정 : 2026.10.09 trisakion 락 대기 5초 제한 (리컨실러 안전마진 보장)
     -- 수정 : 2026.10.10 trisakion NOW(3) → UTC_TIMESTAMP(3) (호출 세션 time_zone과 무관하게 UTC, D-66)
+    -- 수정 : 2026.11.22 trisakion 하드 검증 거부를 어뷰징 근거(REJECTED)로 적재 (01_DESIGN 9.2, D-83)
+    --        - 거부 분기는 트랜잭션을 끝낸 뒤 한 출구로 모인다. 출구에서 suspicion_config에 REJECTED가 켜져 있으면
+    --          ranking_suspicion에 단독 자동 커밋 INSERT IGNORE한다. 트랜잭션 밖이라 잠금 순서(suspicion 5 → submit_key 6)와
+    --          겹치지 않는다. 재전송의 같은 거부도 다시 적재한다 — 적재 실패(50001) 뒤 재시도가 근거를 채운다(UNIQUE라 한 번만 남는다).
     -- ------------------------------------------------------------------------------------------------------------ --
     DECLARE v_now              DATETIME(3)        DEFAULT UTC_TIMESTAMP(3);
     DECLARE v_status           TINYINT UNSIGNED;
@@ -56,6 +60,8 @@ BEGIN
     DECLARE v_season_start     DATETIME(3);
     DECLARE v_season_end       DATETIME(3);
     DECLARE v_rejected         VARCHAR(32);
+    DECLARE v_reject_weight    INT UNSIGNED;
+    DECLARE v_reject_reason    VARCHAR(32);
     DECLARE v_key_dup          TINYINT(1)         DEFAULT 0;
     DECLARE v_key_member       VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
     DECLARE v_key_input        BIGINT;
@@ -93,8 +99,9 @@ BEGIN
             LEAVE proc_block;
         END IF;
 
-        SELECT status, update_rule, sort_order, score_max, max_delta
-          INTO v_status, v_update_rule, v_sort_order, v_score_max, v_max_delta
+        -- 규칙이 꺼져 있으면(설정 NULL, rules에 없음) 가중치가 NULL이라 적재하지 않는다 (9.3).
+        SELECT status, update_rule, sort_order, score_max, max_delta, suspicion_config->>'$.rules.REJECTED.weight'
+          INTO v_status, v_update_rule, v_sort_order, v_score_max, v_max_delta, v_reject_weight
           FROM ranking_definition
          WHERE ranking_id = i_ranking_id;
         IF v_status IS NULL THEN
@@ -158,18 +165,14 @@ BEGIN
                 END IF;
                 IF v_key_rejected IS NOT NULL THEN
                     ROLLBACK;
-                    SELECT CASE v_key_rejected
-                               WHEN 'SCORE_RANGE' THEN 1105
-                               WHEN 'MAX_DELTA'   THEN 1106
-                               ELSE 1107
-                           END AS RESULT;
-                    LEAVE proc_block;
+                    SET v_reject_reason = v_key_rejected;
+                    LEAVE txn;
                 END IF;
                 SET v_replayed = 1;
             ELSEIF v_rejected IS NOT NULL THEN
                 COMMIT;
-                SELECT IF(v_rejected = 'SCORE_RANGE', 1105, 1106) AS RESULT;
-                LEAVE proc_block;
+                SET v_reject_reason = v_rejected;
+                LEAVE txn;
             ELSEIF v_update_rule = 1 THEN
                 -- 4.3. 정렬 방향에 따라 "더 좋은 기록"의 비교가 반대다 (1:DESC, 2:ASC [codes.SortOrder]).
                 INSERT INTO ranking_entry (ranking_id, season_no, member_id, score, achieved_at, version, updated_at)
@@ -196,8 +199,8 @@ BEGIN
                         UPDATE ranking_submit_key SET rejected = 'SCORE_MAX'
                          WHERE ranking_id = i_ranking_id AND season_no = i_season_no AND request_id = i_request_id;
                         COMMIT;
-                        SELECT 1107 AS RESULT;
-                        LEAVE proc_block;
+                        SET v_reject_reason = 'SCORE_MAX';
+                        LEAVE txn;
                     END IF;
                     insert_entry: BEGIN
                         DECLARE CONTINUE HANDLER FOR 1062 SET v_entry_dup = 1;
@@ -228,8 +231,8 @@ BEGIN
                         UPDATE ranking_submit_key SET rejected = 'SCORE_MAX'
                          WHERE ranking_id = i_ranking_id AND season_no = i_season_no AND request_id = i_request_id;
                         COMMIT;
-                        SELECT 1107 AS RESULT;
-                        LEAVE proc_block;
+                        SET v_reject_reason = 'SCORE_MAX';
+                        LEAVE txn;
                     END IF;
                     IF v_new <> v_cur THEN
                         UPDATE ranking_entry
@@ -250,6 +253,21 @@ BEGIN
                FOR SHARE;
             LEAVE txn;
         END LOOP txn;
+
+        -- 거부 출구: 트랜잭션은 위에서 끝났다(거부 키 커밋 또는 재전송 롤백).
+        IF v_reject_reason IS NOT NULL THEN
+            IF v_reject_weight IS NOT NULL THEN
+                INSERT IGNORE INTO ranking_suspicion (ranking_id, season_no, member_id, rule_code, weight, evidence, created_at)
+                VALUES (i_ranking_id, i_season_no, i_member_id, 'REJECTED', v_reject_weight,
+                        JSON_OBJECT('reason', v_reject_reason, 'requestId', i_request_id, 'inputValue', i_input_value), v_now);
+            END IF;
+            SELECT CASE v_reject_reason
+                       WHEN 'SCORE_RANGE' THEN 1105
+                       WHEN 'MAX_DELTA'   THEN 1106
+                       ELSE 1107
+                   END AS RESULT;
+            LEAVE proc_block;
+        END IF;
 
         COMMIT;
 

@@ -543,6 +543,8 @@ PARTITION BY RANGE COLUMNS (`created_at`) (
 | `rk:{rankingId}:s:{seasonNo}:ver` | HASH | member별 version (SUM, LATEST) |
 | `rk:{rankingId}:s:{seasonNo}:ready` | STRING | 쓰기 허용 센티넬 ([5.3](#s-5-3)). 값은 Redis가 MySQL을 어느 시각까지 따라잡았는지 나타내는 DB 시각 T(ms) ([6.2](#s-6-2)) |
 | `rk:{rankingId}:rl:{memberId}` | STRING | 제출 빈도 카운터 (TTL로 자동 만료) |
+| `rk:{rankingId}:s:{seasonNo}:sb` | HASH | 소프트 탐지 점수 기준선 (member → 점수:시각 ms, [9.2](#s-9-2)). 정산 때 함께 삭제 |
+| `rk:{rankingId}:s:{seasonNo}:rb` | HASH | 소프트 탐지 순위 기준선 (member → 순위:시각 ms). 정산 때 함께 삭제 |
 | `rk:{rankingId}:s:{seasonNo}:excl` | SET | 이 시즌 제재 멤버 ([7.8](#s-7-8), [D-75](02_DECISIONS.md#d-75)). 정산 때 다른 시즌 키와 함께 삭제 |
 | `rk:{rankingId}:excl` | SET | 전 시즌 제재 멤버 (`season_no = 0`). 랭킹마다 하나, 지우지 않음 |
 
@@ -667,7 +669,7 @@ Redis 반영 실패 시 짧은 백오프로 재시도한다.
 - 반드시 마스터에서 읽는다. 레플리카는 복제 지연이 안전마진을 넘으면 행을 놓친다.
 - 동기화 시각은 `job_state.synced_at`(`job_name = 'reconciler'`)에 두고, `GET_LOCK('podium:recovery')`로 단일 실행을 보장한다.
 - 1분마다 랭킹별로 제외 목록을 DB에서 읽어 제외 집합을 맞추고(`SADD`/`SREM`), 순위표에 남은 제재 멤버를 `ZREM`한다. Redis에만 남은 멤버(해제 때 Redis 실패)는 원장 값으로 다시 반영한다. Redis를 DB보다 먼저 읽는다 — 반대로 읽으면 그 사이 등록된 제재를 지운다([D-75](02_DECISIONS.md#d-75)).
-- 같은 스캔에서 어뷰징 소프트 탐지([9.2](#s-9-2))를 수행한다 (6단계 구현 예정).
+- 같은 스캔에서 변경분 멤버를 대상으로 소프트 탐지([9.2](#s-9-2))를 한다. 재구축(L3)에서는 하지 않는다.
 - 리컨실러도 라이브 키에 쓰므로 센티넬 확인 Lua를 사용한다. 그래야 정산의 키 삭제 후 키가 되살아나지 않는다. 예외는 재구축 따라잡기([6.3](#s-6-3))로, 센티넬과 무관한 임시 키에 쓴다.
 
 ### <a id="s-6-3"></a>6.3 L3 전체 재구축
@@ -1015,6 +1017,27 @@ settling에 다른 시즌 행                                    → 멈춤, 알
 
 플레이의 정당성 검증은 게임 서버의 책임이다. 랭킹 서버는 도메인을 몰라도 판단 가능한 이상 징후만 다룬다.
 
+### <a id="s-9-0"></a>9.0 개요
+
+수상한 기록을 자동으로 처벌하지 않는다. 의심 근거를 점수(어뷰징 포인트)로 쌓아 두고, 검수 기간에 GM이 포인트 높은 순으로 보고 판단한다. 오탐이 정상 유저를 해치지 않게 하기 위해서다([D-77](02_DECISIONS.md#d-77)).
+
+| 단계 | 하는 일 | 예 |
+| --- | --- | --- |
+| 하드 검증 ([9.1](#s-9-1)) | 말이 안 되는 제출은 받지 않는다 | 최대 8,000점인 랭킹에 9,000점, 1분에 너무 잦은 제출 |
+| 소프트 탐지 ([9.2](#s-9-2)) | 가능하지만 수상한 기록은 받고, 근거만 남긴다 | 아래 4규칙 |
+| 어뷰징 포인트 ([9.3](#s-9-3)) | 걸린 규칙의 가중치 합. 같은 규칙은 시즌당 한 번만 센다 | 속도 30 + 순위 급등 40 = 70 |
+| 검수 ([7.5](#s-7-5)) | GM이 보상 대상자를 포인트순으로 보고 제재하거나 둔다 | 제재하면 확정 때 제외·미지급, 두면 그대로 지급 |
+
+| 규칙 | 뜻 | 예 | 적용 |
+| --- | --- | --- | --- |
+| `VELOCITY` | 1시간 안에 너무 많이 벌었다 | 시간당 1,000점이 보통인데 1시간에 5만 점 | SUM |
+| `RANK_JUMP` | 짧은 시간에 순위가 크게 올랐다 | 10분 만에 3,000위 → 5위 | 모두 |
+| `BEST_JUMP` | 최고 기록이 갑자기 몇 배가 됐다 | 늘 100점대이던 기록이 600점 | BEST |
+| `REJECTED` | 하드 검증에 걸린 적이 있다 | 9,000점 제출이 거부됨 | 모두 |
+
+- "갑자기"를 알려면 이전 값이 필요하다. 리컨실러가 몇 초마다 바뀐 멤버를 훑으면서 Redis에 이전 점수·순위(기준선)를 적어 두고 비교한다([D-83](02_DECISIONS.md#d-83)).
+- 기준 값(시간당 몇 점, 몇 위, 몇 배)과 가중치는 랭킹마다 `suspicion_config`로 정한다. 설정이 없으면 탐지하지 않는다.
+
 ### <a id="s-9-1"></a>9.1 하드 검증 (적재 시 거부)
 
 | 검증 | 기준 |
@@ -1037,7 +1060,17 @@ settling에 다른 시즌 행                                    → 멈춤, 알
 - **BEST 급등:** 새 기록이 이전 최고의 N배 이상
 - **하드 검증 거부:** [9.1](#s-9-1)의 거부도 근거로 쌓는다
 
-리컨실러 스캔([6.2](#s-6-2))에서 비동기로 수행한다(6단계 구현 예정). 오탐이 정상 유저를 해치지 않도록 거부하지 않는다.
+오탐이 정상 유저를 해치지 않도록 거부하지 않는다. 방식은 [D-83](02_DECISIONS.md#d-83)이다.
+
+| 규칙 | 어디서 | 비교 대상 |
+| --- | --- | --- |
+| `VELOCITY` (SUM) | 리컨실러 L2 스캔 | 점수 기준선 `:sb` (1시간 창). 없으면 첫 행만 0점 기준 |
+| `RANK_JUMP` | 리컨실러 L2 스캔 | 순위 기준선 `:rb` (`withinMinutes` 창). 없으면 기준선만 세움 |
+| `BEST_JUMP` (BEST) | 리컨실러 L2 스캔 | 마지막으로 본 기록 `:sb` |
+| `REJECTED` | `SP_SUBMIT_SCORE` 거부 커밋 뒤 | — (거부 사유·requestId를 근거로) |
+
+- 기준선은 Redis에만 둔다. 유실되면 한 창 동안 탐지하지 못한다.
+- 창은 고정 창의 근사라, 창 경계에 걸친 증가는 놓칠 수 있다.
 
 ### <a id="s-9-3"></a>9.3 어뷰징 포인트
 
@@ -1052,7 +1085,8 @@ CREATE TABLE `ranking_suspicion` (
     `evidence`        JSON                                  NOT NULL                      COMMENT '탐지 근거 (규칙별 수치)',
     `created_at`      DATETIME(3)                           NOT NULL                      COMMENT '탐지 시각 (UTC)',
     PRIMARY KEY (`suspicion_id`),
-    KEY `ix_member_id` (`ranking_id`, `season_no`, `member_id`)
+    KEY `ix_member_id` (`ranking_id`, `season_no`, `member_id`),
+    UNIQUE KEY `ux_rule` (`ranking_id`, `season_no`, `member_id`, `rule_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='어뷰징 포인트 근거';
 ```
 
@@ -1071,7 +1105,7 @@ CREATE TABLE `ranking_suspicion` (
 
 - **규칙:** `VELOCITY`는 SUM, `BEST_JUMP`는 BEST에만 적용한다. `REJECTED`는 하드 검증 거부([9.1](#s-9-1))다.
 - **꺼짐:** 설정이 NULL이면 탐지하지 않는다. `rules`에 없는 규칙은 꺼진 것이다.
-- **적재:** 같은 규칙은 시즌·멤버마다 한 번만 적재한다. `(ranking_id, season_no, member_id, rule_code)` UNIQUE는 새 V 파일로 6단계 구현 예정이다. 포인트 상한은 켜진 규칙 가중치의 합이다.
+- **적재:** 같은 규칙은 시즌·멤버마다 한 번만 적재한다(`(ranking_id, season_no, member_id, rule_code)` UNIQUE, `INSERT IGNORE`). 포인트 상한은 켜진 규칙 가중치의 합이다.
 - **형식 검증:** 관리 API의 랭킹 등록·수정에서 한다.
 
 - 포인트는 근거 행의 가중치 합으로 계산한다. 가중치는 `suspicion_config`에 둔다.

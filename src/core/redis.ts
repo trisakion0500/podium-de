@@ -185,12 +185,13 @@ export async function closeRedis(client: Redis): Promise<void> {
  * @author trisakion
  * @modified 2026-10-09 trisakion 재구축 임시 키 추가
  * @modified 2026-10-30 trisakion 제외 집합(시즌, 전 시즌) 추가 (D-75)
+ * @modified 2026-11-22 trisakion 소프트 탐지 기준선 추가 (D-83)
  */
 export function seasonKeys(rankingId: number, seasonNo: number): SeasonKeys {
     const board = `${config.redis.keyPrefix}rk:{${rankingId}}:s:${seasonNo}`;
     return {
         board, ver: `${board}:ver`, ready: `${board}:ready`, rebuild: `${board}:rebuild`, rebuildVer: `${board}:rebuild:ver`,
-        excl: `${board}:excl`, rankingExcl: rankingExclKey(rankingId),
+        excl: `${board}:excl`, rankingExcl: rankingExclKey(rankingId), scoreBase: `${board}:sb`, rankBase: `${board}:rb`,
     };
 }
 
@@ -223,6 +224,10 @@ export interface SeasonKeys {
     excl: string;
     /** 전 시즌 제외 멤버 SET (랭킹 공용) */
     rankingExcl: string;
+    /** 소프트 탐지 점수 기준선 HASH (D-83) */
+    scoreBase: string;
+    /** 소프트 탐지 순위 기준선 HASH (D-83) */
+    rankBase: string;
 }
 
 /**
@@ -495,9 +500,59 @@ export async function finishRebuild(client: Redis, keys: SeasonKeys, syncedAt: D
  * @returns 완료 Promise
  * @author trisakion
  * @modified 2026-10-30 trisakion 시즌 제외 집합도 삭제
+ * @modified 2026-11-22 trisakion 소프트 탐지 기준선도 삭제 (D-83)
  */
 export async function deleteSeasonKeys(client: Redis, keys: SeasonKeys): Promise<void> {
-    await withTimeout(client.unlink([keys.ready, keys.board, keys.ver, keys.rebuild, keys.rebuildVer, keys.excl]));
+    await withTimeout(client.unlink([keys.ready, keys.board, keys.ver, keys.rebuild, keys.rebuildVer, keys.excl, keys.scoreBase, keys.rankBase]));
+}
+
+/**
+ * 소프트 탐지 기준선 한 묶음 (01_DESIGN 9.2, D-83). 값은 "수:시각ms" 문자열이다
+ * @author trisakion
+ */
+export interface Baseline {
+    /** 점수 기준선 (:sb, 없으면 null) */
+    score: string | null;
+    /** 순위 기준선 (:rb, 없으면 null) */
+    rank: string | null;
+    /** 지금 순위 (0부터, 순위표에 없으면 null) */
+    rankNow: number | null;
+}
+
+/**
+ * 멤버들의 기준선과 지금 순위를 읽는다 (리컨실러 소프트 탐지). 명령을 한꺼번에 보내 자동 파이프라인으로 묶인다.
+ * @param client Redis 클라이언트
+ * @param keys 시즌 키
+ * @param members 멤버 ID 목록 (1개 이상)
+ * @param rev 순위 방향 (DESC면 true: ZREVRANK)
+ * @returns 멤버 순서대로 기준선
+ * @author trisakion
+ */
+export async function readBaselines(client: Redis, keys: SeasonKeys, members: string[], rev: boolean): Promise<Baseline[]> {
+    const [scores, ranks, now] = await withTimeout(Promise.all([
+        client.hmGet(keys.scoreBase, members),
+        client.hmGet(keys.rankBase, members),
+        Promise.all(members.map((m) => (rev ? client.zRevRank(keys.board, m) : client.zRank(keys.board, m)))),
+    ]));
+    return members.map((_, i) => ({ score: scores[i] ?? null, rank: ranks[i] ?? null, rankNow: now[i] ?? null }));
+}
+
+/**
+ * 기준선을 쓴다. 바뀐 것만 넘긴다.
+ * @param client Redis 클라이언트
+ * @param keys 시즌 키
+ * @param score 점수 기준선 (member → "점수:시각ms")
+ * @param rank 순위 기준선 (member → "순위:시각ms")
+ * @returns 완료 Promise
+ * @author trisakion
+ */
+export async function writeBaselines(client: Redis, keys: SeasonKeys, score: Record<string, string>, rank: Record<string, string>): Promise<void> {
+    const writes: Promise<unknown>[] = [];
+    if (Object.keys(score).length)
+        writes.push(client.hSet(keys.scoreBase, score));
+    if (Object.keys(rank).length)
+        writes.push(client.hSet(keys.rankBase, rank));
+    await withTimeout(Promise.all(writes));
 }
 
 /**

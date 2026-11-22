@@ -31,6 +31,21 @@ export interface RankingRule {
     timeBits: number;
     /** 멤버별 분당 최대 제출 수 (null: 제한 없음) */
     maxSubmitPerMin: number | null;
+    /** 소프트 탐지 규칙 (01_DESIGN 9.3, null: 끔). 형식은 관리 API가 등록·수정 때 검증한다 */
+    suspicion: SuspicionConfig | null;
+}
+
+/**
+ * suspicion_config (01_DESIGN 9.3, D-76). rules에 없는 규칙은 꺼진 것이다
+ * @author trisakion
+ */
+export interface SuspicionConfig {
+    rules: {
+        VELOCITY?: { weight: number; maxPerHour: number };
+        RANK_JUMP?: { weight: number; ranks: number; withinMinutes: number };
+        BEST_JUMP?: { weight: number; ratio: number };
+        REJECTED?: { weight: number };
+    };
 }
 
 /** ranking_id → 정의. 재조회 때 통째로 바꿔 끼운다 */
@@ -51,6 +66,7 @@ async function load(pool: Pool): Promise<number> {
         timeUnit: r.time_unit,
         timeBits: r.time_bits,
         maxSubmitPerMin: r.max_submit_per_min,
+        suspicion: r.suspicion_config ?? null,
     }]));
     return rankings.size;
 }

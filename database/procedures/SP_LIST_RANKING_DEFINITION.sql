@@ -12,6 +12,7 @@ BEGIN
     --        - 상태(status)는 참고용이다. 제출 허용 여부는 SP_SUBMIT_SCORE가 원장 기준으로 다시 판정한다.
     --        - 순위 규칙은 등록 후 불변이라 캐시가 늦어도 틀리지 않는다. 늦게 반영되는 것은 max_submit_per_min뿐이다.
     --        - 잠그지 않는 일반 SELECT라 잠금 순서 대상이 아니다.
+    -- 수정 : 2026.11.22 trisakion suspicion_config 추가 (리컨실러 소프트 탐지, 01_DESIGN 9.2, D-83). 늦게 반영되어도 탐지가 30초 늦을 뿐이다.
     -- ------------------------------------------------------------------------------------------------------------ --
     DECLARE sql_state          CHAR(5)         DEFAULT '00000';
     DECLARE error_no           INT             DEFAULT 0;
@@ -24,7 +25,7 @@ BEGIN
     END;
 
     SELECT 0 AS RESULT;
-    SELECT ranking_id, status, update_rule, sort_order, time_unit, time_bits, max_submit_per_min
+    SELECT ranking_id, status, update_rule, sort_order, time_unit, time_bits, max_submit_per_min, suspicion_config
       FROM ranking_definition
      ORDER BY ranking_id;
 END$$

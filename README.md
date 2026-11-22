@@ -141,7 +141,7 @@ API, 워커, 관리 API는 같은 코드베이스의 별도 엔트리다. 테이
 - **정산** — 가순위 생성 → 검수 → 확정 → 일괄 보상 전달(게임 서버 pull + ack)
 - **보상 구간** — 순위(RANK) 또는 참가자 대비 백분율(PERCENT). 한 사람은 보상 하나만 받고, 겹치면 RANK가 먼저다. 판정 규칙: [01_DESIGN 2.6](docs/01_DESIGN.md#s-2-6)
 - **제재** — 시즌 중 실시간 순위 제외, 검수 전 제재는 확정에서 제외 후 순위 재부여, 검수 후 제재는 표시만
-- **Anti-cheat** — 소프트 탐지, 어뷰징 포인트 (6단계 구현 예정)
+- **Anti-cheat** — 소프트 탐지 4규칙(속도·순위 급등·BEST 급등·하드 검증 거부), 어뷰징 포인트순 검수 목록
 - **관리 API** — GM 계정·역할·감사 로그, 랭킹 등록·수정, 제재 등록·해제
 - **아카이브** — 시즌별 백업 테이블, 시즌별 Top N 영구 보관(ranking_season_top)
 
@@ -259,7 +259,7 @@ MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 �
   - ✅ 랭킹 등록·수정 — 등록 검증(비트 예산, 일정 시험 계산, 정산 기간, 보상 구간), 묶음별 수정, 늘리기·줄이기·조기 종료·ENDED·PAUSED, 스케줄러 락 직렬화, 현재 시즌 캐시 30초 상한 ([D-79](docs/02_DECISIONS.md#d-79), [D-81](docs/02_DECISIONS.md#d-81))
   - ✅ 제재 — 반영 Lua 제외 집합, 등록·해제·목록 API, 리컨실러 1분 동기화, 재구축 전 다시 채우기, 검수 전 제재만 확정 제외·검수 후 제재는 표시만 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
   - ✅ 검수·전달 조작 — 검수 보류·해제·조기 확정, 장기 보류 알림, 포인트순 검수 목록, 작업 대기 시즌 목록, DELIVERING 강제 종료 ([D-82](docs/02_DECISIONS.md#d-82))
-  - ⬜ Anti-cheat — 소프트 탐지 4규칙, 탐지 중복 방지 ([D-76](docs/02_DECISIONS.md#d-76), [D-77](docs/02_DECISIONS.md#d-77))
+  - ✅ Anti-cheat — 소프트 탐지 4규칙(리컨실러 Redis 기준선, 거부는 제출 SP), 시즌·멤버·규칙당 1회 적재 ([D-76](docs/02_DECISIONS.md#d-76), [D-77](docs/02_DECISIONS.md#d-77), [D-83](docs/02_DECISIONS.md#d-83))
   - ⬜ 정리 — `reward_held` 조건 제거(SP, 회귀 테스트, 03_DEV_SETUP 문구)
   - ⬜ 설치 패키징 — 배포 형태, 설치 절차, 설정 안내
 - ⬜ 7단계: 운영 웹 프론트엔드 (보상 공백 표시 포함, [D-69](docs/02_DECISIONS.md#d-69))

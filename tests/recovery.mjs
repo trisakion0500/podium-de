@@ -12,7 +12,7 @@
  *
  * - 워커와 API·관리 API를 직접 띄우고 끝나면 끈다. API 포트는 TEST_PORT(기본 3199)부터 6개, 관리 API는 그다음 2개(Redis 없는 관리 API 포함). 강제 종료라 하트비트가 남아,
  *   끝난 뒤 30초 동안은 migrate가 거부된다(05_TROUBLESHOOTING 1.1).
- * - 테스트 랭킹 940~979를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션·시즌 백업 테이블, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키,
+ * - 테스트 랭킹 940~982를 쓰고, 시작 전과 끝난 뒤에 모두 지운다(MySQL 행·파티션·시즌 백업 테이블, 보상 구간, Top N, job_state, 제출 이력, Redis 키, 테스트 API 키,
  *   rtest- 관리 계정·세션·감사 로그).
  * - 로그 정리 구간은 개발 로그 DB의 일 파티션을 실제로 만들고(오늘 + 7일까지), 90일이 지난 파티션을 월 테이블로 옮긴다.
  *   테스트가 쓰는 달(100일 전 무렵, 12·13개월 전)의 월 테이블은 시작 전과 끝난 뒤에 지운다.
@@ -52,7 +52,7 @@ const { createClient } = await import('redis');
 const IDS = { best: 941, sum: 942, lock: 943, apiBest: 944, apiSum: 945, fixed: 946, single: 947, ended: 948, settleDesc: 949, settleAsc: 950, settleEmpty: 951, settleNoPart: 952, broken: 940,
     finAdd: 953, finAllBanned: 954, finSmall: 955, finPercent: 956, finAlone: 957, finMixed: 958, finMixedSmall: 959, dlv: 960, dlvEmpty: 961, dlvReview: 962, dlvF1: 963, dlvF2: 964,
     fxSum: 965, fxRate: 966, fxPaused: 967, fxSettle: 968, fxBest: 969, arc: 970, arcLast: 971, rkShort: 972, rkExtend: 973, rkOver: 974, rkEnd: 975,
-    exc: 976, excDlv: 977, rev: 978, revDlv: 979 };
+    exc: 976, excDlv: 977, rev: 978, revDlv: 979, sus: 980, susBest: 981, susOff: 982 };
 const ALL_IDS = Object.values(IDS);
 /** 관리 API로 등록한 테스트 랭킹의 코드 접두어. ID는 AUTO_INCREMENT라 코드로 찾아 지운다 */
 const RK_CODE = 'rtk-';
@@ -2954,6 +2954,88 @@ async function reviewAdminScenarios() {
         `(${audit.length}건, 빠짐 ${JSON.stringify(missing)})`);
 }
 
+// ------------------------------------------------------------------------------------------------ 소프트 탐지
+
+/**
+ * 소프트 탐지 Q1~Q7 (01_DESIGN 9.2, 9.3, D-83). 제출은 MySQL에만 하고 리컨실러가 반영·탐지한다.
+ * 기준선은 리컨실러가 한 번 본 뒤에 생기므로, 다음 제출 전에 기준선이 생길 때까지 기다린다.
+ * @returns 없음
+ */
+async function suspicionScenarios() {
+    const S = IDS.sus;
+    const B = IDS.susBest;
+    const OFF = IDS.susOff;
+    await createRanking(S, 2);
+    await createRanking(B, 1);
+    await createRanking(OFF, 1);
+    await q('UPDATE ranking_definition SET suspicion_config = ? WHERE ranking_id = ?', [JSON.stringify({ rules: {
+        VELOCITY: { weight: 30, maxPerHour: 100 }, RANK_JUMP: { weight: 40, ranks: 3, withinMinutes: 10 }, REJECTED: { weight: 10 } } }), S]);
+    await q('UPDATE ranking_definition SET suspicion_config = ? WHERE ranking_id = ?', [JSON.stringify({ rules: {
+        VELOCITY: { weight: 30, maxPerHour: 1 }, BEST_JUMP: { weight: 30, ratio: 5 }, REJECTED: { weight: 10 } } }), B]);
+    const sub = async (id, member, value, req = `rq-${Date.now()}-${seq++}`) => (await callSp(A, 'SP_SUBMIT_SCORE', [id, 1, member, value, req])).result;
+    const rows = async (id) => q('SELECT member_id m, rule_code c, weight w, evidence e FROM ranking_suspicion WHERE ranking_id = ? ORDER BY member_id, rule_code', [id]);
+    const keysS = seasonKeys(S, 1);
+    const keysB = seasonKeys(B, 1);
+    const hasBase = (keys, m, v) => async () => (await R.hGet(keys.scoreBase, m))?.startsWith(`${v}:`);
+
+    // Q1, Q2: 하드 검증 거부 (SP). 워커 없이 판정된다.
+    const req = 'rq-range';
+    const r1 = [await sub(B, 'x1', 9000, req), await sub(B, 'x1', 9000, req), await sub(B, 'x1', -1)];
+    const rej = (await rows(B)).filter((x) => x.c === 'REJECTED');
+    check('Q1 하드 검증 거부 → REJECTED 근거 (가중치·사유·requestId), 재전송·다른 거부도 한 행', r1.join() === '1105,1105,1105' && rej.length === 1
+        && rej[0].m === 'x1' && rej[0].w === 10 && rej[0].e.reason === 'SCORE_RANGE' && rej[0].e.requestId === req && rej[0].e.inputValue === 9000, `(${r1}, ${JSON.stringify(rej)})`);
+    const r2 = [await sub(S, 'x2', 9000), await sub(OFF, 'x3', 9000)];
+    const sumRej = (await rows(S)).filter((x) => x.c === 'REJECTED');
+    check('Q2 SUM 결과 score_max 초과(1107)도 근거, 설정 NULL 랭킹은 적재 안 함', r2.join() === '1107,1105' && sumRej.length === 1 && sumRej[0].e.reason === 'SCORE_MAX' && (await rows(OFF)).length === 0,
+        `(${r2}, ${JSON.stringify(sumRej)})`);
+
+    // 재구축(L3)은 탐지하지 않으므로 센티넬이 선 뒤에 바탕을 제출한다: s0~s9가 1~10점 (SUM), 기록 100 (BEST)
+    startWorker('tsus');
+    await until(async () => await R.exists(keysS.ready) === 1 && await R.exists(keysB.ready) === 1, 20000);
+    for (let i = 0; i < 10; i++)
+        await sub(S, `s${i}`, i + 1);
+    await sub(B, 'b1', 100);
+    // SUM 첫 행의 점수 기준선은 0점이다 (VELOCITY)
+    const based = await until(async () => await hasBase(keysS, 's9', 0)() && await hasBase(keysB, 'b1', 100)() && (await R.hGet(keysS.rankBase, 's0')) !== null, 20000);
+    check('Q3 첫 관측: 기준선만 세우고 근거 없음 (BEST에는 VELOCITY 미적용)', based >= 0 && (await rows(S)).length === 1 && (await rows(B)).length === 1,
+        `(${based}ms, S ${(await rows(S)).length}, B ${(await rows(B)).length})`);
+
+    // Q4 VELOCITY: 첫 행(version 1)은 0점 기준 → 50 + 60 = 110 > 100
+    await sub(S, 'v1', 50);
+    await until(hasBase(keysS, 'v1', 0));
+    await sub(S, 'v1', 60);
+    const velo = await until(async () => (await rows(S)).some((x) => x.m === 'v1' && x.c === 'VELOCITY'));
+    const v = (await rows(S)).find((x) => x.m === 'v1' && x.c === 'VELOCITY');
+    check('Q4 VELOCITY: 첫 행부터 1시간 안 증가 110 > 100', velo >= 0 && v.w === 30 && v.e.fromScore === 0 && v.e.toScore === 110, `(${velo}ms, ${JSON.stringify(v?.e)})`);
+
+    // Q5 기준선만 사라진 기존 멤버: 0점 기준으로 보지 않는다 (s5 6점 → +200)
+    await R.hDel(keysS.scoreBase, 's5');
+    await sub(S, 's5', 200);
+    const rebased = await until(hasBase(keysS, 's5', 206));
+    await sleep(1500);
+    check('Q5 기준선 유실 멤버(version > 1)는 VELOCITY로 잡지 않고 기준선을 다시 세움', rebased >= 0 && !(await rows(S)).some((x) => x.m === 's5' && x.c === 'VELOCITY'), `(${rebased}ms)`);
+
+    // Q6 RANK_JUMP: j1이 1점(최하위권)으로 관측된 뒤 +50 → 1위권. 증가 51은 VELOCITY 아래
+    await sub(S, 'j1', 1);
+    await until(async () => (await R.hGet(keysS.rankBase, 'j1')) !== null);
+    const from = Number((await R.hGet(keysS.rankBase, 'j1')).split(':')[0]);
+    await sub(S, 'j1', 50);
+    const jumped = await until(async () => (await rows(S)).some((x) => x.m === 'j1' && x.c === 'RANK_JUMP'));
+    const j = (await rows(S)).filter((x) => x.m === 'j1');
+    check('Q6 RANK_JUMP: 기준선 순위에서 3 이상 상승 (VELOCITY 아님)', jumped >= 0 && j.length === 1 && j[0].w === 40 && j[0].e.fromRank === from + 1 && j[0].e.toRank < from + 1 - 3,
+        `(${jumped}ms, ${JSON.stringify(j.map((x) => x.e))})`);
+
+    // Q7 BEST_JUMP: 100 → 400(4배, 아님) → 2000(5배)
+    await sub(B, 'b1', 400);
+    await until(hasBase(keysB, 'b1', 400));
+    const before = (await rows(B)).filter((x) => x.c === 'BEST_JUMP').length;
+    await sub(B, 'b1', 2000);
+    const bj = await until(async () => (await rows(B)).some((x) => x.c === 'BEST_JUMP'));
+    const b = (await rows(B)).find((x) => x.c === 'BEST_JUMP');
+    check('Q7 BEST_JUMP: 마지막으로 본 기록의 5배 이상만 (4배는 아님)', before === 0 && bj >= 0 && b.e.fromScore === 400 && b.e.toScore === 2000 && !(await rows(B)).some((x) => x.c === 'VELOCITY'),
+        `(${bj}ms, ${JSON.stringify(b?.e)})`);
+}
+
 // ------------------------------------------------------------------------------------------------ 실행
 
 /** 구간 하나의 제한 시간. 넘으면 멈춘 것으로 보고 전체를 중단한다 — 결과를 영영 기다리지 않게 한다 */
@@ -2977,7 +3059,7 @@ try {
     for (let i = 1; i <= times; i++) {
         console.log(`\n${clock()} === run ${i} ===`);
         for (const [name, fn] of [['복구 시나리오', recoveryScenarios], ['락 대기 제한', lockWait], ['API 경유', apiScenarios], ['시즌 스케줄러', schedulerScenarios], ['정산', settlementScenarios], ['보상 전달', deliveryScenarios], ['로그 정리', logCleanupScenarios], ['시즌 백업 분리', archiveScenarios],
-            ['관리 API', adminScenarios], ['관리 랭킹', rankingAdminScenarios], ['관리 제재', exclusionAdminScenarios], ['관리 검수', reviewAdminScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
+            ['관리 API', adminScenarios], ['관리 랭킹', rankingAdminScenarios], ['관리 제재', exclusionAdminScenarios], ['관리 검수', reviewAdminScenarios], ['소프트 탐지', suspicionScenarios], ['장애 주입 API', apiFaults], ['장애 주입 워커', workerFaults]].filter(([name]) => !ONLY || name.includes(ONLY))) {
             where = `run ${i} / ${name}`;
             sectionAt = Date.now();
             console.log(`${clock()} -- ${name} 시작`);

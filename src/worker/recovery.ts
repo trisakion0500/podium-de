@@ -10,6 +10,7 @@ import {
     removeExclusions, seasonKeys, writeRebuild, type Redis, type SeasonKeys,
 } from '../core/redis.js';
 import { startJob, type JobContext } from './loop.js';
+import { scanSuspicion } from './suspicion.js';
 
 /** 복구 잡 락. 정산의 시즌 키 삭제도 이 락을 잡는다 — 재구축이 삭제 뒤에 센티넬을 되살리지 않게 한다 (D-60) */
 export const RECOVERY_LOCK = 'podium:recovery';
@@ -113,7 +114,7 @@ function reconcileFrom(season: RecoverySeason, redisSyncedAt: number): Date {
 }
 
 /**
- * L2 차분 반영 (01_DESIGN 6.2). 변경분 중 Redis 값과 다른 것만 센티넬 확인 Lua로 다시 쓴다.
+ * L2 차분 반영 (01_DESIGN 6.2). 변경분 중 Redis 값과 다른 것만 센티넬 확인 Lua로 다시 쓴다. 같은 청크로 소프트 탐지도 한다(9.2, D-83).
  * 끝까지 돌면 DB 동기화 시각과 센티넬 값을 이번 주기 시작 DB 시각 T로 옮긴다. 중간에 센티넬이 사라지면(정산, Redis 유실) 멈추고 둘 다 두지 않는다.
  * @param ctx 실행 문맥
  * @param season 시즌
@@ -121,11 +122,13 @@ function reconcileFrom(season: RecoverySeason, redisSyncedAt: number): Date {
  * @param keys 시즌 키
  * @param from 이 시각 이후 변경분부터 (안전마진은 여기서 뺀다. epoch면 시즌 전체)
  * @returns 완료 Promise
+ * @modified 2026-11-22 trisakion 소프트 탐지 (D-83)
  */
 async function reconcile(ctx: Context, season: RecoverySeason, rule: RankingRule, keys: SeasonKeys, from: Date): Promise<void> {
     const mode = applyMode(rule);
     let scanned = 0;
     let fixed = 0;
+    let suspected = 0;
     for await (const rows of scanChanged(ctx, season, scanFrom(from))) {
         scanned += rows.length;
         const items = toItems(rule, season, rows);
@@ -141,7 +144,11 @@ async function reconcile(ctx: Context, season: RecoverySeason, rule: RankingRule
             return;
         }
         fixed += results.filter((r) => r > 0).length;
+        // 반영한 뒤에 순위를 읽는다. 보조 점검의 전체 스캔(epoch부터)도 여기를 지나 기준선이 없는 멤버의 기준선을 세운다.
+        suspected += await scanSuspicion(ctx.conn, ctx.redis, season, rule, keys, rows);
     }
+    if (suspected > 0)
+        logger.info(`suspicion recorded ranking=${season.rankingId} season=${season.seasonNo} count=${suspected}`);
     await markSynced(ctx.redis, keys, season.dbNow);
     await saveJobState(ctx, 'reconciler', season, season.dbNow);
     if (fixed > 0)
