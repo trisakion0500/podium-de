@@ -9,7 +9,7 @@ SP를 새로 만들거나 기존 SP에 테이블 쓰기를 추가할 때 먼저 
 | 2 | `ranking_reward_tier` | 설정 |
 | 3 | `ranking_season` | 상태 전이는 조건부 UPDATE |
 | 4 | `ranking_exclusion` | 제재 등록·해제. 등록·해제 SP는 시즌 행을 먼저 공유 잠금한다 |
-| 5 | `ranking_suspicion` | 어뷰징 포인트 |
+| 5 | `ranking_suspicion` | 어뷰징 포인트. 제출 SP의 거부 근거(`REJECTED`)는 거부를 커밋한 뒤 단독 자동 커밋으로 넣어 이 순서의 대상이 아니다 ([D-83](../docs/02_DECISIONS.md#d-83)) |
 | 6 | `ranking_submit_key` | 제출: 멱등 키를 entry보다 먼저 기록해 같은 requestId 동시 요청을 키 충돌로 직렬화한다 |
 | 7 | `ranking_entry` | 스코어와 정산 결과 |
 | 8 | `ranking_entry_settling` | 정산 작업 테이블. 가순위 UPDATE만 쓴다 |

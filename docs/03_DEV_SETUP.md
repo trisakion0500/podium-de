@@ -163,8 +163,8 @@ API·워커·관리 API는 기동 시 DB 스키마가 패키지와 같은지 확
 
 | 대상 | 명령 | 1회 소요 |
 | --- | --- | --- |
-| 전체 3회 (커밋 전) | `Remove-Item Env:ONLY -ErrorAction Ignore; node tests/recovery.mjs` | 약 3분 15초 (3회 약 10분) |
-| 전체 1회 | `Remove-Item Env:ONLY -ErrorAction Ignore; node tests/recovery.mjs 1` | 약 3분 15초 |
+| 전체 3회 (커밋 전) | `Remove-Item Env:ONLY -ErrorAction Ignore; node tests/recovery.mjs` | 약 3분 40초 (3회 약 11분) |
+| 전체 1회 | `Remove-Item Env:ONLY -ErrorAction Ignore; node tests/recovery.mjs 1` | 약 3분 40초 |
 | 복구 시나리오 (S) | `$env:ONLY='복구'; node tests/recovery.mjs 1` | 49초 |
 | 락 대기 제한 (L) | `$env:ONLY='락 대기'; node tests/recovery.mjs 1` | 6초 |
 | API 경유 (A) | `$env:ONLY='API 경유'; node tests/recovery.mjs 1` | 6초 |
@@ -207,7 +207,7 @@ PASS J6 시즌 제재 해제: SREM, 원장 값(재제출 7999)으로 바로 재�
 | `시즌 제재 해제: ...` | 이 항목이 확인하는 것 (기대 결과) |
 | `( ... )` | 실제로 나온 값. 결과 코드·HTTP 상태, 건수, 걸린 시간(ms) 등. FAIL이면 여기를 기대 결과와 비교한다 |
 
-마지막 줄 `523/523 passed`는 통과 수/전체 수다. 3회 반복이면 회마다 센 수를 합친 값이다. 바로 앞의 `테스트 항목 문서(...)가 테스트와 일치`는 항목 번호나 문구를 고친 뒤 [08_TEST_CASES](08_TEST_CASES.md)를 다시 만들지 않으면 FAIL이다. `node tests/cases-doc.mjs`로 다시 만든다.
+마지막 줄 `590/590 passed`는 통과 수/전체 수다. 3회 반복이면 회마다 센 수를 합친 값이다. 바로 앞의 `테스트 항목 문서(...)가 테스트와 일치`는 항목 번호나 문구를 고친 뒤 [08_TEST_CASES](08_TEST_CASES.md)를 다시 만들지 않으면 FAIL이다. `node tests/cases-doc.mjs`로 다시 만든다.
 
 **FAIL이 나오면**
 

@@ -331,7 +331,7 @@ flowchart LR
 | 단계 | 3절 구간 | 데이터 이동 |
 | --- | --- | --- |
 | ① | 등록 | 관리자 입력(관리 API) → `ranking_definition`, `ranking_reward_tier`. 워커 스케줄러가 정의로부터 `ranking_season` 행과 시즌 파티션 생성 |
-| ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 인증·형식 검사를 통과한 제출의 결과는 모두 로그 DB `log_ranking_submit`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 근거를 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
+| ② | 시즌 진행 | 제출 → `ranking_entry`, `ranking_submit_key` → Redis. 인증·형식 검사를 통과한 제출의 결과는 모두 로그 DB `log_ranking_submit`에 따로 남는다. 리컨실러가 `ranking_entry` 변경분을 Redis에 다시 맞추고 `ranking_suspicion`에 소프트 탐지 근거를 쌓는다. 하드 검증 거부 근거는 제출 SP가 쌓는다. 제재(`ranking_exclusion`) 대상은 Redis에서 빠진다 |
 | ③ | 마감과 정산 | `ranking_entry` 파티션을 `ranking_entry_settling`으로 꺼내(EXCHANGE) `final_rank` 가순위를 매기고 같은 파티션으로 되돌린다(EXCHANGE). 행 복사 없음. Redis 시즌 키 삭제 |
 | ④ | 검수와 확정 | `ranking_exclusion`으로 제외·재순위, `ranking_reward_tier` → `ranking_season.tier_snapshot` → `ranking_entry.reward_code`, 어뷰징 포인트순 검수 목록, 상위 N → `ranking_season_top` |
 | ⑤ | 보상 전달 | `ranking_entry` PENDING → 게임 서버 → ack로 DELIVERED. 남은 대상이 0이면 워커 전달 잡이 SETTLED로 넘긴다 ([D-70](02_DECISIONS.md#d-70)). 결과는 `ranking_entry`, Top N은 `ranking_season_top`에서 조회한다 |
