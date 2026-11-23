@@ -4,17 +4,18 @@ CREATE PROCEDURE `SP_UPDATE_REWARD_DELIVERED` (
     IN i_ranking_id    INT UNSIGNED,    -- 랭킹 ID (1 이상)
     IN i_season_no     INT UNSIGNED,    -- 시즌 번호 (1 이상)
     IN i_member_ids    JSON             -- 우편 발송에 성공한 member_id 문자열 배열 (1~1000개)
-) COMMENT '보상 전달 ack: PENDING이고 보류가 아닌 행만 DELIVERED로 (멱등), 반영되지 않은 member_id 반환'
+) COMMENT '보상 전달 ack: PENDING 행만 DELIVERED로 (멱등), 반영되지 않은 member_id 반환'
 BEGIN
     -- ------------------------------------------------------------------------------------------------------------ --
     -- 명칭 : SP_UPDATE_REWARD_DELIVERED
     -- 작성 : 2026.10.14 trisakion
     -- 수정 : 2026.11.04 trisakion 강제 종료한 시즌의 늦은 ack 설명 (동작 변경 없음, D-82)
+    --        2026.11.23 trisakion reward_held 조건 제거 (항상 0, D-77)
     -- 내용 : POST /v1/rankings/{id}/seasons/{n}/rewards/ack (01_DESIGN 7.7).
     --        RESULT: 0 성공, 1001 파라미터, 1002 시즌 없음, 1003 아직 DELIVERING 전 [codes.SpResult]
-    --        성공 데이터: 반영되지 않은 member_id (보류, REJECTED, 보상 없음, 시즌에 없음). 0행이면 전부 반영
+    --        성공 데이터: 반영되지 않은 member_id (REJECTED, 보상 없음, 시즌에 없음). 0행이면 전부 반영
     --
-    --        - 조건부 UPDATE(reward_status = 1, reward_held = 0)라 재시도해도 DELIVERED 행은 다시 바뀌지 않고
+    --        - 조건부 UPDATE(reward_status = 1)라 재시도해도 DELIVERED 행은 다시 바뀌지 않고
     --          delivered_at도 처음 ack 시각 그대로다. 이미 DELIVERED인 행은 성공으로 보고 반환 목록에 넣지 않는다.
     --        - DELIVERING 전에는 FINALIZING이 reward_status를 다시 쓰는 중일 수 있어 거부한다. DELIVERING은 되돌아가지
     --          않으므로 상태를 먼저 읽고 갱신해도 된다. SETTLED의 재시도 ack는 성공이다. 강제 종료한 시즌의 늦은 ack는
@@ -60,7 +61,7 @@ BEGIN
           JOIN JSON_TABLE(i_member_ids, '$[*]' COLUMNS (member_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PATH '$')) j
             ON e.member_id = j.member_id
            SET e.reward_status = 2, e.delivered_at = v_now
-         WHERE e.ranking_id = i_ranking_id AND e.season_no = i_season_no AND e.reward_status = 1 AND e.reward_held = 0;
+         WHERE e.ranking_id = i_ranking_id AND e.season_no = i_season_no AND e.reward_status = 1;
         COMMIT;
 
         SELECT 0 AS RESULT;

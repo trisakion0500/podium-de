@@ -260,7 +260,7 @@ MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 �
   - ✅ 제재 — 반영 Lua 제외 집합, 등록·해제·목록 API, 리컨실러 1분 동기화, 재구축 전 다시 채우기, 검수 전 제재만 확정 제외·검수 후 제재는 표시만 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
   - ✅ 검수·전달 조작 — 검수 보류·해제·조기 확정, 장기 보류 알림, 포인트순 검수 목록, 작업 대기 시즌 목록, DELIVERING 강제 종료 ([D-82](docs/02_DECISIONS.md#d-82))
   - ✅ Anti-cheat — 소프트 탐지 4규칙(리컨실러 Redis 기준선, 거부는 제출 SP), 시즌·멤버·규칙당 1회 적재 ([D-76](docs/02_DECISIONS.md#d-76), [D-77](docs/02_DECISIONS.md#d-77), [D-83](docs/02_DECISIONS.md#d-83))
-  - ⬜ 정리 — `reward_held` 조건 제거(SP, 회귀 테스트, 03_DEV_SETUP 문구)
+  - ✅ 정리 — `reward_held` 조건 제거(SP, 회귀 테스트, 03_DEV_SETUP 문구) ([D-77](docs/02_DECISIONS.md#d-77))
   - ⬜ 설치 패키징 — 배포 형태, 설치 절차, 설정 안내
 - ⬜ 7단계: 운영 웹 프론트엔드 (보상 공백 표시 포함, [D-69](docs/02_DECISIONS.md#d-69))
 

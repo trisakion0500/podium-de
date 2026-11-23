@@ -1185,7 +1185,7 @@ async function finalizeEdges() {
 
 /**
  * 결과·Top N·보상 API와 워커 SETTLED 전이를 본다.
- * 시즌 dlv: 10명, 보상 TOP5(1~5위), f2 제재(REJECTED), 확정 뒤 f4 보류 → 전달 대상 f0 f1 f3 f5. dlvEmpty: 빈 시즌. dlvReview: 확정 전.
+ * 시즌 dlv: 10명, 보상 TOP5(1~5위), f2 제재(REJECTED) → 전달 대상 f0 f1 f3 f4 f5. dlvEmpty: 빈 시즌. dlvReview: 확정 전.
  * @returns 없음
  */
 async function deliveryScenarios() {
@@ -1199,7 +1199,6 @@ async function deliveryScenarios() {
         await createReviewSeason(id, 10, [[1, 1, 1, 5, 'TOP5']]);
         await runFinalize(id);
     }
-    await q('UPDATE ranking_entry SET reward_held = 1 WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.dlv, 'f4']);
 
     const mk = async (name, scopes) => {
         const key = randomBytes(32).toString('base64url');
@@ -1253,12 +1252,12 @@ async function deliveryScenarios() {
     }
     const wrongScope = await call(`${s}/rewards`, readKey);
     const listReview = await call(`/v1/rankings/${IDS.dlvReview}/seasons/1/rewards`, rewardKey);
-    check('R4 보상 목록 커서: 보류·제재 제외 f0+f1 / f3+f5 / 빈 페이지, read 키 2003, 확정 전 1003',
-        pages.join(' / ') === 'f0+f1 / f3+f5 / ' && wrongScope.result === 2003 && listReview.result === 1003, `(${pages.join(' / ')})`);
+    check('R4 보상 목록 커서: 제재 제외 f0+f1 / f3+f4 / f5(마지막), read 키 2003, 확정 전 1003',
+        pages.join(' / ') === 'f0+f1 / f3+f4 / f5' && wrongScope.result === 2003 && listReview.result === 1003, `(${pages.join(' / ')})`);
 
     const pending = await call('/v1/rewards/pending', rewardKey);
     const mine = (pending.data?.seasons ?? []).filter((x) => [IDS.dlv, IDS.dlvEmpty].includes(x.rankingId)).map((x) => `${x.rankingId}:${x.remaining}`).sort().join();
-    check('R5 전달 대기 시즌: dlv 남은 4, 빈 시즌 0', mine === [`${IDS.dlv}:4`, `${IDS.dlvEmpty}:0`].sort().join(), `(${mine})`);
+    check('R5 전달 대기 시즌: dlv 남은 5, 빈 시즌 0', mine === [`${IDS.dlv}:5`, `${IDS.dlvEmpty}:0`].sort().join(), `(${mine})`);
 
     const ackBody = { memberIds: ['f0', 'f1', 'f2', 'f4', 'nobody', 'F3'] };
     const ack = await call(`${s}/rewards/ack`, rewardKey, ackBody);
@@ -1269,11 +1268,11 @@ async function deliveryScenarios() {
     const ackReview = await call(`/v1/rankings/${IDS.dlvReview}/seasons/1/rewards/ack`, rewardKey, { memberIds: ['f0'] });
     const tooMany = await call(`${s}/rewards/ack`, rewardKey, { memberIds: Array.from({ length: 1001 }, (_, i) => `m${i}`) });
     const notApplied = (r) => [...(r.data?.notApplied ?? [])].sort().join();
-    check('R6 ack: 보류·제재·없음·대소문자 다른 ID는 notApplied, 재시도 같은 응답·delivered_at 유지, 확정 전 1003, 1001개 2001',
-        notApplied(ack) === 'F3,f2,f4,nobody' && notApplied(replay) === notApplied(ack) && at1 !== null && at1.getTime() === at2.getTime()
+    check('R6 ack: 제재·없음·대소문자 다른 ID는 notApplied, 재시도 같은 응답·delivered_at 유지, 확정 전 1003, 1001개 2001',
+        notApplied(ack) === 'F3,f2,nobody' && notApplied(replay) === notApplied(ack) && at1 !== null && at1.getTime() === at2.getTime()
         && ackReview.result === 1003 && tooMany.result === 2001, `(${notApplied(ack)}, ${ackReview.result}, ${tooMany.result})`);
 
-    // 남은 f3 f5까지 ack → 워커 첫 주기에 두 시즌 SETTLED (보류 f4는 PENDING으로 남는다)
+    // 남은 f3 f5까지 ack → 워커 첫 주기에 두 시즌 SETTLED
     await call(`${s}/rewards/ack`, rewardKey, { memberIds: ['f3', 'f5'] });
     const early = await callSp(A, 'SP_UPDATE_SEASON_SETTLED', [IDS.dlvReview, 1]);
     startWorker('t9');
@@ -1282,9 +1281,8 @@ async function deliveryScenarios() {
         return rows.length === 2 && rows.every((r) => r.status === 8 && r.settled_at !== null);
     }, 30000);
     const after = await call(`${s}/rewards/ack`, rewardKey, { memberIds: ['f0'] });
-    const [{ held }] = await q('SELECT reward_status held FROM ranking_entry WHERE ranking_id = ? AND season_no = 1 AND member_id = ?', [IDS.dlv, 'f4']);
-    check('R7 남은 대상 0 → 워커가 SETTLED (빈 시즌 포함), 보류는 PENDING 유지, SETTLED 뒤 ack 재시도 성공, 확정 전 시즌 전이 1003',
-        settled >= 0 && after.result === 0 && notApplied(after) === '' && held === 1 && early.result === 1003, `(${settled}ms, ${early.result})`);
+    check('R7 남은 대상 0 → 워커가 SETTLED (빈 시즌 포함), SETTLED 뒤 ack 재시도 성공, 확정 전 시즌 전이 1003',
+        settled >= 0 && after.result === 0 && notApplied(after) === '' && early.result === 1003, `(${settled}ms, ${early.result})`);
 
     // 경고 판정 (createDeliveryWatch): 정체 1회, 변화 시 해소, 사라진 시즌은 잊음, 적체 시작·해소 각 1회
     const w = createDeliveryWatch(1000, 2);
