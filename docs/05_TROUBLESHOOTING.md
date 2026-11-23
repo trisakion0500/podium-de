@@ -233,3 +233,9 @@
 - **증상:** `SP_LOG_ARCHIVE_DROP`이 `Incorrect datetime value: '_audit01' for function str_to_date`(1411)로 실패했다(회귀 로그 정리 구간).
 - **원인:** `information_schema.TABLES`를 이름 REGEXP로 거르고 `STR_TO_DATE`로 날짜를 만들었는데, 옵티마이저가 변환식을 거르기보다 먼저 다른 테이블 이름(`log_ddl_audit`)에 적용했다. SP 안의 대입문이라 strict 모드에서 경고가 아니라 오류가 됐다.
 - **해결:** 목록 조회 안에서는 `YYYYMM` 문자열로 비교하고, 고른 값 하나만 따로 날짜로 바꾼다. 시즌 백업 쪽 SP는 이름을 읽지 않고 시즌 행에서 이름을 만들어 맞춘다.
+
+## 2.19 오프라인 패키지 압축 중 Windows tar가 충돌함
+
+- **증상:** `npm run package:offline`이 tar 단계에서 상태 코드 3221225477(`0xC0000005`, 접근 위반)로 실패했다. 출력은 없었다.
+- **원인:** Windows 기본 tar(bsdtar 3.8.9)가 시스템 코드 페이지(CP949)로 표현 못 하는 파일 이름에서 충돌한다. `@fastify/send`의 테스트 폴더 `snow ☃`가 그렇다. `--options hdrcharset=UTF-8`을 줘도 같았다.
+- **해결:** 실행에 쓰지 않는 `node_modules/@fastify/send/test`를 압축에서 뺀다(`scripts/package.mjs`). 의존성을 더한 뒤 같은 충돌이 나면, 패키지 폴더별로 나눠 압축해 원인 경로를 찾고 제외 목록에 더한다 ([D-84](02_DECISIONS.md#d-84)).

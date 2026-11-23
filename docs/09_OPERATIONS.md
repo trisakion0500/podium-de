@@ -29,6 +29,7 @@ API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 
 | 명령 | 설명 |
 |---|---|
 | `npm run package` | 배포 패키지 만들기(개발 환경에서만). 서버에서는 빌드하지 않는다 |
+| `npm run package:offline` | 외부 접속이 안 되는 서버용 패키지 만들기(`node_modules` 포함, 개발 환경에서만) |
 | `npm run migrate` | 대기 중인 테이블·SP 마이그레이션 적용 |
 | `npm run upgrade` | 중단 패치 일괄 실행(중지 → migrate → 기동 → 새 버전 확인) |
 | `npm run credential` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
@@ -37,9 +38,13 @@ API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 
 ## 2. 패키지와 설치
 
 배포 단위는 빌드된 tarball 하나다([D-84](02_DECISIONS.md#d-84)). 서버에서는 빌드하지 않는다.
+**운영 배포는 오프라인 패키지(`npm run package:offline`)를 권장한다.** 서버는 풀기만 하므로 교체·롤백에 외부 접속이 필요 없고,
+`npm ci`가 기존 `node_modules`를 지운 뒤 다운로드에 실패하는 경우가 없다. 기본 패키지는 개발·시험 서버용이다.
 
 패키지 만들기(개발 환경): `npm run package`를 실행하면 `dist/`를 다시 빌드해 `podium-de-<version>.tgz`를 만든다.
 압축 안에는 최상위 폴더가 없다.
+외부 접속이 안 되는 서버용은 `npm run package:offline`이다. 아래 내용에 운영 의존성만 설치한 `node_modules`를 더해
+`podium-de-<version>-offline.tgz`를 만든다(1.0.0 기준 0.19MB → 6.19MB).
 
 | 내용 | 용도 |
 |---|---|
@@ -49,11 +54,58 @@ API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 
 | `package.json`, `package-lock.json` | 버전, 의존성 고정 |
 | `.env.example` | 환경 변수 목록 |
 
+**패키지 확인(개발 환경)** — 의존성(`package-lock.json`)이나 `scripts/package.mjs`가 바뀌었으면 배포 전에 한다.
+회귀 테스트는 개발 환경의 `node_modules`로 돌기 때문에, 서버처럼 빈 폴더에 lock 파일만으로 설치되는지는 따로 확인해야 한다.
+
+```powershell
+npm run package
+$t = "$env:TEMP\podium-pkg-test"
+Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory $t | Out-Null
+tar -xzf podium-de-<version>.tgz -C $t
+Push-Location $t
+npm ci --omit=dev --ignore-scripts   # lock 파일과 package.json이 어긋나면 여기서 실패한다
+Test-Path node_modules\typescript    # False: 개발 의존성이 들어가지 않았다
+npm audit --omit=dev                 # 운영 의존성 취약점
+Pop-Location
+Remove-Item $t -Recurse -Force
+```
+
+| 명령 | 하는 일 | 확인하는 것 |
+|---|---|---|
+| `npm run package` | `dist/`를 지우고 다시 빌드한 뒤 `podium-de-<version>.tgz`를 만든다 | 빌드가 되고, 배포할 파일이 모두 묶인다 |
+| `$t = ...`, `Remove-Item`, `New-Item` | 임시 폴더를 비운 채로 새로 만든다 | 이전 시험의 `node_modules`가 남아 결과를 가리지 않는다 |
+| `tar -xzf ... -C $t` | 서버에서처럼 패키지를 푼다 | 압축이 정상이고, 최상위 폴더 없이 `dist/`, `database/` 등이 바로 풀린다 |
+| `Push-Location $t` | 임시 폴더로 이동한다. 끝나면 `Pop-Location`으로 저장소로 돌아온다 | 저장소의 `node_modules`나 `.env`를 쓰지 않는다 |
+| `npm ci --omit=dev --ignore-scripts` | lock 파일에 적힌 버전 그대로 운영 의존성만 설치한다. `prepare`(husky) 같은 설치 스크립트는 실행하지 않는다 | lock 파일과 `package.json`이 맞는다(어긋나면 실패). 서버에 husky가 없어도 설치된다 |
+| `Test-Path node_modules\typescript` | 개발 의존성이 있는지 본다 | `False`여야 한다. `True`면 `--omit=dev`가 빠졌거나 의존성 분류가 잘못되었다 |
+| `npm audit --omit=dev` | 설치된 운영 의존성의 알려진 취약점을 조회한다 | `found 0 vulnerabilities`. 나오면 갱신 여부를 정한 뒤 배포한다 |
+| `Remove-Item $t ...` | 임시 폴더를 지운다 | — |
+
+이 확인은 설치까지만 본다. migrate와 기동은 회귀 테스트가 확인한다.
+
+오프라인 패키지 확인 — 외부 접속 없이 묶인 모듈만으로 동작하는지 본다. 취약점 조회는 위 `npm audit`로 한다(같은 lock 파일).
+
+```powershell
+npm run package:offline
+$t = "$env:TEMP\podium-pkg-offline"
+Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory $t | Out-Null
+tar -xzf podium-de-<version>-offline.tgz -C $t
+Push-Location $t
+npm ls --omit=dev                    # 설치된 모듈이 lock 파일과 맞는다(어긋나거나 빠지면 오류). 외부 접속 없이 동작한다
+Test-Path node_modules\typescript    # False
+node -e "import('mysql2').then(()=>console.log('mysql2 ok'))"   # 묶인 모듈을 실제로 불러온다
+Pop-Location
+Remove-Item $t -Recurse -Force
+```
+
 **설치 요구사항**
 
 | 항목 | 내용 |
 |---|---|
 | Node.js | 22 이상 |
+| npm 레지스트리 | 기본 패키지는 서버의 `npm ci`가 `registry.npmjs.org`(또는 사내 미러)에서 받는다. 접속이 안 되면 오프라인 패키지를 쓴다 |
 | MySQL 8 | `podium_de`, `podium_de_log` 스키마와 migrate·앱 계정. 권한은 [03_DEV_SETUP 3.1](03_DEV_SETUP.md#31-스키마와-계정-생성)과 같고 호스트만 배포 환경에 맞춘다 |
 | MySQL 서버 설정 | `log_bin_trust_function_creators = 1` ([D-80](02_DECISIONS.md#d-80)). `table_open_cache`, `table_definition_cache`, `open_files_limit`는 예상 백업 테이블 수에 맞춘다 ([01_DESIGN 8.3](01_DESIGN.md#s-8-3)) |
 | Redis | 축출 정책 `noeviction` ([05_TROUBLESHOOTING 2.10](05_TROUBLESHOOTING.md#210-redis-축출-정책이-순위표를-조용히-지움)) |
@@ -74,15 +126,19 @@ npm run credential -- create <이름> write,read,reward
 # pm2 등록은 4절 설정 예시, 확인은 GET /health
 ```
 
+오프라인 패키지는 `npm ci` 줄을 건너뛴다.
+
 **패키지 교체**
 
 1. 설치 폴더에서 `dist/`를 지우고 새 패키지를 푼다. `.env`와 `logs/`는 패키지에 없어 그대로 남는다.
    `config/log4js.json`은 덮어쓰므로, 고쳐 쓰고 있었다면 다시 반영한다.
+   오프라인 패키지는 `node_modules/`도 지운 뒤 푼다. 지우지 않고 덮으면 빠진 패키지가 남는다.
 2. `package-lock.json`이 바뀌었으면 `npm ci --omit=dev --ignore-scripts`를 실행한다.
    `npm ci`는 `node_modules`를 지우고 다시 만들므로, 실행 중인 프로세스가 있으면 중단 패치(`npm run upgrade`)로 배포한다.
+   오프라인 패키지는 건너뛴다.
 3. DB 변경이 있으면 `npm run upgrade`, 없으면 `pm2 reload`
 
-롤백은 이전 패키지로 같은 절차를 밟는다. DB 변경이 있는 패키지는 되돌릴 수 없다(6절, 버전 검사).
+롤백은 이전 패키지로 같은 절차를 밟는다. 그래서 이전 패키지는 지우지 않고 보관한다. DB 변경이 있는 패키지는 되돌릴 수 없다(6절, 버전 검사).
 
 ## 3. 배포
 

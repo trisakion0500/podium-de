@@ -10,6 +10,7 @@
         "prepare": "husky",
         "build": "tsc",
         "package": "node scripts/package.mjs",
+        "package:offline": "node scripts/package.mjs --offline",
         "migrate": "node dist/migrate.js",
         "start:api": "node dist/api.js",
         "start:worker": "node dist/worker.js",
@@ -22,7 +23,7 @@
         "@fastify/swagger": "9.9.1",
         "@fastify/swagger-ui": "6.1.1",
         "ajv": "8.20.0",
-        "fastify": "5.12.5",
+        "fastify": "5.12.8",
         "log4js": "6.9.1",
         "mysql2": "3.24.5",
         "redis": "5.12.1"
