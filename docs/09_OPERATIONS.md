@@ -1,6 +1,6 @@
 # 운영·배포
 
-설치본을 띄우고, 배포하고, 마이그레이션하는 방법이다. 왜 이렇게 했는지는 [01_DESIGN 11.3\~11.6](01_DESIGN.md#s-11-3), 로컬 개발 환경은 [03_DEV_SETUP](03_DEV_SETUP.md)을 본다.
+설치본을 띄우고, 배포하고, 마이그레이션하는 방법이다. 왜 이렇게 했는지는 [01_DESIGN 11.3\~11.6](01_DESIGN.md#s-11-3)과 [D-84](02_DECISIONS.md#d-84), 로컬 개발 환경은 [03_DEV_SETUP](03_DEV_SETUP.md)을 본다.
 
 ## 1. 프로세스
 
@@ -28,13 +28,63 @@ API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 
 
 | 명령 | 설명 |
 |---|---|
-| `npm run build` | TypeScript 컴파일(`dist/`) |
+| `npm run package` | 배포 패키지 만들기(개발 환경에서만). 서버에서는 빌드하지 않는다 |
 | `npm run migrate` | 대기 중인 테이블·SP 마이그레이션 적용 |
 | `npm run upgrade` | 중단 패치 일괄 실행(중지 → migrate → 기동 → 새 버전 확인) |
 | `npm run credential` | API 키 발급·폐기·목록 (`create <이름> write,read,reward` / `revoke <ID>` / `list [--all]`). migrate 계정 사용, 키는 발급 때 한 번만 표시 |
 | `npm run admin` | 관리 계정 CLI (`create --login-id <아이디> --name <이름>` / `reset-password --login-id <아이디>`). migrate 계정 사용, 초기 비밀번호는 한 번만 표시 |
 
-## 2. 배포
+## 2. 패키지와 설치
+
+배포 단위는 빌드된 tarball 하나다([D-84](02_DECISIONS.md#d-84)). 서버에서는 빌드하지 않는다.
+
+패키지 만들기(개발 환경): `npm run package`를 실행하면 `dist/`를 다시 빌드해 `podium-de-<version>.tgz`를 만든다.
+압축 안에는 최상위 폴더가 없다.
+
+| 내용 | 용도 |
+|---|---|
+| `dist/` | 실행 파일 |
+| `database/`, `database_log/` | 마이그레이션 파일 |
+| `config/log4js.json` | 로깅 설정 |
+| `package.json`, `package-lock.json` | 버전, 의존성 고정 |
+| `.env.example` | 환경 변수 목록 |
+
+**설치 요구사항**
+
+| 항목 | 내용 |
+|---|---|
+| Node.js | 22 이상 |
+| MySQL 8 | `podium_de`, `podium_de_log` 스키마와 migrate·앱 계정. 권한은 [03_DEV_SETUP 3.1](03_DEV_SETUP.md#31-스키마와-계정-생성)과 같고 호스트만 배포 환경에 맞춘다 |
+| MySQL 서버 설정 | `log_bin_trust_function_creators = 1` ([D-80](02_DECISIONS.md#d-80)). `table_open_cache`, `table_definition_cache`, `open_files_limit`는 예상 백업 테이블 수에 맞춘다 ([01_DESIGN 8.3](01_DESIGN.md#s-8-3)) |
+| Redis | 축출 정책 `noeviction` ([05_TROUBLESHOOTING 2.10](05_TROUBLESHOOTING.md#210-redis-축출-정책이-순위표를-조용히-지움)) |
+
+> **migrate 계정을 지우거나 이름을 바꾸지 않는다.** 모든 SP의 DEFINER가 migrate 계정이라,
+> 계정이 없으면 앱의 모든 SP 호출이 1449(`The user specified as a definer does not exist`)로 실패한다.
+> 비밀번호는 바꿔도 된다.
+
+**최초 설치**
+
+```bash
+mkdir podium && tar -xzf podium-de-<version>.tgz -C podium && cd podium
+npm ci --omit=dev --ignore-scripts   # prepare(husky)를 건너뛴다
+cp .env.example .env                 # 또는 프로세스 환경 변수로 주입(.env는 있으면 읽는다)
+npm run migrate
+npm run admin -- create --login-id <아이디> --name <이름>
+npm run credential -- create <이름> write,read,reward
+# pm2 등록은 4절 설정 예시, 확인은 GET /health
+```
+
+**패키지 교체**
+
+1. 설치 폴더에서 `dist/`를 지우고 새 패키지를 푼다. `.env`와 `logs/`는 패키지에 없어 그대로 남는다.
+   `config/log4js.json`은 덮어쓰므로, 고쳐 쓰고 있었다면 다시 반영한다.
+2. `package-lock.json`이 바뀌었으면 `npm ci --omit=dev --ignore-scripts`를 실행한다.
+   `npm ci`는 `node_modules`를 지우고 다시 만들므로, 실행 중인 프로세스가 있으면 중단 패치(`npm run upgrade`)로 배포한다.
+3. DB 변경이 있으면 `npm run upgrade`, 없으면 `pm2 reload`
+
+롤백은 이전 패키지로 같은 절차를 밟는다. DB 변경이 있는 패키지는 되돌릴 수 없다(6절, 버전 검사).
+
+## 3. 배포
 
 | 배포 유형 | 조건 | 방식 |
 |---|---|---|
@@ -45,7 +95,7 @@ API와 워커 대수는 따로 정한다. API는 처리량에 맞춰 늘린다. 
 > 새 인스턴스가 스키마 불일치로 기동을 거부해도 pm2는 `--listen-timeout`이 지나면 구버전을
 > 내리고, 모든 인스턴스가 errored가 되어 전체가 중단된다(아래 실험 결과).
 
-롤링 절차 (DB 변경 없음): 새 패키지 설치 후 `npm run build` → `pm2 reload podium-api podium-worker`.
+롤링 절차 (DB 변경 없음): 새 패키지 설치(2절) → `pm2 reload podium-api podium-worker`.
 API·워커는 기동 확인(하트비트 기록, 스키마 확인)을 통과한 뒤(API는 listen 성공 후) pm2에 `ready`를
 보내고, pm2는 `--wait-ready`로 이를 기다린 뒤 구버전을 내린다. 로드밸런서 헬스체크는 `GET /health`를
 쓴다(기동 확인을 통과해 떠 있으면 200).
@@ -57,9 +107,9 @@ API·워커는 기동 확인(하트비트 기록, 스키마 확인)을 통과한
 
 실수로 reload했다면 이전 패키지로 되돌려 `pm2 reload`하거나, 새 패키지로 `npm run upgrade`를 실행한다.
 
-## 3. 중단 패치 (`npm run upgrade`)
+## 4. 중단 패치 (`npm run upgrade`)
 
-1. 새 패키지 설치 후 `npm run build`
+1. 새 패키지 설치(2절)
 2. `npm run upgrade` — 아래 단계를 차례로 실행하고, 각 단계 결과와 명령 출력·종료 코드를 출력한다.
    하나라도 실패하면 거기서 멈추고 종료 코드 1로 끝난다.
 
@@ -106,7 +156,7 @@ UPGRADE_EXPECT_WORKER=1
 
 upgrade 없이 수동으로 할 때는 전체 프로세스 중지 → `npm run migrate` → API·워커 기동 순서로 한다.
 
-## 4. 하트비트와 migrate 거부
+## 5. 하트비트와 migrate 거부
 
 API·워커·관리 API는 실행 중 10초마다 `instance_heartbeat`에 하트비트를 남기고, 정상 종료 시 자기 행을
 지운다. 인스턴스 ID는 기동마다 새로 만드는 UUID이고, 마지막 하트비트에서 1시간이 지난 행은
@@ -126,7 +176,7 @@ migrate가 하트비트로 거부되면
 기동과 migrate는 같은 락 안에서 확인하고 기동은 락보다 하트비트를 먼저 기록하므로, migrate 도중에
 구버전 패키지를 기동해도 락을 기다렸다가 새 스키마와 달라 거부된다.
 
-## 5. 마이그레이션 규칙
+## 6. 마이그레이션 규칙
 
 - 테이블: `database/tables`의 버전 파일. 파일 하나에 DDL 구문 하나만 두며, 적용된 파일은 수정하지 않고 새 버전 파일을 추가한다.
 - Function: `database/functions`의 파일. SP와 같은 규칙이며 SP보다 먼저 적용된다. binlog가 켜진 MySQL은 `log_bin_trust_function_creators = 1`이 필요하다([D-80](02_DECISIONS.md#d-80)).

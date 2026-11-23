@@ -26,6 +26,7 @@
 | `worker startup failed` | 워커가 기동 시 랭킹 정의를 읽지 못했다 | DB 연결과 `SP_LIST_RANKING_DEFINITION` 적용 여부 확인. 워커가 없으면 새 시즌 센티넬이 생기지 않아 조회가 계속 2007이다 |
 | `no active api credential — all requests will be rejected` | 활성 API 키가 없다 | `npm run credential -- create <이름> <권한>` |
 | `ER_BINLOG_CREATE_ROUTINE_NEED_SUPER` (1419, migrate가 `CREATE FUNCTION`에서 멈춤) | binlog가 켜진 MySQL에서 `log_bin_trust_function_creators = 0` | root로 `SET PERSIST log_bin_trust_function_creators = 1;` 후 다시 migrate ([D-80](02_DECISIONS.md#d-80)) |
+| `ER_NO_SUCH_USER` (1449, 모든 SP 호출 실패) | SP DEFINER인 migrate 계정이 지워졌거나 호스트가 바뀌었다 | 같은 이름·호스트로 migrate 계정과 권한을 다시 만든다 ([09_OPERATIONS 2](09_OPERATIONS.md#2-패키지와-설치)) |
 | `admin listening ... (ADMIN_ORIGINS empty: browser writes are rejected)` | 허용 Origin이 비어 있다 | 운영 화면 주소를 `ADMIN_ORIGINS`에 넣는다. curl·CLI처럼 Origin이 없는 호출은 그대로 된다 |
 | upgrade `[2/5 wait stop] ... 멈추지 않았습니다` | 중지 명령 후에도 하트비트가 남았다 | 남은 인스턴스를 확인해 중지. 비정상 종료면 30초 뒤 재실행 |
 

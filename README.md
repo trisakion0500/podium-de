@@ -162,7 +162,7 @@ API, 워커, 관리 API는 같은 코드베이스의 별도 엔트리다. 테이
 | [06_LOAD_TEST.md](docs/06_LOAD_TEST.md) | 부하 테스트 결과 보고서 (처리량, 지연, 병목, 재현 방법) |
 | [07_K6_LOAD_TEST.md](docs/07_K6_LOAD_TEST.md) | k6 부하 테스트 결과와 따라 하기 (설치, 실행, 결과 해석, 정리) |
 | [08_TEST_CASES.md](docs/08_TEST_CASES.md) | 회귀 테스트 항목 번호별 설명 (tests/cases-doc.mjs가 생성) |
-| [09_OPERATIONS.md](docs/09_OPERATIONS.md) | 운영·배포 (프로세스와 대수, 중단 패치·롤링, upgrade, migrate 거부 대응, 마이그레이션 규칙) |
+| [09_OPERATIONS.md](docs/09_OPERATIONS.md) | 운영·배포 (프로세스와 대수, 패키지와 설치, 중단 패치·롤링, upgrade, migrate 거부 대응, 마이그레이션 규칙) |
 
 ---
 
@@ -179,6 +179,7 @@ podiumDE/
 ├── database/            # 메인 DB: tables(버전 마이그레이션), functions·procedures(반복 마이그레이션), TABLE_LOCK_ORDER.md
 ├── database_log/        # 로그 DB(podium_de_log), database/와 같은 규칙
 ├── config/log4js.json   # 로깅 설정(재빌드 없이 파일만 수정하면 반영)
+├── scripts/package.mjs  # 배포 패키지 생성(npm run package, D-84)
 ├── loadtest/            # 부하 테스트 스크립트(로컬 전용, docs/06·07)
 ├── tests/               # 회귀 테스트 recovery.mjs, 항목 문서 생성 cases-doc.mjs(로컬 전용, docs/03 4.4·08)
 └── docs/                # 문서(위 목록)
@@ -188,7 +189,7 @@ podiumDE/
 
 ## 실행 방법
 
-최초 설치
+최초 설치 (개발 환경)
 
 ```bash
 npm install
@@ -201,6 +202,10 @@ npm run credential -- create <이름> write,read,reward      # 게임 서버용 
 
 MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 먼저 만들어 둔다. 상세 절차는
 [`docs/03_DEV_SETUP.md`](docs/03_DEV_SETUP.md).
+
+운영 서버에는 빌드된 패키지(`npm run package` → `podium-de-<version>.tgz`)를 풀고
+`npm ci --omit=dev --ignore-scripts`만 실행한다. 서버에서는 빌드하지 않는다
+([D-84](docs/02_DECISIONS.md#d-84), 설치 요구사항·절차는 [09_OPERATIONS 2](docs/09_OPERATIONS.md#2-패키지와-설치)).
 
 상시 실행 프로세스는 세 가지다.
 
@@ -254,14 +259,14 @@ MySQL에 `podium_de`, `podium_de_log` 스키마와 두 계정(migrate, 앱)을 �
 - ✅ 5단계: 아카이브 로테이션
   - ✅ 시즌 백업 테이블 로테이션 — SETTLED 시즌 파티션 분리(1시간 주기), 백업 COMMENT(코드·기간), `history_retention` 지난 백업 경고, 정체 감시 ([D-73](docs/02_DECISIONS.md#d-73))
   - ✅ 로그 DB 월 테이블 아카이브 — 일 파티션 EXCHANGE 두 번(복사 없음, 중단 후 이어서), `LOG_ARCHIVE_MONTHS` 후 월 테이블 삭제 ([D-72](docs/02_DECISIONS.md#d-72))
-- ⬜ 6단계: Anti-cheat, 운영 도구, 설치 패키징
+- ✅ 6단계: Anti-cheat, 운영 도구, 설치 패키징
   - ✅ 관리 API 기반 — `start:admin` 프로세스, 계정·세션·감사 로그, 로그인·비밀번호 변경·잠금, 첫 admin CLI, 역할 확인 ([D-74](docs/02_DECISIONS.md#d-74), [D-80](docs/02_DECISIONS.md#d-80))
   - ✅ 랭킹 등록·수정 — 등록 검증(비트 예산, 일정 시험 계산, 정산 기간, 보상 구간), 묶음별 수정, 늘리기·줄이기·조기 종료·ENDED·PAUSED, 스케줄러 락 직렬화, 현재 시즌 캐시 30초 상한 ([D-79](docs/02_DECISIONS.md#d-79), [D-81](docs/02_DECISIONS.md#d-81))
   - ✅ 제재 — 반영 Lua 제외 집합, 등록·해제·목록 API, 리컨실러 1분 동기화, 재구축 전 다시 채우기, 검수 전 제재만 확정 제외·검수 후 제재는 표시만 ([D-75](docs/02_DECISIONS.md#d-75), [D-78](docs/02_DECISIONS.md#d-78))
   - ✅ 검수·전달 조작 — 검수 보류·해제·조기 확정, 장기 보류 알림, 포인트순 검수 목록, 작업 대기 시즌 목록, DELIVERING 강제 종료 ([D-82](docs/02_DECISIONS.md#d-82))
   - ✅ Anti-cheat — 소프트 탐지 4규칙(리컨실러 Redis 기준선, 거부는 제출 SP), 시즌·멤버·규칙당 1회 적재 ([D-76](docs/02_DECISIONS.md#d-76), [D-77](docs/02_DECISIONS.md#d-77), [D-83](docs/02_DECISIONS.md#d-83))
   - ✅ 정리 — `reward_held` 조건 제거(SP, 회귀 테스트, 03_DEV_SETUP 문구) ([D-77](docs/02_DECISIONS.md#d-77))
-  - ⬜ 설치 패키징 — 배포 형태, 설치 절차, 설정 안내
+  - ✅ 설치 패키징 — 빌드된 tarball(`npm run package`), 서버는 `npm ci --omit=dev`만, 설치 요구사항·DEFINER 계정 경고 ([D-84](docs/02_DECISIONS.md#d-84))
 - ⬜ 7단계: 운영 웹 프론트엔드 (보상 공백 표시 포함, [D-69](docs/02_DECISIONS.md#d-69))
 
 ---

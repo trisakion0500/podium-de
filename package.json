@@ -9,6 +9,7 @@
     "scripts": {
         "prepare": "husky",
         "build": "tsc",
+        "package": "node scripts/package.mjs",
         "migrate": "node dist/migrate.js",
         "start:api": "node dist/api.js",
         "start:worker": "node dist/worker.js",
